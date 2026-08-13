@@ -2,7 +2,7 @@ import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage, validateVault } from "../src/background"
-import { ACTIVE_JOB_STORAGE_KEY, STORE_INDEX_KEY, type AccountVault } from "../src/lib/accounts"
+import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, STORE_INDEX_KEY, type AccountVault } from "../src/lib/accounts"
 
 function storageArea(values: Record<string, unknown>) {
   return {
@@ -95,6 +95,7 @@ describe("Accounts background workflow", () => {
     await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
     expect(update).toHaveBeenCalledWith(91, { url: vault.stores[0].storeUrl })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
   })
 
   it("serializes simultaneous starts and exposes focus and cancel controls", async () => {
@@ -245,5 +246,47 @@ describe("Accounts background workflow", () => {
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "unknown", x: 1, y: 2 }, validSender)).rejects.toThrow(/unsupported/i)
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "continue", x: Number.NaN, y: 2 }, validSender)).rejects.toThrow(/coordinates/i)
     expect(debuggerAttach).not.toHaveBeenCalled()
+  })
+
+  it("tracks the last palette-switched store and keeps it after lock", async () => {
+    const job = await createActiveJob()
+    expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toBeNull()
+
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    const unlocked = await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any
+    expect(unlocked.currentStore).toEqual({ id: "store", name: "Example Outdoors" })
+
+    await handleAccountsMessage({ type: "ACCOUNTS_LOCK" }, {})
+    const locked = await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any
+    expect(locked.unlocked).toBe(false)
+    expect(locked.currentStore).toEqual({ id: "store", name: "Example Outdoors" })
+  })
+
+  it("does not treat a cancelled switch as the current store", async () => {
+    await createActiveJob()
+    await handleAccountsMessage({ type: "ACCOUNTS_CANCEL_SWITCH" }, {})
+    const status = await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any
+    expect(status.currentStore).toBeNull()
+  })
+
+  it("clears the current store when that store is deleted or the vault is reset", async () => {
+    const job = await createActiveJob()
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [{ id: "other", name: "North Shop", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home" }],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+    expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toBeNull()
+
+    await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "other" }, {})
+    const nextJob = session[ACTIVE_JOB_STORAGE_KEY] as { id: string }
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: nextJob.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toEqual({ id: "other", name: "North Shop" })
+
+    await handleAccountsMessage({ type: "ACCOUNTS_RESET" }, {})
+    expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toBeNull()
   })
 })

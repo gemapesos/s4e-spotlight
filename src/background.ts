@@ -1,5 +1,6 @@
 import {
   ACTIVE_JOB_STORAGE_KEY,
+  CURRENT_STORE_KEY,
   SESSION_KEY_STORAGE_KEY,
   STORE_INDEX_KEY,
   VAULT_STORAGE_KEY,
@@ -17,6 +18,7 @@ import {
   type AccountVault,
   type CredentialRecord,
   type EncryptedVault,
+  type StoreIndexRecord,
   type StoreRecord,
 } from "./lib/accounts.js"
 
@@ -186,6 +188,27 @@ async function saveVault(vault: AccountVault, envelope: EncryptedVault, key: Uin
   validateVault(vault)
   const nextEnvelope = await encryptVaultWithKey(vault, key, Uint8Array.from(atob(envelope.salt), (c) => c.charCodeAt(0)), envelope.iterations)
   await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: nextEnvelope, [STORE_INDEX_KEY]: publicStoreIndex(vault) })
+  await pruneCurrentStore(vault.stores.map(({ id }) => id))
+}
+
+async function getCurrentStoreId(): Promise<string | undefined> {
+  const value = (await chrome.storage.local.get(CURRENT_STORE_KEY))[CURRENT_STORE_KEY]
+  return typeof value === "string" ? value : undefined
+}
+
+async function setCurrentStoreId(storeId?: string): Promise<void> {
+  if (storeId) await chrome.storage.local.set({ [CURRENT_STORE_KEY]: storeId })
+  else await chrome.storage.local.remove(CURRENT_STORE_KEY)
+}
+
+async function pruneCurrentStore(storeIds: readonly string[]): Promise<void> {
+  const currentId = await getCurrentStoreId()
+  if (currentId && !storeIds.includes(currentId)) await setCurrentStoreId(undefined)
+}
+
+function currentStoreFromIndex(stores: StoreIndexRecord[], storeId?: string): StoreIndexRecord | null {
+  if (!storeId) return null
+  return stores.find((store) => store.id === storeId) ?? null
 }
 
 async function getActiveJob(): Promise<ActiveJob | undefined> {
@@ -243,15 +266,20 @@ async function withJobDebugger<T>(
 export async function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
   switch (message.type) {
     case "ACCOUNTS_STATUS": {
-      const [envelope, key, index] = await Promise.all([getEnvelope(), getSessionKey(), chrome.storage.local.get(STORE_INDEX_KEY)])
-      const stores = (index[STORE_INDEX_KEY] ?? []) as Array<{ id: string; name: string }>
+      const [envelope, key, stored] = await Promise.all([
+        getEnvelope(),
+        getSessionKey(),
+        chrome.storage.local.get([STORE_INDEX_KEY, CURRENT_STORE_KEY]),
+      ])
+      const stores = (stored[STORE_INDEX_KEY] ?? []) as StoreIndexRecord[]
       const job = await getActiveJob()
-      const activeStore = job ? stores.find((store: { id: string }) => store.id === job.storeId) : undefined
+      const activeStore = job ? stores.find((store) => store.id === job.storeId) : undefined
       return {
         ok: true,
         initialized: Boolean(envelope),
         unlocked: Boolean(key),
         stores,
+        currentStore: currentStoreFromIndex(stores, typeof stored[CURRENT_STORE_KEY] === "string" ? stored[CURRENT_STORE_KEY] : undefined),
         activeSwitch: job ? { storeId: job.storeId, storeName: activeStore?.name ?? "Selected store", stage: job.stage, startedAt: job.startedAt } : undefined,
       }
     }
@@ -260,6 +288,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       if (typeof message.masterPassword !== "string" || message.masterPassword.length < 10) throw new Error("Use a master password of at least 10 characters.")
       const { envelope, keyBytes } = await encryptVault(emptyVault(), message.masterPassword)
       await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope, [STORE_INDEX_KEY]: [] })
+      await chrome.storage.local.remove(CURRENT_STORE_KEY)
       await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
       return { ok: true }
     }
@@ -294,7 +323,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       return { ok: true }
     }
     case "ACCOUNTS_RESET":
-      await chrome.storage.local.remove([VAULT_STORAGE_KEY, STORE_INDEX_KEY])
+      await chrome.storage.local.remove([VAULT_STORAGE_KEY, STORE_INDEX_KEY, CURRENT_STORE_KEY])
       await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY])
       return { ok: true }
     case "ACCOUNTS_OPEN_OPTIONS":
@@ -382,6 +411,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       const { store } = await getJobRecords(job)
       job.stage = "authenticated"; await setActiveJob(job)
       await chrome.tabs.update(job.tabId, { url: store.storeUrl })
+      await setCurrentStoreId(store.id)
       await setActiveJob(undefined)
       return { ok: true }
     }

@@ -1,4 +1,4 @@
-import { ACTIVE_JOB_STORAGE_KEY, SESSION_KEY_STORAGE_KEY, STORE_INDEX_KEY, VAULT_STORAGE_KEY, decryptVault, decryptVaultWithKey, deserializeKey, emptyVault, encryptVault, encryptVaultWithKey, generateTotp, parseOtpAuthUri, publicStoreIndex, serializeKey, validateStoreUrl } from "./lib/accounts.js";
+import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, SESSION_KEY_STORAGE_KEY, STORE_INDEX_KEY, VAULT_STORAGE_KEY, decryptVault, decryptVaultWithKey, deserializeKey, emptyVault, encryptVault, encryptVaultWithKey, generateTotp, parseOtpAuthUri, publicStoreIndex, serializeKey, validateStoreUrl } from "./lib/accounts.js";
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=";
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/";
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm=";
@@ -155,6 +155,23 @@ async function saveVault(vault, envelope, key) {
 		[VAULT_STORAGE_KEY]: nextEnvelope,
 		[STORE_INDEX_KEY]: publicStoreIndex(vault)
 	});
+	await pruneCurrentStore(vault.stores.map(({ id }) => id));
+}
+async function getCurrentStoreId() {
+	const value = (await chrome.storage.local.get(CURRENT_STORE_KEY))[CURRENT_STORE_KEY];
+	return typeof value === "string" ? value : undefined;
+}
+async function setCurrentStoreId(storeId) {
+	if (storeId) await chrome.storage.local.set({ [CURRENT_STORE_KEY]: storeId });
+	else await chrome.storage.local.remove(CURRENT_STORE_KEY);
+}
+async function pruneCurrentStore(storeIds) {
+	const currentId = await getCurrentStoreId();
+	if (currentId && !storeIds.includes(currentId)) await setCurrentStoreId(undefined);
+}
+function currentStoreFromIndex(stores, storeId) {
+	if (!storeId) return null;
+	return stores.find((store) => store.id === storeId) ?? null;
 }
 async function getActiveJob() {
 	const job = (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY];
@@ -216,12 +233,12 @@ async function withJobDebugger(job, action) {
 export async function handleAccountsMessage(message, sender) {
 	switch (message.type) {
 		case "ACCOUNTS_STATUS": {
-			const [envelope, key, index] = await Promise.all([
+			const [envelope, key, stored] = await Promise.all([
 				getEnvelope(),
 				getSessionKey(),
-				chrome.storage.local.get(STORE_INDEX_KEY)
+				chrome.storage.local.get([STORE_INDEX_KEY, CURRENT_STORE_KEY])
 			]);
-			const stores = index[STORE_INDEX_KEY] ?? [];
+			const stores = stored[STORE_INDEX_KEY] ?? [];
 			const job = await getActiveJob();
 			const activeStore = job ? stores.find((store) => store.id === job.storeId) : undefined;
 			return {
@@ -229,6 +246,7 @@ export async function handleAccountsMessage(message, sender) {
 				initialized: Boolean(envelope),
 				unlocked: Boolean(key),
 				stores,
+				currentStore: currentStoreFromIndex(stores, typeof stored[CURRENT_STORE_KEY] === "string" ? stored[CURRENT_STORE_KEY] : undefined),
 				activeSwitch: job ? {
 					storeId: job.storeId,
 					storeName: activeStore?.name ?? "Selected store",
@@ -245,6 +263,7 @@ export async function handleAccountsMessage(message, sender) {
 				[VAULT_STORAGE_KEY]: envelope,
 				[STORE_INDEX_KEY]: []
 			});
+			await chrome.storage.local.remove(CURRENT_STORE_KEY);
 			await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) });
 			return { ok: true };
 		}
@@ -284,7 +303,11 @@ export async function handleAccountsMessage(message, sender) {
 			return { ok: true };
 		}
 		case "ACCOUNTS_RESET":
-			await chrome.storage.local.remove([VAULT_STORAGE_KEY, STORE_INDEX_KEY]);
+			await chrome.storage.local.remove([
+				VAULT_STORAGE_KEY,
+				STORE_INDEX_KEY,
+				CURRENT_STORE_KEY
+			]);
 			await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY]);
 			return { ok: true };
 		case "ACCOUNTS_OPEN_OPTIONS":
@@ -436,6 +459,7 @@ export async function handleAccountsMessage(message, sender) {
 			job.stage = "authenticated";
 			await setActiveJob(job);
 			await chrome.tabs.update(job.tabId, { url: store.storeUrl });
+			await setCurrentStoreId(store.id);
 			await setActiveJob(undefined);
 			return { ok: true };
 		}

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
+  generateReports,
+  getAccountsStatus,
   mountCommandPalette,
   openCaseIds,
   openShipmentIds,
@@ -65,6 +67,83 @@ describe("content-script mount", () => {
 
     sendMessage.mockResolvedValue({ ok: false, error: "worker failed" })
     await expect(openSkuIds(["ABC-123"])).rejects.toThrow("worker failed")
+  })
+
+  it("loads accounts status from the background worker", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      ok: true,
+      initialized: true,
+      unlocked: false,
+      stores: [],
+      currentStore: null,
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+
+    await expect(getAccountsStatus()).resolves.toEqual({
+      initialized: true,
+      unlocked: false,
+      stores: [],
+      currentStore: null,
+    })
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
+  })
+
+  it("downloads a report named for the current store", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      ok: true,
+      initialized: true,
+      unlocked: true,
+      stores: [{ id: "store-1", name: "JMG Outdoors" }],
+      currentStore: { id: "store-1", name: "JMG Outdoors" },
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    const createObjectURL = vi.fn().mockReturnValue("blob:report")
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL })
+    const clicked: { download?: string } = {}
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.download = this.download
+    })
+
+    try {
+      await generateReports(new Date(2026, 7, 14))
+      expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
+      expect(createObjectURL).toHaveBeenCalledOnce()
+    } finally {
+      click.mockRestore()
+    }
+  })
+
+  it("names the report Unknown when no current store is set", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      ok: true,
+      initialized: true,
+      unlocked: false,
+      stores: [],
+      currentStore: null,
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn().mockReturnValue("blob:report"),
+      revokeObjectURL: vi.fn(),
+    })
+    const clicked: { download?: string } = {}
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.download = this.download
+    })
+
+    try {
+      await generateReports(new Date(2026, 7, 14))
+      expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")
+    } finally {
+      click.mockRestore()
+    }
   })
 
   it("isolates the UI in a shadow root and ignores a duplicate mount", () => {

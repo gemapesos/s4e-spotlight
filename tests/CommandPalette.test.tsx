@@ -11,6 +11,7 @@ function renderPalette(
     .fn<(shipmentIds: string[]) => Promise<void>>()
     .mockResolvedValue(),
   onOpenSkuIds = vi.fn<(skuIds: string[]) => Promise<void>>().mockResolvedValue(),
+  onGenerateReports = vi.fn<() => Promise<void>>().mockResolvedValue(),
 ) {
   const container = document.createElement("div")
   document.body.append(container)
@@ -23,6 +24,7 @@ function renderPalette(
       onOpenCaseIds={onOpenCaseIds}
       onOpenShipmentIds={onOpenShipmentIds}
       onOpenSkuIds={onOpenSkuIds}
+      onGenerateReports={onGenerateReports}
       onOpenChange={onOpenChange}
     />,
   )
@@ -35,6 +37,7 @@ function renderPalette(
         onOpenCaseIds={onOpenCaseIds}
         onOpenShipmentIds={onOpenShipmentIds}
         onOpenSkuIds={onOpenSkuIds}
+        onGenerateReports={onGenerateReports}
         onOpenChange={onOpenChange}
       />,
     )
@@ -42,6 +45,7 @@ function renderPalette(
 
   return {
     container,
+    onGenerateReports,
     onOpenCaseIds,
     onOpenChange,
     onOpenShipmentIds,
@@ -75,9 +79,11 @@ describe("CommandPalette", () => {
 
     expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
     expect(screen.getByText("Open", { selector: "[cmdk-group-heading]" })).toBeVisible()
+    expect(screen.getByText("Reports", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByText("Configuration", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByRole("option", { name: /Open Case ID\/s/ })).toHaveAttribute("aria-selected", "true")
     expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Generate Reports/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Search SKU\/s/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Calendar/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Search Emoji/ })).not.toBeInTheDocument()
@@ -485,6 +491,42 @@ describe("CommandPalette", () => {
     await user.keyboard("{Enter}")
 
     expect(screen.getByRole("textbox", { name: "Case IDs" })).toBeVisible()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it("generates a report and closes the palette", async () => {
+    const user = userEvent.setup()
+    const onGenerateReports = vi.fn<() => Promise<void>>().mockResolvedValue()
+    const { onOpenChange } = renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      onGenerateReports,
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+
+    await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledOnce())
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("keeps the palette open when report generation fails", async () => {
+    const user = userEvent.setup()
+    const onGenerateReports = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValue(new Error("Couldn’t build the report."))
+    const { onOpenChange } = renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      onGenerateReports,
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn’t build the report.")
     expect(onOpenChange).not.toHaveBeenCalled()
   })
 

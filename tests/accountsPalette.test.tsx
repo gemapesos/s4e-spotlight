@@ -228,4 +228,35 @@ describe("Accounts palette", () => {
     await user.click(screen.getByRole("button", { name: "Cancel switch" }))
     expect(props.onCancelAccountSwitch).toHaveBeenCalledOnce()
   })
+
+  it("shows Unknown when the current store cannot be detected", async () => {
+    const user = userEvent.setup()
+    renderAccounts()
+    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    expect(await screen.findByRole("status", { name: /Current store: Unknown/ })).toBeVisible()
+  })
+
+  it("shows the current store, marks it, and skips switching to it", async () => {
+    const user = userEvent.setup()
+    const props = renderAccounts({
+      onGetAccountsStatus: vi.fn().mockResolvedValue({
+        initialized: true,
+        unlocked: true,
+        stores: [{ id: "store-1", name: "JMG Outdoors" }, { id: "store-2", name: "North Shop" }],
+        currentStore: { id: "store-1", name: "JMG Outdoors" },
+      }),
+    })
+    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    expect(await screen.findByRole("status", { name: /Current store: JMG Outdoors/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: "JMG Outdoors" })).toHaveAttribute("data-checked", "true")
+    expect(screen.getByRole("option", { name: "North Shop" })).not.toHaveAttribute("data-checked")
+
+    await user.click(screen.getByRole("option", { name: "JMG Outdoors" }))
+    expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
+    expect(props.onOpenChange).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("option", { name: "North Shop" }))
+    expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-2")
+    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+  })
 })

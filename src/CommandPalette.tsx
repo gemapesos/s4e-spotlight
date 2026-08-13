@@ -1,6 +1,6 @@
 import * as React from "react"
 import type { LucideIcon } from "lucide-react"
-import { Building2, ChevronLeft, FolderOpen, Package, Settings, Truck } from "lucide-react"
+import { Building2, ChevronLeft, FileSpreadsheet, FolderOpen, Package, Settings, Truck } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -63,6 +63,7 @@ export interface AccountsStatus {
   unlocked: boolean
   stores: AccountStoreSummary[]
   activeSwitch?: ActiveSwitchSummary
+  currentStore?: AccountStoreSummary | null
 }
 
 export const commandGroups: ReadonlyArray<{
@@ -76,6 +77,10 @@ export const commandGroups: ReadonlyArray<{
       { id: "open-shipment-ids", label: "Open Shipment IDs", icon: Truck, keywords: ["shipment", "fba", "inbound", "transfer"] },
       { id: "search-skus", label: "Search SKU/s", icon: Package, keywords: ["sku", "skus", "asin", "msku", "listing", "product"] },
     ],
+  },
+  {
+    heading: "Reports",
+    commands: [{ id: "generate-reports", label: "Generate Reports", icon: FileSpreadsheet, keywords: ["report", "xlsx", "export", "spreadsheet"] }],
   },
   {
     heading: "Configuration",
@@ -95,6 +100,7 @@ export interface CommandPaletteProps {
   onFocusAccountSwitch?: () => Promise<void>
   onCancelAccountSwitch?: () => Promise<void>
   onManageAccounts?: () => Promise<void>
+  onGenerateReports?: () => Promise<void> | void
   onOpenChange: (open: boolean) => void
 }
 
@@ -110,6 +116,7 @@ export function CommandPalette({
   onFocusAccountSwitch = async () => undefined,
   onCancelAccountSwitch = async () => undefined,
   onManageAccounts = async () => undefined,
+  onGenerateReports = async () => undefined,
   onOpenChange,
 }: CommandPaletteProps) {
   const [mode, setMode] = React.useState<PaletteMode>("commands")
@@ -120,8 +127,10 @@ export function CommandPalette({
   const [pendingIds, setPendingIds] = React.useState<string[]>([])
   const [error, setError] = React.useState<string | null>(null)
   const [submitting, setSubmitting] = React.useState(false)
+  const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
   const [stores, setStores] = React.useState<AccountStoreSummary[]>([])
   const [activeSwitch, setActiveSwitch] = React.useState<ActiveSwitchSummary | undefined>()
+  const [currentStore, setCurrentStore] = React.useState<AccountStoreSummary | null>(null)
   const [selectedStore, setSelectedStore] = React.useState<AccountStoreSummary | null>(null)
   const [masterPassword, setMasterPassword] = React.useState("")
   const [fadeMask, setFadeMask] = React.useState<FadeMaskState>("none")
@@ -186,6 +195,7 @@ export function CommandPalette({
     setPendingIds([])
     setError(null)
     setSubmitting(false)
+    setStatusMessage(null)
     setSelectedStore(null)
     setMasterPassword("")
   }, [open])
@@ -241,11 +251,13 @@ export function CommandPalette({
 
   const openAccounts = React.useCallback(async () => {
     setError(null)
+    setStatusMessage("Loading accounts…")
     setSubmitting(true)
     try {
       const status = await onGetAccountsStatus()
       setStores(status.stores)
       setActiveSwitch(status.activeSwitch)
+      setCurrentStore(status.currentStore ?? null)
       setAccountSearch("")
       setMode("accounts")
     } catch (caught) {
@@ -256,10 +268,18 @@ export function CommandPalette({
   }, [onGetAccountsStatus])
 
   const chooseStore = React.useCallback(async (store: AccountStoreSummary) => {
+    if (currentStore?.id === store.id) return
     setError(null)
     setSubmitting(true)
     try {
       const status = await onGetAccountsStatus()
+      setStores(status.stores)
+      setActiveSwitch(status.activeSwitch)
+      setCurrentStore(status.currentStore ?? null)
+      if (status.currentStore?.id === store.id) {
+        setSubmitting(false)
+        return
+      }
       if (!status.unlocked) {
         setSelectedStore(store)
         setMode("unlock")
@@ -272,7 +292,7 @@ export function CommandPalette({
       setError(caught instanceof Error ? caught.message : "Couldn’t start the account switch.")
       setSubmitting(false)
     }
-  }, [close, onGetAccountsStatus, onStartAccountSwitch])
+  }, [close, currentStore?.id, onGetAccountsStatus, onStartAccountSwitch])
 
   const unlockAndStart = React.useCallback(async () => {
     if (!selectedStore || submitting) return
@@ -295,6 +315,42 @@ export function CommandPalette({
     try { await onManageAccounts(); close() }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Couldn’t open account settings."); setSubmitting(false) }
   }, [close, onManageAccounts])
+
+  const generateReports = React.useCallback(async () => {
+    setError(null)
+    setStatusMessage("Generating report…")
+    setSubmitting(true)
+    try {
+      await onGenerateReports()
+      close()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Couldn’t generate the report. Please try again.")
+      setSubmitting(false)
+    }
+  }, [close, onGenerateReports])
+
+  const selectCommand = React.useCallback((commandId: string) => {
+    if (commandId === "open-case-ids") {
+      setIdentifierMode("case-ids")
+      setMode("case-ids")
+      return
+    }
+    if (commandId === "open-shipment-ids") {
+      setIdentifierMode("shipment-ids")
+      setMode("shipment-ids")
+      return
+    }
+    if (commandId === "search-skus") {
+      setIdentifierMode("sku-ids")
+      setMode("sku-ids")
+      return
+    }
+    if (commandId === "generate-reports") {
+      void generateReports()
+      return
+    }
+    if (commandId === "accounts") void openAccounts()
+  }, [generateReports, openAccounts])
 
   const handleSwitchAction = React.useCallback(async (action: "focus" | "cancel") => {
     setError(null)
@@ -375,7 +431,7 @@ export function CommandPalette({
       >
         {mode === "commands" ? <>
           <CommandInput autoFocus aria-label="Search commands" disabled={submitting} onValueChange={(value) => { setCommandSearch(value); setError(null) }} placeholder="Type a command or search..." value={commandSearch} />
-          {submitting ? <p aria-live="polite" className="px-3 py-2 text-sm text-muted-foreground">Loading accounts…</p> : null}
+          {submitting && statusMessage ? <p aria-live="polite" className="px-3 py-2 text-sm text-muted-foreground">{statusMessage}</p> : null}
           <CommandList aria-label="Commands">
             {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || showSkuFallback ? null : (
               <CommandEmpty>No results found.</CommandEmpty>
@@ -431,14 +487,13 @@ export function CommandPalette({
                 <CommandGroup heading={group.heading}>
                   {group.commands.map((command) => {
                     const Icon = command.icon
-                    const openIdentifier = (next: IdentifierMode) => { setIdentifierMode(next); setMode(next) }
                     return (
                       <CommandItem
                         key={command.id}
                         value={command.label}
                         keywords={[...command.keywords]}
                         disabled={submitting}
-                        onSelect={command.id === "open-case-ids" ? () => openIdentifier("case-ids") : command.id === "open-shipment-ids" ? () => openIdentifier("shipment-ids") : command.id === "search-skus" ? () => openIdentifier("sku-ids") : () => void openAccounts()}
+                        onSelect={() => selectCommand(command.id)}
                       >
                         <Icon aria-hidden="true" />
                         <span>{command.label}</span>
@@ -462,12 +517,25 @@ export function CommandPalette({
               </div>
             </Alert>
           ) : null}
+          <p
+            aria-label={`Current store: ${currentStore?.name ?? "Unknown"}`}
+            className="px-3 py-1.5 text-sm text-muted-foreground"
+            role="status"
+          >
+            Current store: {currentStore?.name ?? "Unknown"}
+          </p>
           <CommandInput autoFocus aria-label="Search accounts" disabled={submitting} onValueChange={(value) => { setAccountSearch(value); setError(null) }} placeholder="Search stores..." value={accountSearch} />
           <CommandList aria-label="Accounts">
             <CommandEmpty>No matching stores.</CommandEmpty>
             <CommandGroup heading="Stores">
               {stores.map((store) => (
-                <CommandItem key={store.id} value={store.name} disabled={submitting} onSelect={() => void chooseStore(store)}>
+                <CommandItem
+                  key={store.id}
+                  data-checked={currentStore?.id === store.id || undefined}
+                  disabled={submitting}
+                  onSelect={() => void chooseStore(store)}
+                  value={store.name}
+                >
                   <Building2 aria-hidden="true" />
                   <span>{store.name}</span>
                 </CommandItem>

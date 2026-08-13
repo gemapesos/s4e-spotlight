@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client"
 import styles from "./styles.css?inline"
 import { CommandPalette, type AccountsStatus } from "./CommandPalette"
 import { applyPrefersColorScheme } from "./lib/colorScheme"
+import { buildReportWorkbook, downloadBytes, reportFileName } from "./lib/reports"
 import { isPaletteShortcut } from "./lib/shortcut"
 
 const HOST_ID = "command-palette-extension-root"
@@ -152,14 +153,36 @@ async function accountApi<T extends Record<string, unknown>>(message: Record<str
   return response
 }
 export async function getAccountsStatus(): Promise<AccountsStatus> {
-  const response = await accountApi<{ ok: true; initialized: boolean; unlocked: boolean; stores: AccountsStatus["stores"]; activeSwitch?: AccountsStatus["activeSwitch"] }>({ type: "ACCOUNTS_STATUS" })
-  return { initialized: response.initialized, unlocked: response.unlocked, stores: response.stores, activeSwitch: response.activeSwitch }
+  const response = await accountApi<{
+    ok: true
+    initialized: boolean
+    unlocked: boolean
+    stores: AccountsStatus["stores"]
+    activeSwitch?: AccountsStatus["activeSwitch"]
+    currentStore?: AccountsStatus["currentStore"]
+  }>({ type: "ACCOUNTS_STATUS" })
+  return {
+    initialized: response.initialized,
+    unlocked: response.unlocked,
+    stores: response.stores,
+    activeSwitch: response.activeSwitch,
+    currentStore: response.currentStore ?? null,
+  }
 }
 export async function unlockAccounts(masterPassword: string): Promise<void> { await accountApi({ type: "ACCOUNTS_UNLOCK", masterPassword }) }
 export async function startAccountSwitch(storeId: string): Promise<void> { await accountApi({ type: "ACCOUNTS_START_SWITCH", storeId }) }
 export async function focusAccountSwitch(): Promise<void> { await accountApi({ type: "ACCOUNTS_FOCUS_SWITCH" }) }
 export async function cancelAccountSwitch(): Promise<void> { await accountApi({ type: "ACCOUNTS_CANCEL_SWITCH" }) }
 export async function manageAccounts(): Promise<void> { await accountApi({ type: "ACCOUNTS_OPEN_OPTIONS" }) }
+
+export async function generateReports(
+  now = new Date(),
+  targetDocument: Document = document,
+): Promise<void> {
+  const status = await getAccountsStatus()
+  const filename = reportFileName(status.currentStore?.name ?? "", now)
+  downloadBytes(buildReportWorkbook(), filename, targetDocument)
+}
 
 export function mountCommandPalette({
   document: targetDocument = window.document,
@@ -227,6 +250,7 @@ export function mountCommandPalette({
           onFocusAccountSwitch={focusAccountSwitch}
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
+          onGenerateReports={generateReports}
           onOpenChange={setOpen}
         />
       </React.StrictMode>,
@@ -259,6 +283,7 @@ export function mountCommandPalette({
         onFocusAccountSwitch={focusAccountSwitch}
         onCancelAccountSwitch={cancelAccountSwitch}
         onManageAccounts={manageAccounts}
+        onGenerateReports={generateReports}
         onOpenChange={setOpen}
       />
     </React.StrictMode>,

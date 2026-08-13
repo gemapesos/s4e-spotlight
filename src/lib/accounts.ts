@@ -2,6 +2,7 @@ export const VAULT_STORAGE_KEY = "accountsVault"
 export const STORE_INDEX_KEY = "accountsStoreIndex"
 export const SESSION_KEY_STORAGE_KEY = "accountsSessionKey"
 export const ACTIVE_JOB_STORAGE_KEY = "accountsActiveJob"
+export const CURRENT_STORE_KEY = "accountsCurrentStore"
 export const PBKDF2_ITERATIONS = 600_000
 
 export interface StoreRecord {
