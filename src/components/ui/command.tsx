@@ -31,15 +31,17 @@ function Command({
 interface CommandDialogProps
   extends Omit<React.ComponentProps<typeof Dialog>, "children" | "onOpenChange"> {
   container: ShadowRoot | HTMLElement
+  contentKey?: React.Key
   title?: string
   description?: string
   className?: string
   children?: React.ReactNode
-  onOpenChange?: (open: boolean) => void
+  onOpenChange?: React.ComponentProps<typeof Dialog>["onOpenChange"]
 }
 
 function CommandDialog({
   container,
+  contentKey,
   title = "Command Palette",
   description = "Search for a command to run.",
   children,
@@ -47,10 +49,20 @@ function CommandDialog({
   onOpenChange,
   ...props
 }: CommandDialogProps) {
+  const commandRef = React.useRef<HTMLDivElement>(null)
+
+  React.useLayoutEffect(() => {
+    const command = commandRef.current
+    if (contentKey === undefined || !command) return
+    if (command.querySelector("input, textarea, [contenteditable=true]")) return
+
+    command.focus()
+  }, [contentKey])
+
   return (
     <Dialog
       modal="trap-focus"
-      onOpenChange={(nextOpen) => onOpenChange?.(nextOpen)}
+      onOpenChange={onOpenChange}
       {...props}
     >
       <DialogPortal container={container}>
@@ -58,7 +70,14 @@ function CommandDialog({
         <DialogPopup className={cn("p-0", className)}>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
-          <Command label="Search commands">{children}</Command>
+          <Command
+            key={contentKey}
+            ref={commandRef}
+            label={title === "Accounts" ? "Search accounts" : "Search commands"}
+            tabIndex={-1}
+          >
+            {children}
+          </Command>
         </DialogPopup>
       </DialogPortal>
     </Dialog>

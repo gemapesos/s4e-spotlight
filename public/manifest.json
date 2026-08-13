@@ -14,6 +14,7 @@
     "type": "module"
   },
   "permissions": ["storage", "debugger"],
+  "host_permissions": ["https://sellercentral.amazon.com/*"],
   "options_page": "options.html",
   "content_scripts": [
     {
@@ -27,6 +28,13 @@
       "js": ["content.js"],
       "run_at": "document_idle",
       "all_frames": false
+    },
+    {
+      "matches": ["https://sellercentral.amazon.com/*"],
+      "js": ["passkey-guard.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
     },
     {
       "matches": ["https://sellercentral.amazon.com/*"],

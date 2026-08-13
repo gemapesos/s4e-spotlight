@@ -35,25 +35,28 @@ After rebuilding, use the extension card's reload button and refresh the page be
 - Type to filter commands; use the arrow keys to change selection and Enter to choose.
 - Choosing **Open Case ID/s** switches the palette to a multiline text field.
 - Paste text containing one or more standalone 11-digit Case IDs. Duplicates are ignored in first-seen order.
-- Press Enter to open every unique case, or Shift+Enter to insert a line break.
+- The palette shows the unique-ID count. Press Enter or choose **Open** to continue; Shift+Enter inserts a line break.
+- Batches of 11–50 IDs require confirmation. More than 50 IDs are rejected in both the palette and background worker.
 - Each case opens in a background tab in the same Chrome window, leaving the current tab selected.
+- If Chrome fails partway through a batch, the extension closes tabs created by that attempt and reports any tab it could not close.
 - Case tabs use `https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=…`.
 - Choosing **Open Shipment IDs** provides the same multiline workflow for standalone `FBA` plus nine-character shipment IDs, including IDs embedded in Seller Central links.
 - Shipment IDs are normalized to uppercase and deduplicated before opening background tabs at `https://sellercentral.amazon.com/fba/inbound-shipment/summary/{shipmentId}/contents`.
-- **Accounts** opens a searchable list of configured Seller Central stores. Selecting a store opens an active login tab, signs out, signs in with its saved credential and locally generated TOTP, and opens the store URL.
+- **Accounts** opens a searchable list of configured Seller Central stores. Selecting a store opens an active login tab, signs out, signs in with its saved credential and locally generated TOTP, and opens the store URL. A running switch can be focused or cancelled from the palette and expires after 15 minutes if it becomes orphaned.
 - **Manage Accounts** opens a full options page. Create a master password first, add shared credentials, then add stores such as **JMG Outdoors** that reference those credentials.
 - Account data is encrypted locally with AES-256-GCM. The master password is processed with PBKDF2-HMAC-SHA256 (600,000 iterations), is never stored, and unlocks the vault only for the current browser session.
 - CAPTCHA challenges pause for manual completion. The extension then resumes automatically. Only one account switch can run at a time.
-- While the palette owns focus, an early event guard prevents canvas-style apps such as Google Sheets from intercepting paste or Ctrl/Cmd+A before it reaches the palette. Native paste and select-all behavior remain intact, and no clipboard permission is requested.
+- On Seller Central login pages, an early passkey guard blocks WebAuthn `navigator.credentials.get/create` calls and reports conditional passkeys and platform authenticators as unavailable, so account switching stays on password login.
+- While the palette owns focus, an early event guard prevents host pages from intercepting text entry, editing events, paste, or Ctrl/Cmd+A before they reach the palette. Native input behavior remains intact, and no clipboard permission is requested.
 - Choosing an enabled sample command closes the palette without taking another action.
-- Escape, clicking the backdrop, or pressing the shortcut again closes the palette.
+- Escape acts as Back: it first clears a non-empty field, then returns from a nested screen to its parent, and finally closes an already-empty command palette. Escape is ignored while an action is running. Clicking the backdrop or pressing the shortcut again still closes the palette immediately.
 - The palette follows the operating system's light or dark color scheme.
 
 ## Browser limitations
 
 The shortcut is captured by a content script, because Chrome's Manifest V3 Commands API does not support `/` as a command key. It therefore works only while an eligible webpage has focus. Chrome does not allow content scripts on browser-owned pages such as `chrome://` URLs or the Chrome Web Store. It also cannot trigger while the address bar or another part of the browser UI has focus.
 
-The manifest requests `storage` for the encrypted local vault and `debugger` solely to send Escape to Chrome-native passkey prompts during an explicitly requested account switch. Chrome warns that debugger access can read and change website data. The debugger attaches only to the dedicated login tab and detaches immediately after the Escape key event. There is no analytics or external credential service.
+The manifest requests `storage` for the encrypted local vault and `debugger` to send trusted clicks to Amazon login controls during an explicitly requested account switch. Seller Central passkey prompts are blocked proactively in the page’s main JavaScript world before login scripts run. Chrome warns that debugger access can read and change website data. The debugger attaches only to the dedicated login tab and detaches immediately after each trusted click. There is no analytics or external credential service.
 
 ## Account security and recovery
 

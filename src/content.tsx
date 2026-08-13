@@ -29,8 +29,8 @@ export interface OpenShipmentIdsMessage {
 }
 
 export type OpenIdsResponse =
-  | { ok: true }
-  | { ok: false; error: string }
+  | { ok: true; openedCount: number }
+  | { ok: false; error: string; openedIds?: string[]; rolledBackIds?: string[] }
 
 export interface MountedCommandPalette {
   destroy: () => void
@@ -82,6 +82,22 @@ function getDeepActiveElement(document: Document): HTMLElement | null {
   return activeElement instanceof HTMLElement ? activeElement : null
 }
 
+/** rem resolves against document <html>, not the shadow host — normalize to a 16px root. */
+export function getPaletteRemScale(targetDocument: Document): number {
+  const fontSize = parseFloat(
+    targetDocument.defaultView?.getComputedStyle(targetDocument.documentElement)
+      .fontSize ?? "16",
+  )
+  if (!Number.isFinite(fontSize) || fontSize <= 0) return 1
+  return 16 / fontSize
+}
+
+function applyPaletteRemScale(host: HTMLElement, targetDocument: Document): number {
+  const scale = getPaletteRemScale(targetDocument)
+  host.style.zoom = String(scale)
+  return scale
+}
+
 export async function openCaseIds(caseIds: string[]): Promise<void> {
   const response = await chrome.runtime.sendMessage<
     OpenCaseIdsMessage,
@@ -116,11 +132,13 @@ async function accountApi<T extends Record<string, unknown>>(message: Record<str
   return response
 }
 export async function getAccountsStatus(): Promise<AccountsStatus> {
-  const response = await accountApi<{ ok: true; initialized: boolean; unlocked: boolean; stores: AccountsStatus["stores"] }>({ type: "ACCOUNTS_STATUS" })
-  return { initialized: response.initialized, unlocked: response.unlocked, stores: response.stores }
+  const response = await accountApi<{ ok: true; initialized: boolean; unlocked: boolean; stores: AccountsStatus["stores"]; activeSwitch?: AccountsStatus["activeSwitch"] }>({ type: "ACCOUNTS_STATUS" })
+  return { initialized: response.initialized, unlocked: response.unlocked, stores: response.stores, activeSwitch: response.activeSwitch }
 }
 export async function unlockAccounts(masterPassword: string): Promise<void> { await accountApi({ type: "ACCOUNTS_UNLOCK", masterPassword }) }
 export async function startAccountSwitch(storeId: string): Promise<void> { await accountApi({ type: "ACCOUNTS_START_SWITCH", storeId }) }
+export async function focusAccountSwitch(): Promise<void> { await accountApi({ type: "ACCOUNTS_FOCUS_SWITCH" }) }
+export async function cancelAccountSwitch(): Promise<void> { await accountApi({ type: "ACCOUNTS_CANCEL_SWITCH" }) }
 export async function manageAccounts(): Promise<void> { await accountApi({ type: "ACCOUNTS_OPEN_OPTIONS" }) }
 
 export function mountCommandPalette({
@@ -139,6 +157,7 @@ export function mountCommandPalette({
     "z-index: 2147483647",
     "pointer-events: none",
   ].join(";")
+  applyPaletteRemScale(host, targetDocument)
 
   const shadowRoot = host.attachShadow({ mode: shadowMode })
   const style = targetDocument.createElement("style")
@@ -169,6 +188,7 @@ export function mountCommandPalette({
     isOpen = nextOpen
     host.setAttribute(PALETTE_OPEN_ATTRIBUTE, String(nextOpen))
     host.style.pointerEvents = nextOpen ? "auto" : "none"
+    if (nextOpen) applyPaletteRemScale(host, targetDocument)
 
     root?.render(
       <React.StrictMode>
@@ -180,6 +200,8 @@ export function mountCommandPalette({
           onGetAccountsStatus={getAccountsStatus}
           onUnlockAccounts={unlockAccounts}
           onStartAccountSwitch={startAccountSwitch}
+          onFocusAccountSwitch={focusAccountSwitch}
+          onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
           onOpenChange={setOpen}
         />
@@ -209,6 +231,8 @@ export function mountCommandPalette({
         onGetAccountsStatus={getAccountsStatus}
         onUnlockAccounts={unlockAccounts}
         onStartAccountSwitch={startAccountSwitch}
+        onFocusAccountSwitch={focusAccountSwitch}
+        onCancelAccountSwitch={cancelAccountSwitch}
         onManageAccounts={manageAccounts}
         onOpenChange={setOpen}
       />

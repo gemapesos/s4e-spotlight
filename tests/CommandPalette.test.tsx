@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -66,20 +66,18 @@ describe("CommandPalette", () => {
     })
   }
 
-  it("renders the full reference command groups", () => {
+  it("renders only functional command groups", () => {
     renderPalette()
 
     expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
-    expect(screen.getByText("Suggestions")).toBeVisible()
-    expect(screen.getByText("Settings", { selector: "[cmdk-group-heading]" })).toBeVisible()
+    expect(screen.getByText("Open", { selector: "[cmdk-group-heading]" })).toBeVisible()
+    expect(screen.getByText("Configuration", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByRole("option", { name: /Open Case ID\/s/ })).toHaveAttribute("aria-selected", "true")
     expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Calendar/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Search Emoji/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Calculator/ })).not.toBeInTheDocument()
-    expect(screen.getByText("⌘P")).toBeVisible()
-    expect(screen.getByText("⌘B")).toBeVisible()
-    expect(screen.getByText("⌘S")).toBeVisible()
+    expect(screen.queryByRole("option", { name: /Profile|Billing|Settings/ })).not.toBeInTheDocument()
   })
 
   it("filters commands and shows the empty state", async () => {
@@ -87,21 +85,22 @@ describe("CommandPalette", () => {
     renderPalette()
     const input = screen.getByRole("combobox", { name: "Search commands" })
 
-    await user.type(input, "billing")
-    expect(screen.getByRole("option", { name: /Billing/ })).toBeVisible()
-    expect(screen.queryByRole("option", { name: /Open Shipment IDs/ })).not.toBeInTheDocument()
+    await user.type(input, "shipment")
+    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.queryByRole("option", { name: /Open Case ID/ })).not.toBeInTheDocument()
 
     await user.clear(input)
     await user.type(input, "missing command")
     expect(screen.getByText("No results found.")).toBeVisible()
   })
 
-  it("closes after selecting an enabled command", async () => {
+  it("opens an enabled workflow without closing the palette", async () => {
     const user = userEvent.setup()
     const { onOpenChange } = renderPalette()
 
-    await user.click(screen.getByRole("option", { name: /Profile/ }))
-    expect(onOpenChange).toHaveBeenCalledWith(false)
+    await user.click(screen.getByRole("option", { name: /Open Case ID/ }))
+    expect(screen.getByRole("dialog", { name: "Open Case IDs" })).toBeVisible()
+    expect(onOpenChange).not.toHaveBeenCalled()
   })
 
   it("switches to a focused multiline Case ID input", async () => {
@@ -166,6 +165,75 @@ describe("CommandPalette", () => {
     expect(screen.queryByRole("textbox", { name: "Case IDs" })).not.toBeInTheDocument()
   })
 
+  it("uses Escape to clear Case IDs, go back, clear search, then close", async () => {
+    const user = userEvent.setup()
+    const { onOpenChange } = renderPalette()
+    const search = screen.getByRole("combobox", { name: "Search commands" })
+
+    await user.type(search, "case")
+    await user.keyboard("{Enter}")
+    const input = screen.getByRole("textbox", { name: "Case IDs" })
+    await user.type(input, "not a case")
+    await user.keyboard("{Enter}")
+    expect(screen.getByRole("alert")).toBeVisible()
+
+    await user.keyboard("{Escape}")
+    expect(input).toHaveValue("")
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+
+    await user.keyboard("{Escape}")
+    expect(screen.getByRole("combobox", { name: "Search commands" })).toHaveValue("case")
+
+    await user.keyboard("{Escape}")
+    expect(screen.getByRole("combobox", { name: "Search commands" })).toHaveValue("")
+    expect(onOpenChange).not.toHaveBeenCalled()
+
+    await user.keyboard("{Escape}")
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("uses Escape to clear Shipment IDs before returning to commands", async () => {
+    const user = userEvent.setup()
+    const { onOpenChange } = renderPalette()
+
+    await user.type(
+      screen.getByRole("combobox", { name: "Search commands" }),
+      "shipment",
+    )
+    await user.keyboard("{Enter}")
+    const input = screen.getByRole("textbox", { name: "Shipment IDs" })
+    await user.type(input, "   ")
+
+    await user.keyboard("{Escape}")
+    expect(input).toHaveValue("")
+    await user.keyboard("{Escape}")
+    expect(screen.getByRole("combobox", { name: "Search commands" })).toHaveValue("shipment")
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it("ignores Escape while identifiers are being submitted", async () => {
+    const user = userEvent.setup()
+    let finishSubmission: (() => void) | undefined
+    const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>(
+      () => new Promise<void>((resolve) => { finishSubmission = resolve }),
+    )
+    const { onOpenChange } = renderPalette(true, openCaseIds)
+
+    await user.click(screen.getByRole("option", { name: /Open Case ID\/s/ }))
+    const input = screen.getByRole("textbox", { name: "Case IDs" })
+    await user.type(input, "21476974831")
+    await user.keyboard("{Enter}")
+    expect(input).toBeDisabled()
+
+    await user.keyboard("{Escape}")
+    expect(input).toHaveValue("21476974831")
+    expect(onOpenChange).not.toHaveBeenCalled()
+
+    await act(async () => { finishSubmission?.() })
+    await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+  })
+
   it("extracts unique Case IDs and submits them on Enter", async () => {
     const user = userEvent.setup()
     const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
@@ -183,6 +251,49 @@ describe("CommandPalette", () => {
 
     expect(openCaseIds).toHaveBeenCalledWith(["21476974831", "21476874681"])
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("opens ten unique IDs directly and shows the deduplicated count", async () => {
+    const user = userEvent.setup()
+    const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
+    renderPalette(true, openCaseIds)
+    const ids = Array.from({ length: 10 }, (_, index) => String(20_000_000_000 + index))
+
+    await user.click(screen.getByRole("option", { name: /Open Case ID/ }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: [...ids, ids[0]].join("\n") } })
+    expect(screen.getByText("10 unique case IDs")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Open" }))
+
+    expect(openCaseIds).toHaveBeenCalledWith(ids)
+  })
+
+  it("confirms batches from eleven through fifty IDs", async () => {
+    const user = userEvent.setup()
+    const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
+    renderPalette(true, openCaseIds)
+    const ids = Array.from({ length: 50 }, (_, index) => String(30_000_000_000 + index))
+
+    await user.click(screen.getByRole("option", { name: /Open Case ID/ }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: ids.join("\n") } })
+    await user.click(screen.getByRole("button", { name: "Open" }))
+
+    expect(screen.getByRole("dialog", { name: "Confirm Bulk Open" })).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Open 50 tabs" }))
+    expect(openCaseIds).toHaveBeenCalledWith(ids)
+  })
+
+  it("rejects more than fifty IDs before messaging the background", async () => {
+    const user = userEvent.setup()
+    const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
+    renderPalette(true, openCaseIds)
+    const ids = Array.from({ length: 51 }, (_, index) => String(40_000_000_000 + index))
+
+    await user.click(screen.getByRole("option", { name: /Open Case ID/ }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: ids.join("\n") } })
+    await user.click(screen.getByRole("button", { name: "Open" }))
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Open no more than 50 IDs")
+    expect(openCaseIds).not.toHaveBeenCalled()
   })
 
   it("extracts unique Shipment IDs from links and text and submits them", async () => {
@@ -280,24 +391,25 @@ describe("CommandPalette", () => {
     await user.keyboard("{Enter}")
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Couldn’t open case tabs. Please try again.",
+      "worker failed",
     )
     expect(input).toHaveValue("21476974831")
     expect(onOpenChange).not.toHaveBeenCalled()
   })
 
-  it("moves selection with the keyboard and closes on Enter", async () => {
+  it("moves selection with the keyboard and opens the selected workflow", async () => {
     const user = userEvent.setup()
     const { onOpenChange } = renderPalette()
     const input = screen.getByRole("combobox", { name: "Search commands" })
 
     await user.click(input)
-    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}")
+    await user.keyboard("{Enter}")
 
-    expect(onOpenChange).toHaveBeenCalledWith(false)
+    expect(screen.getByRole("textbox", { name: "Case IDs" })).toBeVisible()
+    expect(onOpenChange).not.toHaveBeenCalled()
   })
 
-  it("closes on Escape and backdrop click", async () => {
+  it("closes an empty command palette on Escape and closes on backdrop click", async () => {
     const user = userEvent.setup()
     const first = renderPalette()
 

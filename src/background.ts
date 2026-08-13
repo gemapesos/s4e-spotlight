@@ -25,9 +25,26 @@ const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summ
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx"
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
 
-export type OpenIdsResponse = { ok: true } | { ok: false; error: string }
+export type OpenIdsResponse =
+  | { ok: true; openedCount: number }
+  | { ok: false; error: string; openedIds?: string[]; rolledBackIds?: string[] }
 type CreateTab = (properties: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>
-type OpenTabs = (ids: unknown, senderTab: chrome.tabs.Tab | undefined) => Promise<void>
+type RemoveTabs = (tabIds: number[]) => Promise<void>
+type OpenTabs = (ids: unknown, senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
+
+const MAX_BULK_IDS = 50
+const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
+
+export class TabBatchError extends Error {
+  constructor(
+    message: string,
+    readonly openedIds: string[],
+    readonly rolledBackIds: string[],
+  ) {
+    super(message)
+    this.name = "TabBatchError"
+  }
+}
 
 export function normalizeCaseIds(value: unknown): string[] {
   return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && /^\d{11}$/u.test(id)))] : []
@@ -40,19 +57,51 @@ export function normalizeShipmentIds(value: unknown): string[] {
 export function buildCaseUrl(id: string): string { return `${CASE_URL}${id}` }
 export function buildShipmentUrl(id: string): string { return `${SHIPMENT_URL}${id}/contents` }
 
-async function createBackgroundTabs(ids: string[], senderTab: chrome.tabs.Tab | undefined, buildUrl: (id: string) => string, createTab: CreateTab): Promise<void> {
+async function createBackgroundTabs(
+  ids: string[],
+  senderTab: chrome.tabs.Tab | undefined,
+  buildUrl: (id: string) => string,
+  createTab: CreateTab,
+  removeTabs: RemoveTabs,
+): Promise<{ openedCount: number }> {
   if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.")
-  for (const id of ids) await createTab({ active: false, openerTabId: senderTab.id, url: buildUrl(id), windowId: senderTab.windowId })
+  if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
+
+  const created: Array<{ id: string; tabId: number }> = []
+  try {
+    for (const id of ids) {
+      const tab = await createTab({ active: false, openerTabId: senderTab.id, url: buildUrl(id), windowId: senderTab.windowId })
+      if (tab.id === undefined) throw new Error("Chrome created a tab without an ID.")
+      created.push({ id, tabId: tab.id })
+    }
+    return { openedCount: created.length }
+  } catch (cause) {
+    const rolledBackIds: string[] = []
+    const openedIds: string[] = []
+    for (const item of created) {
+      try {
+        await removeTabs([item.tabId])
+        rolledBackIds.push(item.id)
+      } catch {
+        openedIds.push(item.id)
+      }
+    }
+    const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab."
+    const suffix = openedIds.length
+      ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.`
+      : " Any tabs opened by this attempt were closed."
+    throw new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds)
+  }
 }
-export async function openCaseTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties)): Promise<void> {
+export async function openCaseTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
   const normalized = normalizeCaseIds(ids)
   if (!normalized.length) throw new Error("No valid Case IDs were provided.")
-  await createBackgroundTabs(normalized, senderTab, buildCaseUrl, createTab)
+  return createBackgroundTabs(normalized, senderTab, buildCaseUrl, createTab, removeTabs)
 }
-export async function openShipmentTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties)): Promise<void> {
+export async function openShipmentTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
   const normalized = normalizeShipmentIds(ids)
   if (!normalized.length) throw new Error("No valid Shipment IDs were provided.")
-  await createBackgroundTabs(normalized, senderTab, buildShipmentUrl, createTab)
+  return createBackgroundTabs(normalized, senderTab, buildShipmentUrl, createTab, removeTabs)
 }
 
 export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs, openShipments: OpenTabs = openShipmentTabs) {
@@ -62,7 +111,14 @@ export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs,
     const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : null
     if (!handler) return undefined
     const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.shipmentIds
-    void handler(ids, sender.tab).then(() => sendResponse({ ok: true }), (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t open tabs." }))
+    void handler(ids, sender.tab).then(
+      (result) => sendResponse({ ok: true, openedCount: result?.openedCount ?? 0 }),
+      (error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Couldn’t open tabs.",
+        ...(error instanceof TabBatchError ? { openedIds: error.openedIds, rolledBackIds: error.rolledBackIds } : {}),
+      }),
+    )
     return true
   }
 }
@@ -75,12 +131,8 @@ interface ActiveJob {
   startedAt: number
 }
 
-const AUTOMATION_CLICK_ACTIONS = new Set([
-  "continue",
-  "password-submit",
-  "otp-submit",
-  "passkey-cancel",
-])
+const AUTOMATION_CLICK_ACTIONS = new Set(["continue", "password-submit", "otp-submit"])
+let startSwitchLock: Promise<void> = Promise.resolve()
 
 type ApiResponse = { ok: true; [key: string]: unknown } | { ok: false; error: string }
 
@@ -124,11 +176,24 @@ async function saveVault(vault: AccountVault, envelope: EncryptedVault, key: Uin
 }
 
 async function getActiveJob(): Promise<ActiveJob | undefined> {
-  return (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY] as ActiveJob | undefined
+  const job = (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY] as ActiveJob | undefined
+  if (job && Date.now() - job.startedAt >= ACTIVE_JOB_TTL_MS) {
+    await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
+    return undefined
+  }
+  return job
 }
 async function setActiveJob(job?: ActiveJob): Promise<void> {
   if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job })
   else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
+}
+
+async function serializeSwitchStart<T>(action: () => Promise<T>): Promise<T> {
+  const previous = startSwitchLock
+  let release!: () => void
+  startSwitchLock = new Promise<void>((resolve) => { release = resolve })
+  await previous
+  try { return await action() } finally { release() }
 }
 async function assertWorkflowSender(sender: chrome.runtime.MessageSender, jobId: unknown): Promise<ActiveJob> {
   const job = await getActiveJob()
@@ -166,7 +231,16 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
   switch (message.type) {
     case "ACCOUNTS_STATUS": {
       const [envelope, key, index] = await Promise.all([getEnvelope(), getSessionKey(), chrome.storage.local.get(STORE_INDEX_KEY)])
-      return { ok: true, initialized: Boolean(envelope), unlocked: Boolean(key), stores: index[STORE_INDEX_KEY] ?? [] }
+      const stores = (index[STORE_INDEX_KEY] ?? []) as Array<{ id: string; name: string }>
+      const job = await getActiveJob()
+      const activeStore = job ? stores.find((store: { id: string }) => store.id === job.storeId) : undefined
+      return {
+        ok: true,
+        initialized: Boolean(envelope),
+        unlocked: Boolean(key),
+        stores,
+        activeSwitch: job ? { storeId: job.storeId, storeName: activeStore?.name ?? "Selected store", stage: job.stage, startedAt: job.startedAt } : undefined,
+      }
     }
     case "ACCOUNTS_CREATE": {
       if (await getEnvelope()) throw new Error("The account vault already exists.")
@@ -214,15 +288,39 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       await chrome.runtime.openOptionsPage()
       return { ok: true }
     case "ACCOUNTS_START_SWITCH": {
-      if (await getActiveJob()) throw new Error("Another account switch is already running.")
-      const { vault } = await getUnlockedVault()
-      const store = vault.stores.find(({ id }) => id === message.storeId)
-      if (!store) throw new Error("The selected store was not found.")
-      const tab = await chrome.tabs.create({ active: true, url: LOGOUT_URL })
-      if (tab.id === undefined) throw new Error("Chrome did not create the login tab.")
-      const job: ActiveJob = { id: crypto.randomUUID(), tabId: tab.id, storeId: store.id, stage: "logout", startedAt: Date.now() }
-      await setActiveJob(job)
-      return { ok: true, jobId: job.id }
+      return serializeSwitchStart(async () => {
+        if (await getActiveJob()) throw new Error("Another account switch is already running.")
+        const { vault } = await getUnlockedVault()
+        const store = vault.stores.find(({ id }) => id === message.storeId)
+        if (!store) throw new Error("The selected store was not found.")
+        let tabId: number | undefined
+        try {
+          const tab = await chrome.tabs.create({ active: true, url: "about:blank" })
+          if (tab.id === undefined) throw new Error("Chrome did not create the login tab.")
+          tabId = tab.id
+          const job: ActiveJob = { id: crypto.randomUUID(), tabId: tab.id, storeId: store.id, stage: "logout", startedAt: Date.now() }
+          await setActiveJob(job)
+          await chrome.tabs.update(tab.id, { url: LOGOUT_URL })
+          return { ok: true, jobId: job.id }
+        } catch (error) {
+          if (tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
+          await setActiveJob(undefined)
+          throw error
+        }
+      })
+    }
+    case "ACCOUNTS_FOCUS_SWITCH": {
+      const job = await getActiveJob()
+      if (!job || job.tabId < 0) throw new Error("No account switch is running.")
+      await chrome.tabs.update(job.tabId, { active: true })
+      return { ok: true }
+    }
+    case "ACCOUNTS_CANCEL_SWITCH": {
+      const job = await getActiveJob()
+      if (!job) return { ok: true }
+      await setActiveJob(undefined)
+      if (job.tabId >= 0) try { await chrome.tabs.remove(job.tabId) } catch { /* tab already closed */ }
+      return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_GET_JOB": {
       const job = await getActiveJob()
@@ -243,31 +341,11 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       }
       throw new Error("Unknown credential stage.")
     }
-    case "ACCOUNT_AUTOMATION_ESCAPE": {
-      const job = await assertWorkflowSender(sender, message.jobId)
-      await withJobDebugger(job, async (target) => {
-        await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 })
-        await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 })
-      })
-      return { ok: true }
-    }
     case "ACCOUNT_AUTOMATION_CLICK": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      if (typeof message.action !== "string" || !AUTOMATION_CLICK_ACTIONS.has(message.action)) {
-        throw new Error("Unsupported login click action.")
-      }
-      const x = message.x
-      const y = message.y
-      if (
-        typeof x !== "number" ||
-        typeof y !== "number" ||
-        !Number.isFinite(x) ||
-        !Number.isFinite(y) ||
-        x < 0 ||
-        y < 0
-      ) {
-        throw new Error("Invalid login click coordinates.")
-      }
+      if (typeof message.action !== "string" || !AUTOMATION_CLICK_ACTIONS.has(message.action)) throw new Error("Unsupported login click action.")
+      const { x, y } = message
+      if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) throw new Error("Invalid login click coordinates.")
       await withJobDebugger(job, async (target) => {
         await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y })
         await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 })
@@ -278,6 +356,12 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
     case "ACCOUNT_AUTOMATION_PAUSED": {
       const job = await assertWorkflowSender(sender, message.jobId)
       job.stage = "paused"; await setActiveJob(job)
+      return { ok: true }
+    }
+    case "ACCOUNT_AUTOMATION_LEAVE_LOGOUT": {
+      const job = await assertWorkflowSender(sender, message.jobId)
+      if (job.stage !== "logout") return { ok: true }
+      await advanceLogoutToSignIn(job)
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_COMPLETE": {
@@ -297,6 +381,31 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
   }
 }
 
+async function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
+  job.stage = "signin"
+  await setActiveJob(job)
+  await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
+}
+
+export async function handleAccountTabUpdated(
+  tabId: number,
+  changeInfo: { status?: string; url?: string },
+  tab: chrome.tabs.Tab,
+): Promise<void> {
+  if (changeInfo.status !== "complete") return
+  const job = await getActiveJob()
+  if (!job || job.tabId !== tabId || job.stage !== "logout") return
+
+  const currentUrl = changeInfo.url ?? tab.url
+  if (!currentUrl || currentUrl === "about:blank") return
+  let url: URL
+  try { url = new URL(currentUrl) } catch { return }
+  if (url.hostname !== "sellercentral.amazon.com") return
+
+  // Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
+  await advanceLogoutToSignIn(job)
+}
+
 const idsListener = createOpenIdsMessageListener()
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
   void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
@@ -308,15 +417,6 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     void handleAccountsMessage(message as Record<string, unknown>, sender).then(sendResponse, (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Account operation failed." }))
     return true
   })
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status !== "complete") return
-    void getActiveJob().then(async (job) => {
-      if (job?.tabId === tabId && job.stage === "logout") {
-        job.stage = "signin"
-        await setActiveJob(job)
-        await chrome.tabs.update(tabId, { url: SIGN_IN_URL })
-      }
-    })
-  })
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { void handleAccountTabUpdated(tabId, changeInfo, tab) })
   chrome.tabs.onRemoved.addListener((tabId) => { void getActiveJob().then((job) => job?.tabId === tabId ? setActiveJob(undefined) : undefined) })
 }

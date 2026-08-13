@@ -35,7 +35,9 @@ describe("background Case ID handling", () => {
   })
 
   it("opens every unique case in an inactive tab in the originating window", async () => {
-    const createTab = vi.fn().mockResolvedValue({} as chrome.tabs.Tab)
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 101 } as chrome.tabs.Tab)
+      .mockResolvedValueOnce({ id: 102 } as chrome.tabs.Tab)
 
     await openCaseTabs(
       ["21476974831", "21476874681", "21476974831"],
@@ -58,7 +60,7 @@ describe("background Case ID handling", () => {
   })
 
   it("returns a structured success response for the message", async () => {
-    const openTabs = vi.fn().mockResolvedValue(undefined)
+    const openTabs = vi.fn().mockResolvedValue({ openedCount: 1 })
     const sendResponse = vi.fn()
     const listener = createOpenIdsMessageListener(openTabs)
 
@@ -71,7 +73,7 @@ describe("background Case ID handling", () => {
     ).toBe(true)
 
     await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
     })
     expect(openTabs).toHaveBeenCalledWith(["21476974831"], senderTab)
   })
@@ -98,6 +100,36 @@ describe("background Case ID handling", () => {
 
     expect(listener({ type: "OTHER" }, {}, sendResponse)).toBeUndefined()
   })
+
+  it("rolls back a partially created batch", async () => {
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 101 } as chrome.tabs.Tab)
+      .mockRejectedValueOnce(new Error("tab creation failed"))
+    const removeTabs = vi.fn().mockResolvedValue(undefined)
+
+    await expect(openCaseTabs(["21476974831", "21476874681"], senderTab, createTab, removeTabs)).rejects.toMatchObject({
+      openedIds: [],
+      rolledBackIds: ["21476974831"],
+    })
+    expect(removeTabs).toHaveBeenCalledWith([101])
+  })
+
+  it("reports IDs whose rollback failed", async () => {
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 101 } as chrome.tabs.Tab)
+      .mockRejectedValueOnce(new Error("tab creation failed"))
+    const removeTabs = vi.fn().mockRejectedValue(new Error("close failed"))
+
+    await expect(openCaseTabs(["21476974831", "21476874681"], senderTab, createTab, removeTabs)).rejects.toMatchObject({
+      openedIds: ["21476974831"],
+      rolledBackIds: [],
+    })
+  })
+
+  it("enforces the fifty-ID limit in the background", async () => {
+    const ids = Array.from({ length: 51 }, (_, index) => String(50_000_000_000 + index))
+    await expect(openCaseTabs(ids, senderTab, vi.fn())).rejects.toThrow(/no more than 50/i)
+  })
 })
 
 describe("background Shipment ID handling", () => {
@@ -120,7 +152,9 @@ describe("background Shipment ID handling", () => {
   })
 
   it("opens every unique shipment in an inactive originating-window tab", async () => {
-    const createTab = vi.fn().mockResolvedValue({} as chrome.tabs.Tab)
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 201 } as chrome.tabs.Tab)
+      .mockResolvedValueOnce({ id: 202 } as chrome.tabs.Tab)
 
     await openShipmentTabs(
       ["FBA19749WJ6Q", "FBA18G77LW09", "FBA19749WJ6Q"],
@@ -143,8 +177,8 @@ describe("background Shipment ID handling", () => {
   })
 
   it("routes shipment messages and returns a structured response", async () => {
-    const openCases = vi.fn().mockResolvedValue(undefined)
-    const openShipments = vi.fn().mockResolvedValue(undefined)
+    const openCases = vi.fn().mockResolvedValue({ openedCount: 0 })
+    const openShipments = vi.fn().mockResolvedValue({ openedCount: 1 })
     const sendResponse = vi.fn()
     const listener = createOpenIdsMessageListener(openCases, openShipments)
 
@@ -160,7 +194,7 @@ describe("background Shipment ID handling", () => {
     ).toBe(true)
 
     await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
     })
     expect(openShipments).toHaveBeenCalledWith(["FBA19749WJ6Q"], senderTab)
     expect(openCases).not.toHaveBeenCalled()

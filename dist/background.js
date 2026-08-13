@@ -3,6 +3,18 @@ const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?r
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/";
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx";
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0";
+const MAX_BULK_IDS = 50;
+const ACTIVE_JOB_TTL_MS = 15 * 60 * 1e3;
+export class TabBatchError extends Error {
+	openedIds;
+	rolledBackIds;
+	constructor(message, openedIds, rolledBackIds) {
+		super(message);
+		this.openedIds = openedIds;
+		this.rolledBackIds = rolledBackIds;
+		this.name = "TabBatchError";
+	}
+}
 export function normalizeCaseIds(value) {
 	return Array.isArray(value) ? [...new Set(value.filter((id) => typeof id === "string" && /^\d{11}$/u.test(id)))] : [];
 }
@@ -15,24 +27,50 @@ export function buildCaseUrl(id) {
 export function buildShipmentUrl(id) {
 	return `${SHIPMENT_URL}${id}/contents`;
 }
-async function createBackgroundTabs(ids, senderTab, buildUrl, createTab) {
+async function createBackgroundTabs(ids, senderTab, buildUrl, createTab, removeTabs) {
 	if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.");
-	for (const id of ids) await createTab({
-		active: false,
-		openerTabId: senderTab.id,
-		url: buildUrl(id),
-		windowId: senderTab.windowId
-	});
+	if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`);
+	const created = [];
+	try {
+		for (const id of ids) {
+			const tab = await createTab({
+				active: false,
+				openerTabId: senderTab.id,
+				url: buildUrl(id),
+				windowId: senderTab.windowId
+			});
+			if (tab.id === undefined) throw new Error("Chrome created a tab without an ID.");
+			created.push({
+				id,
+				tabId: tab.id
+			});
+		}
+		return { openedCount: created.length };
+	} catch (cause) {
+		const rolledBackIds = [];
+		const openedIds = [];
+		for (const item of created) {
+			try {
+				await removeTabs([item.tabId]);
+				rolledBackIds.push(item.id);
+			} catch {
+				openedIds.push(item.id);
+			}
+		}
+		const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab.";
+		const suffix = openedIds.length ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.` : " Any tabs opened by this attempt were closed.";
+		throw new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds);
+	}
 }
-export async function openCaseTabs(ids, senderTab, createTab = (properties) => chrome.tabs.create(properties)) {
+export async function openCaseTabs(ids, senderTab, createTab = (properties) => chrome.tabs.create(properties), removeTabs = (tabIds) => chrome.tabs.remove(tabIds)) {
 	const normalized = normalizeCaseIds(ids);
 	if (!normalized.length) throw new Error("No valid Case IDs were provided.");
-	await createBackgroundTabs(normalized, senderTab, buildCaseUrl, createTab);
+	return createBackgroundTabs(normalized, senderTab, buildCaseUrl, createTab, removeTabs);
 }
-export async function openShipmentTabs(ids, senderTab, createTab = (properties) => chrome.tabs.create(properties)) {
+export async function openShipmentTabs(ids, senderTab, createTab = (properties) => chrome.tabs.create(properties), removeTabs = (tabIds) => chrome.tabs.remove(tabIds)) {
 	const normalized = normalizeShipmentIds(ids);
 	if (!normalized.length) throw new Error("No valid Shipment IDs were provided.");
-	await createBackgroundTabs(normalized, senderTab, buildShipmentUrl, createTab);
+	return createBackgroundTabs(normalized, senderTab, buildShipmentUrl, createTab, removeTabs);
 }
 export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipments = openShipmentTabs) {
 	return (message, sender, sendResponse) => {
@@ -41,9 +79,16 @@ export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipm
 		const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : null;
 		if (!handler) return undefined;
 		const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.shipmentIds;
-		void handler(ids, sender.tab).then(() => sendResponse({ ok: true }), (error) => sendResponse({
+		void handler(ids, sender.tab).then((result) => sendResponse({
+			ok: true,
+			openedCount: result?.openedCount ?? 0
+		}), (error) => sendResponse({
 			ok: false,
-			error: error instanceof Error ? error.message : "Couldn’t open tabs."
+			error: error instanceof Error ? error.message : "Couldn’t open tabs.",
+			...error instanceof TabBatchError ? {
+				openedIds: error.openedIds,
+				rolledBackIds: error.rolledBackIds
+			} : {}
 		}));
 		return true;
 	};
@@ -51,9 +96,9 @@ export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipm
 const AUTOMATION_CLICK_ACTIONS = new Set([
 	"continue",
 	"password-submit",
-	"otp-submit",
-	"passkey-cancel"
+	"otp-submit"
 ]);
+let startSwitchLock = Promise.resolve();
 export function validateVault(vault) {
 	const names = new Set();
 	const domains = new Set();
@@ -99,11 +144,29 @@ async function saveVault(vault, envelope, key) {
 	});
 }
 async function getActiveJob() {
-	return (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY];
+	const job = (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY];
+	if (job && Date.now() - job.startedAt >= ACTIVE_JOB_TTL_MS) {
+		await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY);
+		return undefined;
+	}
+	return job;
 }
 async function setActiveJob(job) {
 	if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job });
 	else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY);
+}
+async function serializeSwitchStart(action) {
+	const previous = startSwitchLock;
+	let release;
+	startSwitchLock = new Promise((resolve) => {
+		release = resolve;
+	});
+	await previous;
+	try {
+		return await action();
+	} finally {
+		release();
+	}
 }
 async function assertWorkflowSender(sender, jobId) {
 	const job = await getActiveJob();
@@ -145,11 +208,20 @@ export async function handleAccountsMessage(message, sender) {
 				getSessionKey(),
 				chrome.storage.local.get(STORE_INDEX_KEY)
 			]);
+			const stores = index[STORE_INDEX_KEY] ?? [];
+			const job = await getActiveJob();
+			const activeStore = job ? stores.find((store) => store.id === job.storeId) : undefined;
 			return {
 				ok: true,
 				initialized: Boolean(envelope),
 				unlocked: Boolean(key),
-				stores: index[STORE_INDEX_KEY] ?? []
+				stores,
+				activeSwitch: job ? {
+					storeId: job.storeId,
+					storeName: activeStore?.name ?? "Selected store",
+					stage: job.stage,
+					startedAt: job.startedAt
+				} : undefined
 			};
 		}
 		case "ACCOUNTS_CREATE": {
@@ -206,27 +278,55 @@ export async function handleAccountsMessage(message, sender) {
 			await chrome.runtime.openOptionsPage();
 			return { ok: true };
 		case "ACCOUNTS_START_SWITCH": {
-			if (await getActiveJob()) throw new Error("Another account switch is already running.");
-			const { vault } = await getUnlockedVault();
-			const store = vault.stores.find(({ id }) => id === message.storeId);
-			if (!store) throw new Error("The selected store was not found.");
-			const tab = await chrome.tabs.create({
-				active: true,
-				url: LOGOUT_URL
+			return serializeSwitchStart(async () => {
+				if (await getActiveJob()) throw new Error("Another account switch is already running.");
+				const { vault } = await getUnlockedVault();
+				const store = vault.stores.find(({ id }) => id === message.storeId);
+				if (!store) throw new Error("The selected store was not found.");
+				let tabId;
+				try {
+					const tab = await chrome.tabs.create({
+						active: true,
+						url: "about:blank"
+					});
+					if (tab.id === undefined) throw new Error("Chrome did not create the login tab.");
+					tabId = tab.id;
+					const job = {
+						id: crypto.randomUUID(),
+						tabId: tab.id,
+						storeId: store.id,
+						stage: "logout",
+						startedAt: Date.now()
+					};
+					await setActiveJob(job);
+					await chrome.tabs.update(tab.id, { url: LOGOUT_URL });
+					return {
+						ok: true,
+						jobId: job.id
+					};
+				} catch (error) {
+					if (tabId !== undefined) try {
+						await chrome.tabs.remove(tabId);
+					} catch {}
+					await setActiveJob(undefined);
+					throw error;
+				}
 			});
-			if (tab.id === undefined) throw new Error("Chrome did not create the login tab.");
-			const job = {
-				id: crypto.randomUUID(),
-				tabId: tab.id,
-				storeId: store.id,
-				stage: "logout",
-				startedAt: Date.now()
-			};
-			await setActiveJob(job);
-			return {
-				ok: true,
-				jobId: job.id
-			};
+		}
+		case "ACCOUNTS_FOCUS_SWITCH": {
+			const job = await getActiveJob();
+			if (!job || job.tabId < 0) throw new Error("No account switch is running.");
+			await chrome.tabs.update(job.tabId, { active: true });
+			return { ok: true };
+		}
+		case "ACCOUNTS_CANCEL_SWITCH": {
+			const job = await getActiveJob();
+			if (!job) return { ok: true };
+			await setActiveJob(undefined);
+			if (job.tabId >= 0) try {
+				await chrome.tabs.remove(job.tabId);
+			} catch {}
+			return { ok: true };
 		}
 		case "ACCOUNT_AUTOMATION_GET_JOB": {
 			const job = await getActiveJob();
@@ -277,34 +377,11 @@ export async function handleAccountsMessage(message, sender) {
 			}
 			throw new Error("Unknown credential stage.");
 		}
-		case "ACCOUNT_AUTOMATION_ESCAPE": {
-			const job = await assertWorkflowSender(sender, message.jobId);
-			await withJobDebugger(job, async (target) => {
-				await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
-					type: "keyDown",
-					key: "Escape",
-					code: "Escape",
-					windowsVirtualKeyCode: 27
-				});
-				await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
-					type: "keyUp",
-					key: "Escape",
-					code: "Escape",
-					windowsVirtualKeyCode: 27
-				});
-			});
-			return { ok: true };
-		}
 		case "ACCOUNT_AUTOMATION_CLICK": {
 			const job = await assertWorkflowSender(sender, message.jobId);
-			if (typeof message.action !== "string" || !AUTOMATION_CLICK_ACTIONS.has(message.action)) {
-				throw new Error("Unsupported login click action.");
-			}
-			const x = message.x;
-			const y = message.y;
-			if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
-				throw new Error("Invalid login click coordinates.");
-			}
+			if (typeof message.action !== "string" || !AUTOMATION_CLICK_ACTIONS.has(message.action)) throw new Error("Unsupported login click action.");
+			const { x, y } = message;
+			if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) throw new Error("Invalid login click coordinates.");
 			await withJobDebugger(job, async (target) => {
 				await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
 					type: "mouseMoved",
@@ -334,6 +411,12 @@ export async function handleAccountsMessage(message, sender) {
 			await setActiveJob(job);
 			return { ok: true };
 		}
+		case "ACCOUNT_AUTOMATION_LEAVE_LOGOUT": {
+			const job = await assertWorkflowSender(sender, message.jobId);
+			if (job.stage !== "logout") return { ok: true };
+			await advanceLogoutToSignIn(job);
+			return { ok: true };
+		}
 		case "ACCOUNT_AUTOMATION_COMPLETE": {
 			const job = await assertWorkflowSender(sender, message.jobId);
 			const { store } = await getJobRecords(job);
@@ -351,6 +434,27 @@ export async function handleAccountsMessage(message, sender) {
 		default: throw new Error("Unknown account command.");
 	}
 }
+async function advanceLogoutToSignIn(job) {
+	job.stage = "signin";
+	await setActiveJob(job);
+	await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL });
+}
+export async function handleAccountTabUpdated(tabId, changeInfo, tab) {
+	if (changeInfo.status !== "complete") return;
+	const job = await getActiveJob();
+	if (!job || job.tabId !== tabId || job.stage !== "logout") return;
+	const currentUrl = changeInfo.url ?? tab.url;
+	if (!currentUrl || currentUrl === "about:blank") return;
+	let url;
+	try {
+		url = new URL(currentUrl);
+	} catch {
+		return;
+	}
+	if (url.hostname !== "sellercentral.amazon.com") return;
+	// Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
+	await advanceLogoutToSignIn(job);
+}
 const idsListener = createOpenIdsMessageListener();
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 	void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -365,15 +469,8 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 		}));
 		return true;
 	});
-	chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-		if (changeInfo.status !== "complete") return;
-		void getActiveJob().then(async (job) => {
-			if (job?.tabId === tabId && job.stage === "logout") {
-				job.stage = "signin";
-				await setActiveJob(job);
-				await chrome.tabs.update(tabId, { url: SIGN_IN_URL });
-			}
-		});
+	chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+		void handleAccountTabUpdated(tabId, changeInfo, tab);
 	});
 	chrome.tabs.onRemoved.addListener((tabId) => {
 		void getActiveJob().then((job) => job?.tabId === tabId ? setActiveJob(undefined) : undefined);

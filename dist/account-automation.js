@@ -2,6 +2,7 @@ const STATUS_ID = "s4e-account-switch-status";
 const documentStartedAt = Date.now();
 const attempts = new Map();
 let inFlight = null;
+let leavingLogout = false;
 const RETRY_DELAY_MS = 5e3;
 const MAX_ATTEMPTS = 2;
 async function send(message) {
@@ -27,6 +28,7 @@ function setWorkflowStatus(text, tone = "normal") {
 		});
 		document.documentElement.append(element);
 	}
+	element.setAttribute("role", tone === "error" ? "alert" : "status");
 	element.style.background = tone === "error" ? "#991b1b" : "#1f2937";
 	element.textContent = text;
 }
@@ -53,10 +55,13 @@ function fill(element, value) {
 	element.dispatchEvent(new Event("input", { bubbles: true }));
 	element.dispatchEvent(new Event("change", { bubbles: true }));
 }
-async function trustedClick(jobId, element, action, missingMessage) {
+async function activate(jobId, element, action, missingMessage) {
 	if (!element) throw new Error(missingMessage);
+	if (!visible(element)) throw new Error(`${missingMessage} The control is not visible.`);
 	const rect = element.getBoundingClientRect();
-	if (rect.width <= 0 || rect.height <= 0) throw new Error(`${missingMessage} The control is not visible.`);
+	if (!Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) {
+		throw new Error(`${missingMessage} The control has invalid click coordinates.`);
+	}
 	const response = await send({
 		type: "ACCOUNT_AUTOMATION_CLICK",
 		jobId,
@@ -64,7 +69,7 @@ async function trustedClick(jobId, element, action, missingMessage) {
 		x: rect.left + rect.width / 2,
 		y: rect.top + rect.height / 2
 	});
-	if (!response.ok) throw new Error(response.error ?? "Chrome could not click Amazon’s login control.");
+	if (!response.ok) throw new Error(response.error ?? "Chrome could not activate Amazon’s login control.");
 }
 function prepareStage(stage, failureMessage) {
 	if (inFlight?.stage !== stage) {
@@ -92,8 +97,27 @@ function hasCaptcha() {
 	return Boolean(document.querySelector("iframe[src*=\"captcha\" i], input[name*=\"captcha\" i], #captchacharacters")) || /enter the characters you see|solve this puzzle|captcha/iu.test(document.body?.innerText ?? "");
 }
 function hasAuthError() {
-	const alert = document.querySelector("[role=\"alert\"], .a-alert-error, #auth-error-message-box");
-	return visible(alert) && (alert.textContent?.trim().length ?? 0) > 0;
+	const alert = Array.from(document.querySelectorAll("[role=\"alert\"], .a-alert-error, #auth-error-message-box")).find((element) => element.id !== STATUS_ID && visible(element) && (element.textContent?.trim().length ?? 0) > 0);
+	return Boolean(alert);
+}
+function hasAuthenticatedSellerUi(root = document) {
+	const modernShell = [
+		"#sc-navtab-home",
+		"#sc-top-nav-root",
+		"[data-testid=\"global-nav\"]"
+	].some((selector) => visible(root.querySelector(selector)));
+	if (modernShell) return true;
+	const classicShellMarkers = [
+		"#sc-search-field",
+		"a.logo-container[href=\"/home\"]",
+		"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
+	].filter((selector) => visible(root.querySelector(selector)));
+	return classicShellMarkers.length >= 2;
+}
+/** Logged-in enough to open the saved store URL (shell UI or merchant/marketplace picker). */
+function isReadyForStoreNavigation() {
+	if (hasAuthenticatedSellerUi()) return true;
+	return location.pathname.startsWith("/account-switcher/");
 }
 async function requestSecret(jobId, kind) {
 	const response = await send({
@@ -114,10 +138,6 @@ async function run() {
 	const job = response.job;
 	if (!response.ok || !job) return;
 	try {
-		if (job.stage === "logout") {
-			setWorkflowStatus("Signing out of the current Seller Central account…");
-			return;
-		}
 		if (hasCaptcha()) {
 			setWorkflowStatus("Amazon needs you to complete the CAPTCHA. Automation will resume afterward.");
 			if (!attempts.has("captcha")) {
@@ -138,6 +158,40 @@ async function run() {
 			});
 			return;
 		}
+		// Never fill credentials on Amazon's logout re-auth (return_to=sign-out); wait for canonical sign-in navigation.
+		if (job.stage === "logout" || leavingLogout) {
+			if (Date.now() - documentStartedAt > 9e4) throw new Error("Amazon did not finish signing out. Cancel the switch and try again.");
+			setWorkflowStatus("Signing out of the current Seller Central account…");
+			const onLogoutIntercept = location.pathname.startsWith("/ap/") || location.pathname.includes("signin") || Boolean(input([
+				"#ap_email",
+				"input[name=\"email\"]",
+				"input[type=\"email\"]",
+				"input[autocomplete=\"username\"]"
+			])) || Boolean(input([
+				"#ap_password",
+				"input[name=\"password\"]",
+				"input[type=\"password\"]"
+			])) || Boolean(input([
+				"#auth-mfa-otpcode",
+				"input[name=\"otpCode\"]",
+				"input[autocomplete=\"one-time-code\"]",
+				"input[inputmode=\"numeric\"]"
+			]));
+			if (!leavingLogout && onLogoutIntercept) {
+				leavingLogout = true;
+				const left = await send({
+					type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT",
+					jobId: job.id
+				});
+				if (!left.ok) {
+					leavingLogout = false;
+					throw new Error(left.error ?? "Could not leave Amazon’s logout page.");
+				}
+				return;
+			}
+			window.setTimeout(() => void run(), 1e3);
+			return;
+		}
 		const email = input([
 			"#ap_email",
 			"input[name=\"email\"]",
@@ -150,7 +204,7 @@ async function run() {
 			const value = await requestSecret(job.id, "email");
 			if (!value) return;
 			fill(email, value);
-			await trustedClick(job.id, button(["#continue", "input[name=\"continue\"]"], /continue/iu), "continue", "Amazon’s Continue button was not found.");
+			await activate(job.id, button(["#continue", "input[name=\"continue\"]"], /continue/iu), "continue", "Amazon’s Continue button was not found.");
 			markStageSubmitted("email");
 			return;
 		}
@@ -161,18 +215,11 @@ async function run() {
 		]);
 		if (password) {
 			if (!prepareStage("password", "Amazon’s password button did not advance the login.")) return;
-			setWorkflowStatus("Dismissing passkey prompt and entering the saved password…");
-			const cancel = button([], /cancel|not now|use password|skip/iu);
-			if (cancel) await trustedClick(job.id, cancel, "passkey-cancel", "Amazon’s passkey Cancel button was not found.");
-			const escape = await send({
-				type: "ACCOUNT_AUTOMATION_ESCAPE",
-				jobId: job.id
-			});
-			if (!escape.ok) throw new Error(escape.error ?? "Could not dismiss the passkey prompt.");
+			setWorkflowStatus("Entering the saved password…");
 			const value = await requestSecret(job.id, "password");
 			if (!value) return;
 			fill(password, value);
-			await trustedClick(job.id, button([
+			await activate(job.id, button([
 				"#signInSubmit",
 				"input[name=\"signIn\"]",
 				"button[type=\"submit\"]"
@@ -192,7 +239,7 @@ async function run() {
 			const value = await requestSecret(job.id, "otp");
 			if (!value) return;
 			fill(otp, value);
-			await trustedClick(job.id, button([
+			await activate(job.id, button([
 				"#auth-signin-button",
 				"input[type=\"submit\"]",
 				"button[type=\"submit\"]"
@@ -200,7 +247,7 @@ async function run() {
 			markStageSubmitted("otp");
 			return;
 		}
-		if (!location.pathname.startsWith("/ap/") && !location.pathname.includes("signin")) {
+		if (isReadyForStoreNavigation()) {
 			setWorkflowStatus("Signed in. Opening the selected store…");
 			const completed = await send({
 				type: "ACCOUNT_AUTOMATION_COMPLETE",

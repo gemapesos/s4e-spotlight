@@ -5,12 +5,15 @@ import "../src/pasteGuard"
 const HOST_ID = "command-palette-extension-root"
 const OPEN_ATTRIBUTE = "data-s4e-palette-open"
 
-function createFocusedPalette(open = true) {
+function createFocusedPalette(open = true, inputType?: "password") {
   const host = document.createElement("div")
   host.id = HOST_ID
   host.setAttribute(OPEN_ATTRIBUTE, String(open))
   const shadowRoot = host.attachShadow({ mode: "open" })
-  const textarea = document.createElement("textarea")
+  const textarea = inputType
+    ? document.createElement("input")
+    : document.createElement("textarea")
+  if (inputType) textarea.setAttribute("type", inputType)
   shadowRoot.append(textarea)
   document.documentElement.append(host)
   textarea.focus()
@@ -23,6 +26,65 @@ afterEach(() => {
 })
 
 describe("early paste guard", () => {
+  it.each([
+    { type: "keydown", key: "a" },
+    { type: "keydown", key: "Z", shiftKey: true },
+    { type: "keydown", key: "!", shiftKey: true },
+    { type: "keydown", key: "ø", altKey: true },
+    { type: "keydown", key: "@", altKey: true, ctrlKey: true },
+    { type: "keydown", key: "Dead", altKey: true },
+    { type: "keydown", key: "Process" },
+    { type: "keydown", key: "Backspace" },
+    { type: "keydown", key: "Delete" },
+    { type: "keypress", key: "a" },
+  ])(
+    "isolates password-editing $type for $key from hostile page handlers",
+    ({ type, ...init }) => {
+      const { textarea } = createFocusedPalette(true, "password")
+      const pageHandler = vi.fn((event: Event) => event.preventDefault())
+      window.addEventListener(type, pageHandler)
+      const event = new KeyboardEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        ...init,
+      })
+
+      expect(textarea.dispatchEvent(event)).toBe(true)
+      expect(event.defaultPrevented).toBe(false)
+      expect(pageHandler).not.toHaveBeenCalled()
+
+      window.removeEventListener(type, pageHandler)
+    },
+  )
+
+  it.each([
+    "insertText",
+    "insertCompositionText",
+    "insertReplacementText",
+    "deleteContentBackward",
+    "deleteContentForward",
+    "historyUndo",
+  ])("isolates %s beforeinput without cancelling its native default", (inputType) => {
+    const { textarea } = createFocusedPalette()
+    const pageHandler = vi.fn((event: Event) => event.preventDefault())
+    window.addEventListener("beforeinput", pageHandler)
+    const event = Object.assign(
+      new Event("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      }),
+      { inputType },
+    )
+
+    expect(textarea.dispatchEvent(event)).toBe(true)
+    expect(event.defaultPrevented).toBe(false)
+    expect(pageHandler).not.toHaveBeenCalled()
+
+    window.removeEventListener("beforeinput", pageHandler)
+  })
+
   it.each([
     new KeyboardEvent("keydown", {
       bubbles: true,
@@ -52,33 +114,71 @@ describe("early paste guard", () => {
     window.removeEventListener(event.type, pageHandler)
   })
 
-  it("does not intercept paste when the palette is closed", () => {
+  it("does not intercept guarded input when the palette is closed", () => {
     const { textarea } = createFocusedPalette(false)
-    const pageHandler = vi.fn()
-    window.addEventListener("paste", pageHandler)
+    const keyHandler = vi.fn()
+    const inputHandler = vi.fn()
+    window.addEventListener("keydown", keyHandler)
+    window.addEventListener("beforeinput", inputHandler)
 
     textarea.dispatchEvent(
-      new Event("paste", { bubbles: true, cancelable: true, composed: true }),
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        key: "a",
+      }),
+    )
+    textarea.dispatchEvent(
+      Object.assign(
+        new Event("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        }),
+        { inputType: "insertText" },
+      ),
     )
 
-    expect(pageHandler).toHaveBeenCalledOnce()
-    window.removeEventListener("paste", pageHandler)
+    expect(keyHandler).toHaveBeenCalledOnce()
+    expect(inputHandler).toHaveBeenCalledOnce()
+    window.removeEventListener("keydown", keyHandler)
+    window.removeEventListener("beforeinput", inputHandler)
   })
 
-  it("does not intercept paste outside the focused palette", () => {
+  it("does not intercept guarded input outside the focused palette", () => {
     createFocusedPalette()
     const pageInput = document.createElement("textarea")
     document.body.append(pageInput)
     pageInput.focus()
-    const pageHandler = vi.fn()
-    window.addEventListener("paste", pageHandler)
+    const keyHandler = vi.fn()
+    const inputHandler = vi.fn()
+    window.addEventListener("keydown", keyHandler)
+    window.addEventListener("beforeinput", inputHandler)
 
     pageInput.dispatchEvent(
-      new Event("paste", { bubbles: true, cancelable: true, composed: true }),
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        key: "a",
+      }),
+    )
+    pageInput.dispatchEvent(
+      Object.assign(
+        new Event("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        }),
+        { inputType: "insertText" },
+      ),
     )
 
-    expect(pageHandler).toHaveBeenCalledOnce()
-    window.removeEventListener("paste", pageHandler)
+    expect(keyHandler).toHaveBeenCalledOnce()
+    expect(inputHandler).toHaveBeenCalledOnce()
+    window.removeEventListener("keydown", keyHandler)
+    window.removeEventListener("beforeinput", inputHandler)
     pageInput.remove()
   })
 
@@ -149,12 +249,31 @@ describe("early paste guard", () => {
     pageInput.remove()
   })
 
-  it("ignores unrelated keyboard and input events", () => {
+  it.each(["Enter", "Escape", "Tab", "ArrowDown", "Home", "End"])(
+    "leaves the %s control or navigation key on its existing path",
+    (key) => {
+      const { textarea } = createFocusedPalette()
+      const pageHandler = vi.fn()
+      window.addEventListener("keydown", pageHandler)
+
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          key,
+        }),
+      )
+
+      expect(pageHandler).toHaveBeenCalledOnce()
+      window.removeEventListener("keydown", pageHandler)
+    },
+  )
+
+  it("leaves unrelated primary-modifier shortcuts on their existing path", () => {
     const { textarea } = createFocusedPalette()
     const keyHandler = vi.fn()
-    const inputHandler = vi.fn()
     window.addEventListener("keydown", keyHandler)
-    window.addEventListener("beforeinput", inputHandler)
 
     textarea.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -167,12 +286,11 @@ describe("early paste guard", () => {
     )
     textarea.dispatchEvent(
       new KeyboardEvent("keydown", {
-        altKey: true,
         bubbles: true,
         cancelable: true,
         composed: true,
-        ctrlKey: true,
-        key: "a",
+        key: "k",
+        metaKey: true,
       }),
     )
     textarea.dispatchEvent(
@@ -185,21 +303,9 @@ describe("early paste guard", () => {
         shiftKey: true,
       }),
     )
-    textarea.dispatchEvent(
-      Object.assign(
-        new Event("beforeinput", {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-        }),
-        { inputType: "insertText" },
-      ),
-    )
 
     expect(keyHandler).toHaveBeenCalledTimes(3)
-    expect(inputHandler).toHaveBeenCalledOnce()
     window.removeEventListener("keydown", keyHandler)
-    window.removeEventListener("beforeinput", inputHandler)
   })
 
   it("ignores keydown-like events that do not provide a key", () => {
@@ -222,6 +328,7 @@ describe("early paste guard", () => {
     const { textarea } = createFocusedPalette()
     const pasteHandler = vi.fn()
     const keyHandler = vi.fn()
+    const keypressHandler = vi.fn()
     const inputHandler = vi.fn()
 
     ;(
@@ -232,6 +339,7 @@ describe("early paste guard", () => {
 
     window.addEventListener("paste", pasteHandler)
     window.addEventListener("keydown", keyHandler)
+    window.addEventListener("keypress", keypressHandler)
     window.addEventListener("beforeinput", inputHandler)
 
     textarea.dispatchEvent(
@@ -247,6 +355,14 @@ describe("early paste guard", () => {
       }),
     )
     textarea.dispatchEvent(
+      new KeyboardEvent("keypress", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        key: "a",
+      }),
+    )
+    textarea.dispatchEvent(
       Object.assign(
         new Event("beforeinput", {
           bubbles: true,
@@ -259,9 +375,11 @@ describe("early paste guard", () => {
 
     expect(pasteHandler).toHaveBeenCalledOnce()
     expect(keyHandler).toHaveBeenCalledOnce()
+    expect(keypressHandler).toHaveBeenCalledOnce()
     expect(inputHandler).toHaveBeenCalledOnce()
     window.removeEventListener("paste", pasteHandler)
     window.removeEventListener("keydown", keyHandler)
+    window.removeEventListener("keypress", keypressHandler)
     window.removeEventListener("beforeinput", inputHandler)
   })
 })

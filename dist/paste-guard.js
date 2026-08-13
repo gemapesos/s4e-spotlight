@@ -7,13 +7,17 @@ function isPasteShortcut(event) {
 function isSelectAllShortcut(event) {
 	return typeof event.key === "string" && event.key.toLowerCase() === "a" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
 }
-function isPasteEvent(event) {
-	if (event.type === "paste") return true;
-	if (event.type === "keydown") return isPasteShortcut(event);
-	return event.type === "beforeinput" && event.inputType === "insertFromPaste";
+function isTextEditingKey(event) {
+	if (typeof event.key !== "string") return false;
+	const canProduceText = event.key.length === 1 || event.key === "Dead" || event.key === "Process" || event.key === "Unidentified";
+	const usesPrimaryShortcut = event.metaKey || event.ctrlKey && !event.altKey;
+	return !usesPrimaryShortcut && canProduceText || event.key === "Backspace" || event.key === "Delete";
 }
 function isGuardedEvent(event) {
-	return isPasteEvent(event) || event.type === "keydown" && isSelectAllShortcut(event);
+	if (event.type === "paste" || event.type === "beforeinput") return true;
+	if (event.type !== "keydown" && event.type !== "keypress") return false;
+	const keyboardEvent = event;
+	return isTextEditingKey(keyboardEvent) || isPasteShortcut(keyboardEvent) || isSelectAllShortcut(keyboardEvent);
 }
 function paletteOwnsEvent(targetDocument, event) {
 	const host = targetDocument.getElementById(PALETTE_HOST_ID);
@@ -31,10 +35,12 @@ function installPasteGuard(targetWindow) {
 		event.stopImmediatePropagation();
 	};
 	targetWindow.addEventListener("keydown", guard, true);
+	targetWindow.addEventListener("keypress", guard, true);
 	targetWindow.addEventListener("paste", guard, true);
 	targetWindow.addEventListener("beforeinput", guard, true);
 	return { destroy: () => {
 		targetWindow.removeEventListener("keydown", guard, true);
+		targetWindow.removeEventListener("keypress", guard, true);
 		targetWindow.removeEventListener("paste", guard, true);
 		targetWindow.removeEventListener("beforeinput", guard, true);
 	} };
