@@ -1,0 +1,168 @@
+import { describe, expect, it, vi } from "vitest"
+
+import {
+  buildCaseUrl,
+  buildShipmentUrl,
+  createOpenIdsMessageListener,
+  normalizeCaseIds,
+  normalizeShipmentIds,
+  openCaseTabs,
+  openShipmentTabs,
+} from "../src/background"
+
+const senderTab = {
+  id: 42,
+  windowId: 7,
+} as chrome.tabs.Tab
+
+describe("background Case ID handling", () => {
+  it("validates and deduplicates Case IDs", () => {
+    expect(
+      normalizeCaseIds([
+        "21476974831",
+        "invalid",
+        "21476874681",
+        "21476974831",
+        21476874681,
+      ]),
+    ).toEqual(["21476974831", "21476874681"])
+  })
+
+  it("builds the canonical Seller Central case URL", () => {
+    expect(buildCaseUrl("21598756071")).toBe(
+      "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=21598756071",
+    )
+  })
+
+  it("opens every unique case in an inactive tab in the originating window", async () => {
+    const createTab = vi.fn().mockResolvedValue({} as chrome.tabs.Tab)
+
+    await openCaseTabs(
+      ["21476974831", "21476874681", "21476974831"],
+      senderTab,
+      createTab,
+    )
+
+    expect(createTab).toHaveBeenNthCalledWith(1, {
+      active: false,
+      openerTabId: 42,
+      url: buildCaseUrl("21476974831"),
+      windowId: 7,
+    })
+    expect(createTab).toHaveBeenNthCalledWith(2, {
+      active: false,
+      openerTabId: 42,
+      url: buildCaseUrl("21476874681"),
+      windowId: 7,
+    })
+  })
+
+  it("returns a structured success response for the message", async () => {
+    const openTabs = vi.fn().mockResolvedValue(undefined)
+    const sendResponse = vi.fn()
+    const listener = createOpenIdsMessageListener(openTabs)
+
+    expect(
+      listener(
+        { type: "OPEN_CASE_IDS", caseIds: ["21476974831"] },
+        { tab: senderTab } as chrome.runtime.MessageSender,
+        sendResponse,
+      ),
+    ).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+    })
+    expect(openTabs).toHaveBeenCalledWith(["21476974831"], senderTab)
+  })
+
+  it("returns a structured error and ignores unrelated messages", async () => {
+    const openTabs = vi.fn().mockRejectedValue(new Error("tab creation failed"))
+    const sendResponse = vi.fn()
+    const listener = createOpenIdsMessageListener(openTabs)
+
+    expect(
+      listener(
+        { type: "OPEN_CASE_IDS", caseIds: [] },
+        { tab: senderTab } as chrome.runtime.MessageSender,
+        sendResponse,
+      ),
+    ).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(sendResponse).toHaveBeenCalledWith({
+        ok: false,
+        error: "tab creation failed",
+      })
+    })
+
+    expect(listener({ type: "OTHER" }, {}, sendResponse)).toBeUndefined()
+  })
+})
+
+describe("background Shipment ID handling", () => {
+  it("normalizes, validates, and deduplicates Shipment IDs", () => {
+    expect(
+      normalizeShipmentIds([
+        "fba19749wj6q",
+        "invalid",
+        "FBA18G77LW09",
+        "FBA19749WJ6Q",
+        123,
+      ]),
+    ).toEqual(["FBA19749WJ6Q", "FBA18G77LW09"])
+  })
+
+  it("builds the canonical Seller Central shipment URL", () => {
+    expect(buildShipmentUrl("FBA19749WJ6Q")).toBe(
+      "https://sellercentral.amazon.com/fba/inbound-shipment/summary/FBA19749WJ6Q/contents",
+    )
+  })
+
+  it("opens every unique shipment in an inactive originating-window tab", async () => {
+    const createTab = vi.fn().mockResolvedValue({} as chrome.tabs.Tab)
+
+    await openShipmentTabs(
+      ["FBA19749WJ6Q", "FBA18G77LW09", "FBA19749WJ6Q"],
+      senderTab,
+      createTab,
+    )
+
+    expect(createTab).toHaveBeenNthCalledWith(1, {
+      active: false,
+      openerTabId: 42,
+      url: buildShipmentUrl("FBA19749WJ6Q"),
+      windowId: 7,
+    })
+    expect(createTab).toHaveBeenNthCalledWith(2, {
+      active: false,
+      openerTabId: 42,
+      url: buildShipmentUrl("FBA18G77LW09"),
+      windowId: 7,
+    })
+  })
+
+  it("routes shipment messages and returns a structured response", async () => {
+    const openCases = vi.fn().mockResolvedValue(undefined)
+    const openShipments = vi.fn().mockResolvedValue(undefined)
+    const sendResponse = vi.fn()
+    const listener = createOpenIdsMessageListener(openCases, openShipments)
+
+    expect(
+      listener(
+        {
+          type: "OPEN_SHIPMENT_IDS",
+          shipmentIds: ["FBA19749WJ6Q"],
+        },
+        { tab: senderTab } as chrome.runtime.MessageSender,
+        sendResponse,
+      ),
+    ).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+    })
+    expect(openShipments).toHaveBeenCalledWith(["FBA19749WJ6Q"], senderTab)
+    expect(openCases).not.toHaveBeenCalled()
+  })
+})
