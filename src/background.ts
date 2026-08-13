@@ -22,6 +22,8 @@ import {
 
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID="
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/"
+const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm="
+const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx"
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
 
@@ -54,8 +56,14 @@ export function normalizeShipmentIds(value: unknown): string[] {
     ? [...new Set(value.filter((id): id is string => typeof id === "string").map((id) => id.toUpperCase()).filter((id) => /^FBA[A-Z0-9]{9}$/u.test(id)))]
     : []
 }
+export function normalizeSkuIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.filter((id): id is string => typeof id === "string").map((id) => id.trim()).filter((id) => id.length > 0 && id.length <= 40))]
+    : []
+}
 export function buildCaseUrl(id: string): string { return `${CASE_URL}${id}` }
 export function buildShipmentUrl(id: string): string { return `${SHIPMENT_URL}${id}/contents` }
+export function buildSkuUrl(id: string): string { return `${SKU_URL}${encodeURIComponent(id)}${SKU_URL_SUFFIX}` }
 
 async function createBackgroundTabs(
   ids: string[],
@@ -103,14 +111,19 @@ export async function openShipmentTabs(ids: unknown, senderTab: chrome.tabs.Tab 
   if (!normalized.length) throw new Error("No valid Shipment IDs were provided.")
   return createBackgroundTabs(normalized, senderTab, buildShipmentUrl, createTab, removeTabs)
 }
+export async function openSkuTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
+  const normalized = normalizeSkuIds(ids)
+  if (!normalized.length) throw new Error("No valid SKUs were provided.")
+  return createBackgroundTabs(normalized, senderTab, buildSkuUrl, createTab, removeTabs)
+}
 
-export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs, openShipments: OpenTabs = openShipmentTabs) {
+export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs, openShipments: OpenTabs = openShipmentTabs, openSkus: OpenTabs = openSkuTabs) {
   return (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: OpenIdsResponse) => void): boolean | undefined => {
     if (!message || typeof message !== "object" || !("type" in message)) return undefined
     const record = message as Record<string, unknown>
-    const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : null
+    const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : record.type === "OPEN_SKU_IDS" ? openSkus : null
     if (!handler) return undefined
-    const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.shipmentIds
+    const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.type === "OPEN_SHIPMENT_IDS" ? record.shipmentIds : record.skuIds
     void handler(ids, sender.tab).then(
       (result) => sendResponse({ ok: true, openedCount: result?.openedCount ?? 0 }),
       (error: unknown) => sendResponse({

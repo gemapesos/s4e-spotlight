@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client"
 
 import styles from "./styles.css?inline"
 import { CommandPalette, type AccountsStatus } from "./CommandPalette"
+import { applyPrefersColorScheme } from "./lib/colorScheme"
 import { isPaletteShortcut } from "./lib/shortcut"
 
 const HOST_ID = "command-palette-extension-root"
@@ -26,6 +27,11 @@ export interface OpenCaseIdsMessage {
 export interface OpenShipmentIdsMessage {
   type: "OPEN_SHIPMENT_IDS"
   shipmentIds: string[]
+}
+
+export interface OpenSkuIdsMessage {
+  type: "OPEN_SKU_IDS"
+  skuIds: string[]
 }
 
 export type OpenIdsResponse =
@@ -126,6 +132,20 @@ export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   }
 }
 
+export async function openSkuIds(skuIds: string[]): Promise<void> {
+  const response = await chrome.runtime.sendMessage<
+    OpenSkuIdsMessage,
+    OpenIdsResponse
+  >({
+    type: "OPEN_SKU_IDS",
+    skuIds,
+  })
+
+  if (!response?.ok) {
+    throw new Error(response?.error ?? "The background worker did not respond.")
+  }
+}
+
 async function accountApi<T extends Record<string, unknown>>(message: Record<string, unknown>): Promise<T> {
   const response = await chrome.runtime.sendMessage(message) as T & { ok?: boolean; error?: string }
   if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
@@ -158,6 +178,7 @@ export function mountCommandPalette({
     "pointer-events: none",
   ].join(";")
   applyPaletteRemScale(host, targetDocument)
+  const stopColorScheme = applyPrefersColorScheme(host, targetDocument.defaultView ?? window)
 
   const shadowRoot = host.attachShadow({ mode: shadowMode })
   const style = targetDocument.createElement("style")
@@ -168,7 +189,9 @@ export function mountCommandPalette({
   mountPoint.className = "palette-scope"
   mountPoint.style.pointerEvents = "auto"
   shadowRoot.append(mountPoint)
-  targetDocument.documentElement.append(host)
+  // Radix Dialog's hideOthers() walks document.body, so the host must live there.
+  // Fall back to <html> only if this document has no body yet.
+  ;(targetDocument.body ?? targetDocument.documentElement).append(host)
 
   let root: Root | null = createRoot(mountPoint)
   let isOpen = false
@@ -197,6 +220,7 @@ export function mountCommandPalette({
           open={isOpen}
           onOpenCaseIds={openCaseIds}
           onOpenShipmentIds={openShipmentIds}
+          onOpenSkuIds={openSkuIds}
           onGetAccountsStatus={getAccountsStatus}
           onUnlockAccounts={unlockAccounts}
           onStartAccountSwitch={startAccountSwitch}
@@ -228,6 +252,7 @@ export function mountCommandPalette({
         open={false}
         onOpenCaseIds={openCaseIds}
         onOpenShipmentIds={openShipmentIds}
+        onOpenSkuIds={openSkuIds}
         onGetAccountsStatus={getAccountsStatus}
         onUnlockAccounts={unlockAccounts}
         onStartAccountSwitch={startAccountSwitch}
@@ -253,6 +278,7 @@ export function mountCommandPalette({
       ;(targetDocument.defaultView as PasteGuardWindow | null)?.[
         PASTE_GUARD_KEY
       ]?.destroy()
+      stopColorScheme()
       root?.unmount()
       root = null
       host.remove()

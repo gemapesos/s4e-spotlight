@@ -4,6 +4,7 @@ import {
   mountCommandPalette,
   openCaseIds,
   openShipmentIds,
+  openSkuIds,
   type MountedCommandPalette,
 } from "../src/content"
 
@@ -52,34 +53,57 @@ describe("content-script mount", () => {
     )
   })
 
+  it("sends SKUs to the background worker and requires success", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+
+    await expect(openSkuIds(["ABC-123", "DEF_456"])).resolves.toBeUndefined()
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "OPEN_SKU_IDS",
+      skuIds: ["ABC-123", "DEF_456"],
+    })
+
+    sendMessage.mockResolvedValue({ ok: false, error: "worker failed" })
+    await expect(openSkuIds(["ABC-123"])).rejects.toThrow("worker failed")
+  })
+
   it("isolates the UI in a shadow root and ignores a duplicate mount", () => {
     mounted = mountCommandPalette({ document, shadowMode: "open" })
 
     expect(mounted).not.toBeNull()
+    expect(mounted?.host.parentElement).toBe(document.body)
     expect(mounted?.host).toHaveAttribute("data-s4e-palette-open", "false")
     expect(mounted?.shadowRoot.querySelector("style")).not.toBeNull()
     expect(mountCommandPalette({ document, shadowMode: "open" })).toBeNull()
   })
 
   it("captures the shortcut, prevents the page handler, and toggles the dialog", async () => {
+    const errorSpy = vi.spyOn(console, "error")
     mounted = mountCommandPalette({ document, shadowMode: "open" })
     const pageHandler = vi.fn()
     window.addEventListener("keydown", pageHandler)
 
-    const openEvent = new KeyboardEvent("keydown", {
-      code: "Slash",
-      ctrlKey: true,
-      cancelable: true,
-    })
-    window.dispatchEvent(openEvent)
+    try {
+      const openEvent = new KeyboardEvent("keydown", {
+        code: "Slash",
+        ctrlKey: true,
+        cancelable: true,
+      })
+      window.dispatchEvent(openEvent)
 
-    await vi.waitFor(() => {
-      expect(mounted?.shadowRoot.querySelector("[role=dialog]")).not.toBeNull()
-    })
-    expect(mounted?.host.style.pointerEvents).toBe("auto")
-    expect(mounted?.host).toHaveAttribute("data-s4e-palette-open", "true")
-    expect(openEvent.defaultPrevented).toBe(true)
-    expect(pageHandler).not.toHaveBeenCalled()
+      await vi.waitFor(() => {
+        expect(mounted?.shadowRoot.querySelector("[role=dialog]")).not.toBeNull()
+      })
+      expect(mounted?.host.style.pointerEvents).toBe("auto")
+      expect(mounted?.host).toHaveAttribute("data-s4e-palette-open", "true")
+      expect(openEvent.defaultPrevented).toBe(true)
+      expect(pageHandler).not.toHaveBeenCalled()
+      expect(
+        errorSpy.mock.calls.some(([message]) => String(message).includes("aria-hidden")),
+      ).toBe(false)
+    } finally {
+      errorSpy.mockRestore()
+    }
 
     const closeEvent = new KeyboardEvent("keydown", {
       code: "Slash",

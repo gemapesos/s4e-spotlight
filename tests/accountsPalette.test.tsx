@@ -18,6 +18,7 @@ function renderAccounts(overrides: Record<string, unknown> = {}) {
     onOpenChange: vi.fn(),
     onOpenCaseIds: vi.fn().mockResolvedValue(undefined),
     onOpenShipmentIds: vi.fn().mockResolvedValue(undefined),
+    onOpenSkuIds: vi.fn().mockResolvedValue(undefined),
     onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: true, unlocked: true, stores: [{ id: "store-1", name: "JMG Outdoors" }] }),
     onUnlockAccounts: vi.fn().mockResolvedValue(undefined),
     onStartAccountSwitch: vi.fn().mockResolvedValue(undefined),
@@ -187,6 +188,22 @@ describe("Accounts palette", () => {
     await user.type(search, "missing")
     expect(screen.getByText("No matching stores.")).toBeVisible()
     expect(screen.queryByText("No stores configured.")).not.toBeInTheDocument()
+  })
+
+  it("matches stores with a one-character typo", async () => {
+    const user = userEvent.setup()
+    renderAccounts({
+      onGetAccountsStatus: vi.fn().mockResolvedValue({
+        initialized: true,
+        unlocked: true,
+        stores: [{ id: "one", name: "JMG Outdoors" }, { id: "two", name: "North Shop" }],
+      }),
+    })
+    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    const search = await screen.findByRole("combobox", { name: "Search accounts" })
+    await user.type(search, "outdors")
+    expect(screen.getByRole("option", { name: "JMG Outdoors" })).toBeVisible()
+    expect(screen.queryByRole("option", { name: "North Shop" })).not.toBeInTheDocument()
   })
 
   it("keeps account-loading and Manage Accounts errors visible", async () => {

@@ -1,6 +1,6 @@
 # Command Palette Chrome Extension
 
-A Manifest V3 Chrome extension that opens a shadcn-style command palette on ordinary webpages with `Command+/` on macOS or `Ctrl+/` on Windows and Linux. Its actions open Amazon Seller Central support cases and inbound shipments from messy pasted text, and switch between encrypted Seller Central accounts.
+A Manifest V3 Chrome extension that opens a [shadcn/ui](https://ui.shadcn.com/docs) command palette on ordinary webpages with `Command+/` on macOS or `Ctrl+/` on Windows and Linux. Its actions open Amazon Seller Central support cases, inbound shipments, and inventory SKU searches from messy pasted text, and switch between encrypted Seller Central accounts.
 
 ## Develop
 
@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-The watch build writes the unpacked extension to `dist/`.
+The watch build writes the unpacked extension to `dist/`. UI components are installed with the [shadcn/ui CLI](https://ui.shadcn.com/docs/cli) into `src/components/ui`.
 
 ## Build and test
 
@@ -42,6 +42,7 @@ After rebuilding, use the extension card's reload button and refresh the page be
 - Case tabs use `https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=…`.
 - Choosing **Open Shipment IDs** provides the same multiline workflow for standalone `FBA` plus nine-character shipment IDs, including IDs embedded in Seller Central links.
 - Shipment IDs are normalized to uppercase and deduplicated before opening background tabs at `https://sellercentral.amazon.com/fba/inbound-shipment/summary/{shipmentId}/contents`.
+- Choosing **Search SKU/s** provides the same multiline workflow for merchant SKUs pasted one per line, or separated by commas or tabs. Values longer than 40 characters are ignored. Each SKU opens a background inventory search at `https://sellercentral.amazon.com/myinventory/inventory?…&searchTerm={sku}`.
 - **Accounts** opens a searchable list of configured Seller Central stores. Selecting a store opens an active login tab, signs out, signs in with its saved credential and locally generated TOTP, and opens the store URL. A running switch can be focused or cancelled from the palette and expires after 15 minutes if it becomes orphaned.
 - **Manage Accounts** opens a full options page. Create a master password first, add shared credentials, then add stores such as **JMG Outdoors** that reference those credentials.
 - Account data is encrypted locally with AES-256-GCM. The master password is processed with PBKDF2-HMAC-SHA256 (600,000 iterations), is never stored, and unlocks the vault only for the current browser session.

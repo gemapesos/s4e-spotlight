@@ -10,6 +10,7 @@ function renderPalette(
   onOpenShipmentIds = vi
     .fn<(shipmentIds: string[]) => Promise<void>>()
     .mockResolvedValue(),
+  onOpenSkuIds = vi.fn<(skuIds: string[]) => Promise<void>>().mockResolvedValue(),
 ) {
   const container = document.createElement("div")
   document.body.append(container)
@@ -21,6 +22,7 @@ function renderPalette(
       open={open}
       onOpenCaseIds={onOpenCaseIds}
       onOpenShipmentIds={onOpenShipmentIds}
+      onOpenSkuIds={onOpenSkuIds}
       onOpenChange={onOpenChange}
     />,
   )
@@ -32,6 +34,7 @@ function renderPalette(
         open={nextOpen}
         onOpenCaseIds={onOpenCaseIds}
         onOpenShipmentIds={onOpenShipmentIds}
+        onOpenSkuIds={onOpenSkuIds}
         onOpenChange={onOpenChange}
       />,
     )
@@ -42,6 +45,7 @@ function renderPalette(
     onOpenCaseIds,
     onOpenChange,
     onOpenShipmentIds,
+    onOpenSkuIds,
     rerenderPalette,
   }
 }
@@ -74,6 +78,7 @@ describe("CommandPalette", () => {
     expect(screen.getByText("Configuration", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByRole("option", { name: /Open Case ID\/s/ })).toHaveAttribute("aria-selected", "true")
     expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Search SKU\/s/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Calendar/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Search Emoji/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Calculator/ })).not.toBeInTheDocument()
@@ -92,6 +97,38 @@ describe("CommandPalette", () => {
     await user.clear(input)
     await user.type(input, "missing command")
     expect(screen.getByText("No results found.")).toBeVisible()
+  })
+
+  it("matches shipment commands by typo, synonym, and acronym", async () => {
+    const user = userEvent.setup()
+    renderPalette()
+    const input = screen.getByRole("combobox", { name: "Search commands" })
+
+    await user.type(input, "shipmnet")
+    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.queryByRole("option", { name: /Open Case ID/ })).not.toBeInTheDocument()
+
+    await user.clear(input)
+    await user.type(input, "fba")
+    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+
+    await user.clear(input)
+    await user.type(input, "osi")
+    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+  })
+
+  it("offers a detected Case ID action that opens the extracted ID", async () => {
+    const user = userEvent.setup()
+    const { onOpenCaseIds } = renderPalette()
+    const input = screen.getByRole("combobox", { name: "Search commands" })
+
+    await user.type(input, "21476974831")
+    const detected = screen.getByRole("option", { name: /Open case 21476974831/ })
+    expect(detected).toBeVisible()
+    expect(screen.queryByText("No results found.")).not.toBeInTheDocument()
+
+    await user.click(detected)
+    expect(onOpenCaseIds).toHaveBeenCalledWith(["21476974831"])
   })
 
   it("opens an enabled workflow without closing the palette", async () => {
@@ -349,6 +386,48 @@ describe("CommandPalette", () => {
     expect(onOpenChange).not.toHaveBeenCalled()
   })
 
+  it("extracts unique SKUs from lines and commas and submits them", async () => {
+    const user = userEvent.setup()
+    const openSkuIds = vi.fn<(skuIds: string[]) => Promise<void>>().mockResolvedValue()
+    const { onOpenChange } = renderPalette(
+      true,
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(undefined),
+      openSkuIds,
+    )
+
+    await user.click(screen.getByRole("option", { name: /Search SKU\/s/ }))
+    const input = screen.getByRole("textbox", { name: "SKUs" })
+    fireEvent.change(input, {
+      target: { value: "ABC-123\nabc-123, DEF_456\nABC-123" },
+    })
+    expect(screen.getByText("3 unique SKUs")).toBeVisible()
+    await user.keyboard("{Enter}")
+
+    expect(openSkuIds).toHaveBeenCalledWith(["ABC-123", "abc-123", "DEF_456"])
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("keeps invalid SKU input open with a specific error", async () => {
+    const user = userEvent.setup()
+    const openSkuIds = vi.fn<(skuIds: string[]) => Promise<void>>().mockResolvedValue()
+    const { onOpenChange } = renderPalette(
+      true,
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(undefined),
+      openSkuIds,
+    )
+
+    await user.click(screen.getByRole("option", { name: /Search SKU\/s/ }))
+    const input = screen.getByRole("textbox", { name: "SKUs" })
+    expect(input).toHaveFocus()
+    await user.keyboard("{Enter}")
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Enter at least one SKU.")
+    expect(openSkuIds).not.toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
   it("uses Shift+Enter for a line break without submitting", async () => {
     const user = userEvent.setup()
     const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
@@ -418,7 +497,7 @@ describe("CommandPalette", () => {
 
     document.body.replaceChildren()
     const second = renderPalette()
-    await user.click(document.querySelector("[data-slot=dialog-backdrop]") as HTMLElement)
+    await user.click(document.querySelector("[data-slot=dialog-overlay]") as HTMLElement)
     expect(second.onOpenChange).toHaveBeenCalledWith(false)
   })
 })

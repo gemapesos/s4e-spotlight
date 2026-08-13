@@ -31,7 +31,6 @@ function extensionScriptsPlugin(): Plugin {
   )
   const accountAutomationPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/accountAutomation.ts")
   const accountsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/accounts.ts")
-  const optionsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/options.ts")
 
   return {
     name: "extension-scripts",
@@ -42,26 +41,23 @@ function extensionScriptsPlugin(): Plugin {
       this.addWatchFile(passkeyGuardCorePath)
       this.addWatchFile(accountAutomationPath)
       this.addWatchFile(accountsPath)
-      this.addWatchFile(optionsPath)
     },
     async generateBundle(_options, bundle) {
-      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource, optionsSource] = await Promise.all([
+      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource] = await Promise.all([
         readFile(backgroundPath, "utf8"),
         readFile(pasteGuardPath, "utf8"),
         readFile(passkeyGuardPath, "utf8"),
         readFile(passkeyGuardCorePath, "utf8"),
         readFile(accountAutomationPath, "utf8"),
         readFile(accountsPath, "utf8"),
-        readFile(optionsPath, "utf8"),
       ])
-      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult, optionsResult] = await Promise.all([
+      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult] = await Promise.all([
         transformWithOxc(backgroundSource, backgroundPath),
         transformWithOxc(pasteGuardSource, pasteGuardPath),
         transformWithOxc(passkeyGuardSource, passkeyGuardPath),
         transformWithOxc(passkeyGuardCoreSource, passkeyGuardCorePath),
         transformWithOxc(accountAutomationSource, accountAutomationPath),
         transformWithOxc(accountsSource, accountsPath),
-        transformWithOxc(optionsSource, optionsPath),
       ])
       const passkeyGuardBundle = `${stripModuleSyntax(passkeyGuardCoreResult.code)}\n${stripModuleSyntax(passkeyGuardResult.code)}`
 
@@ -91,7 +87,6 @@ function extensionScriptsPlugin(): Plugin {
       this.emitFile({ type: "asset", fileName: "account-automation.js", source: accountAutomationResult.code })
       this.emitFile({ type: "asset", fileName: "passkey-guard.js", source: passkeyGuardBundle })
       this.emitFile({ type: "asset", fileName: "lib/accounts.js", source: accountsResult.code })
-      this.emitFile({ type: "asset", fileName: "options.js", source: optionsResult.code })
       this.emitFile({
         type: "asset",
         fileName: "paste-guard.js",
@@ -103,6 +98,11 @@ function extensionScriptsPlugin(): Plugin {
 
 export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss(), extensionScriptsPlugin()],
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
   define: {
     "process.env.NODE_ENV": JSON.stringify(
       mode === "test" ? "test" : "production",
@@ -110,7 +110,7 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     outDir: "dist",
-    emptyOutDir: true,
+    emptyOutDir: mode !== "development",
     cssCodeSplit: false,
     minify: "oxc",
     lib: {
