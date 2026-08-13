@@ -13,6 +13,8 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "permissions": ["storage", "debugger"],
+  "options_page": "options.html",
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
@@ -23,6 +25,12 @@
     {
       "matches": ["http://*/*", "https://*/*"],
       "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://sellercentral.amazon.com/*"],
+      "js": ["account-automation.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

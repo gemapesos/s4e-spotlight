@@ -2,10 +2,10 @@ const PALETTE_HOST_ID = "command-palette-extension-root";
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open";
 const PASTE_GUARD_KEY = "__s4eSpotlightPasteGuard";
 function isPasteShortcut(event) {
-	return event.key.toLowerCase() === "v" && (event.metaKey || event.ctrlKey) && !event.altKey;
+	return typeof event.key === "string" && event.key.toLowerCase() === "v" && (event.metaKey || event.ctrlKey) && !event.altKey;
 }
 function isSelectAllShortcut(event) {
-	return event.key.toLowerCase() === "a" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+	return typeof event.key === "string" && event.key.toLowerCase() === "a" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
 }
 function isPasteEvent(event) {
 	if (event.type === "paste") return true;

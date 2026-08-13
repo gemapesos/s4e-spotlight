@@ -2,7 +2,7 @@ import * as React from "react"
 import { createRoot, type Root } from "react-dom/client"
 
 import styles from "./styles.css?inline"
-import { CommandPalette } from "./CommandPalette"
+import { CommandPalette, type AccountsStatus } from "./CommandPalette"
 import { isPaletteShortcut } from "./lib/shortcut"
 
 const HOST_ID = "command-palette-extension-root"
@@ -110,6 +110,19 @@ export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   }
 }
 
+async function accountApi<T extends Record<string, unknown>>(message: Record<string, unknown>): Promise<T> {
+  const response = await chrome.runtime.sendMessage(message) as T & { ok?: boolean; error?: string }
+  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  return response
+}
+export async function getAccountsStatus(): Promise<AccountsStatus> {
+  const response = await accountApi<{ ok: true; initialized: boolean; unlocked: boolean; stores: AccountsStatus["stores"] }>({ type: "ACCOUNTS_STATUS" })
+  return { initialized: response.initialized, unlocked: response.unlocked, stores: response.stores }
+}
+export async function unlockAccounts(masterPassword: string): Promise<void> { await accountApi({ type: "ACCOUNTS_UNLOCK", masterPassword }) }
+export async function startAccountSwitch(storeId: string): Promise<void> { await accountApi({ type: "ACCOUNTS_START_SWITCH", storeId }) }
+export async function manageAccounts(): Promise<void> { await accountApi({ type: "ACCOUNTS_OPEN_OPTIONS" }) }
+
 export function mountCommandPalette({
   document: targetDocument = window.document,
   shadowMode = "closed",
@@ -164,6 +177,10 @@ export function mountCommandPalette({
           open={isOpen}
           onOpenCaseIds={openCaseIds}
           onOpenShipmentIds={openShipmentIds}
+          onGetAccountsStatus={getAccountsStatus}
+          onUnlockAccounts={unlockAccounts}
+          onStartAccountSwitch={startAccountSwitch}
+          onManageAccounts={manageAccounts}
           onOpenChange={setOpen}
         />
       </React.StrictMode>,
@@ -189,6 +206,10 @@ export function mountCommandPalette({
         open={false}
         onOpenCaseIds={openCaseIds}
         onOpenShipmentIds={openShipmentIds}
+        onGetAccountsStatus={getAccountsStatus}
+        onUnlockAccounts={unlockAccounts}
+        onStartAccountSwitch={startAccountSwitch}
+        onManageAccounts={manageAccounts}
         onOpenChange={setOpen}
       />
     </React.StrictMode>,

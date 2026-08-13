@@ -14,7 +14,7 @@ Chrome users who want a fast, keyboard-first command surface available while bro
 
 ## Product Purpose
 
-Provide one dependable shortcut that opens a familiar, searchable command palette and turns messy Amazon Seller Central Case ID or Shipment ID text into background tabs without persistent state.
+Provide one dependable shortcut for Seller Central operational tools: turn messy Case ID or Shipment ID text into tabs and switch stores using locally encrypted account data.
 
 ## Positioning
 
@@ -36,6 +36,7 @@ Avoid decorative extension chrome, custom visual branding, noisy animation, pers
 - Keep newly opened work in the background so the user retains their current context.
 - Isolate the interface from host-page styles and scripts.
 - Request only the access required for the shortcut to work.
+- Keep account secrets encrypted at rest, local to the Chrome profile, and unavailable to ordinary page content.
 
 ## Accessibility & Inclusion
 

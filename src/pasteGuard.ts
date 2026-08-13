@@ -13,6 +13,7 @@ type PasteGuardWindow = Window &
 
 function isPasteShortcut(event: KeyboardEvent): boolean {
   return (
+    typeof event.key === "string" &&
     event.key.toLowerCase() === "v" &&
     (event.metaKey || event.ctrlKey) &&
     !event.altKey
@@ -21,6 +22,7 @@ function isPasteShortcut(event: KeyboardEvent): boolean {
 
 function isSelectAllShortcut(event: KeyboardEvent): boolean {
   return (
+    typeof event.key === "string" &&
     event.key.toLowerCase() === "a" &&
     (event.metaKey || event.ctrlKey) &&
     !event.altKey &&

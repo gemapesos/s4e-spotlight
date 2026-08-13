@@ -202,6 +202,22 @@ describe("early paste guard", () => {
     window.removeEventListener("beforeinput", inputHandler)
   })
 
+  it("ignores keydown-like events that do not provide a key", () => {
+    const { textarea } = createFocusedPalette()
+    const pageHandler = vi.fn()
+    window.addEventListener("keydown", pageHandler)
+    const event = new Event("keydown", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    })
+
+    expect(() => textarea.dispatchEvent(event)).not.toThrow()
+    expect(pageHandler).toHaveBeenCalledOnce()
+
+    window.removeEventListener("keydown", pageHandler)
+  })
+
   it("removes every guard listener during teardown", () => {
     const { textarea } = createFocusedPalette()
     const pasteHandler = vi.fn()

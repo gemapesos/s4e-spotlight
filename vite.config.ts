@@ -16,21 +16,33 @@ function extensionScriptsPlugin(): Plugin {
     fileURLToPath(new URL(".", import.meta.url)),
     "src/pasteGuard.ts",
   )
+  const accountAutomationPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/accountAutomation.ts")
+  const accountsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/accounts.ts")
+  const optionsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/options.ts")
 
   return {
     name: "extension-scripts",
     buildStart() {
       this.addWatchFile(backgroundPath)
       this.addWatchFile(pasteGuardPath)
+      this.addWatchFile(accountAutomationPath)
+      this.addWatchFile(accountsPath)
+      this.addWatchFile(optionsPath)
     },
     async generateBundle() {
-      const [backgroundSource, pasteGuardSource] = await Promise.all([
+      const [backgroundSource, pasteGuardSource, accountAutomationSource, accountsSource, optionsSource] = await Promise.all([
         readFile(backgroundPath, "utf8"),
         readFile(pasteGuardPath, "utf8"),
+        readFile(accountAutomationPath, "utf8"),
+        readFile(accountsPath, "utf8"),
+        readFile(optionsPath, "utf8"),
       ])
-      const [backgroundResult, pasteGuardResult] = await Promise.all([
+      const [backgroundResult, pasteGuardResult, accountAutomationResult, accountsResult, optionsResult] = await Promise.all([
         transformWithOxc(backgroundSource, backgroundPath),
         transformWithOxc(pasteGuardSource, pasteGuardPath),
+        transformWithOxc(accountAutomationSource, accountAutomationPath),
+        transformWithOxc(accountsSource, accountsPath),
+        transformWithOxc(optionsSource, optionsPath),
       ])
 
       this.emitFile({
@@ -38,6 +50,9 @@ function extensionScriptsPlugin(): Plugin {
         fileName: "background.js",
         source: backgroundResult.code,
       })
+      this.emitFile({ type: "asset", fileName: "account-automation.js", source: accountAutomationResult.code })
+      this.emitFile({ type: "asset", fileName: "lib/accounts.js", source: accountsResult.code })
+      this.emitFile({ type: "asset", fileName: "options.js", source: optionsResult.code })
       this.emitFile({
         type: "asset",
         fileName: "paste-guard.js",
