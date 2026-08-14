@@ -1,3 +1,4 @@
+import { fetchNeutralNegativeFeedbacks } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
 import { sellerCentralSessionStatus } from "./lib/sellerCentralSession"
 import { fetchUnfulfillableListings } from "./lib/unfulfillable"
@@ -82,6 +83,16 @@ export function handleContentMessage(
       (error: unknown) => sendResponse({
         ok: false,
         error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory.",
+      }),
+    )
+    return true
+  }
+  if (record.type === "REPORTS_FETCH_FEEDBACK") {
+    void fetchNeutralNegativeFeedbacks().then(
+      (feedbacks) => sendResponse({ ok: true, feedbacks }),
+      (error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Couldn’t load seller feedback.",
       }),
     )
     return true

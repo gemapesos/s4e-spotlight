@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
   GET_LISTINGS_V2_QUERY,
   GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR,
+  INVENTORY_MANAGE_URL,
   REMOVAL_STATUS_BY_CODE,
   REMOVAL_STATUS_ELIGIBLE,
   REMOVAL_STATUS_UNKNOWN,
@@ -19,6 +20,7 @@ import {
   parseListingsPage,
   parseRecoveryInventories,
   readAntiCsrfToken,
+  readAntiCsrfTokenFromHtml,
   removalStatusFromLineItem,
   unfulfillableSheetRows,
   type RecoveryLineItem,
@@ -416,9 +418,37 @@ describe("fetchUnfulfillableListings", () => {
 
   it("throws when the security token is missing", async () => {
     const root = document.implementation.createHTMLDocument()
-    await expect(fetchUnfulfillableListings({ fetch: vi.fn() as unknown as typeof fetch, root, cookie: "" })).rejects.toThrow(
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "<html></html>" })
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root, cookie: "" })).rejects.toThrow(
       "Couldn’t read the Seller Central security token.",
     )
+  })
+
+  it("reads the security token from Manage Inventory HTML when the page has none", async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url === INVENTORY_MANAGE_URL) {
+        return { ok: true, status: 200, text: async () => '<html><meta name="anti-csrftoken-a2z" content="html-csrf"></html>' }
+      }
+      if (url.includes("/recovery/inventories")) return jsonResponse({ lineItems: [] })
+      return jsonResponse(listingsPayload([expiredListing], 1))
+    })
+    const root = document.implementation.createHTMLDocument()
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root, cookie: "" })).resolves.toEqual([
+      { ...expiredListing, removal: [] },
+    ])
+    expect(fetchImpl).toHaveBeenCalledWith(INVENTORY_MANAGE_URL, expect.objectContaining({
+      method: "GET",
+      credentials: "include",
+    }))
+    expect(fetchImpl).toHaveBeenCalledWith(UNFULFILLABLE_GQL_URL, expect.objectContaining({
+      headers: expect.objectContaining({ "anti-csrftoken-a2z": "html-csrf" }),
+    }))
+  })
+
+  it("parses either meta attribute order", () => {
+    expect(readAntiCsrfTokenFromHtml('<meta content="token-a" name="anti-csrftoken-a2z">')).toBe("token-a")
+    expect(readAntiCsrfTokenFromHtml('<meta name="anti-csrftoken-a2z" content="token-b">')).toBe("token-b")
   })
 
   it("throws when Seller Central returns a failed response", async () => {

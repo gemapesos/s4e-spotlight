@@ -101,4 +101,43 @@ describe("content script report messages", () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it("fetches neutral and negative seller feedback from Seller Central", async () => {
+    const feedback = {
+      feedbackId: "A1JYWNJI6O4TQ1",
+      orderId: "112-6224287-0679468",
+      numericRating: 1,
+      feedbackText: "Why has it not been credited?",
+      feedbackDate: "2026-08-03T19:22:21.216Z",
+      suppressed: false,
+      partiallySuppressed: false,
+    }
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ feedbacks: [feedback], lastPage: true, pageNumber: 0 }),
+    }))
+    vi.stubGlobal("fetch", fetchImpl)
+    const sendResponse = vi.fn()
+
+    try {
+      expect(handleContentMessage(
+        { type: "REPORTS_FETCH_FEEDBACK" },
+        {} as chrome.runtime.MessageSender,
+        sendResponse,
+      )).toBe(true)
+
+      await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+        ok: true,
+        feedbacks: [feedback],
+      }))
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(fetchImpl).toHaveBeenCalledWith(
+        expect.stringContaining("/fbmapi/v1/feedbacks"),
+        expect.objectContaining({ method: "GET", credentials: "include" }),
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })

@@ -42,6 +42,7 @@ function sellerCentralSessionStatus(pathname = location.pathname, root = documen
 
 const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql";
 const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories";
+const INVENTORY_MANAGE_URL = "https://sellercentral.amazon.com/myinventory/inventory";
 const UNFULFILLABLE_PAGE_SIZE = 250;
 const UNFULFILLABLE_MAX_PAGES = 40;
 const UNFULFILLABLE_INVENTORIES_BATCH_SIZE = 50;
@@ -172,6 +173,74 @@ function readAntiCsrfToken(root = document, cookie = typeof document !== "undefi
 	} catch {
 		return match[1].trim();
 	}
+}
+function readAntiCsrfTokenFromHtml(html) {
+	const named = html.match(/<meta\b[^>]*\bname=["']anti-csrftoken-a2z["'][^>]*\bcontent=["']([^"']+)["'][^>]*>/i);
+	if (named?.[1]) return named[1].trim();
+	const contentFirst = html.match(/<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']anti-csrftoken-a2z["'][^>]*>/i);
+	return contentFirst?.[1]?.trim();
+}
+async function fetchAntiCsrfTokenFromInventory(fetchImpl) {
+	const response = await fetchImpl(INVENTORY_MANAGE_URL, {
+		method: "GET",
+		credentials: "include",
+		headers: { accept: "text/html" }
+	});
+	if (!response.ok) {
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "post-fix",
+				hypothesisId: "F",
+				location: "src/lib/unfulfillable.ts:fetchAntiCsrfTokenFromInventory",
+				message: "inventory html token fetch failed",
+				data: {
+					status: response.status,
+					path: typeof location !== "undefined" ? location.pathname : ""
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
+		return undefined;
+	}
+	let html = "";
+	try {
+		html = await response.text();
+	} catch {
+		return undefined;
+	}
+	const token = readAntiCsrfTokenFromHtml(html);
+	// #region agent log
+	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Debug-Session-Id": "74ba58"
+		},
+		body: JSON.stringify({
+			sessionId: "74ba58",
+			runId: "post-fix",
+			hypothesisId: "F",
+			location: "src/lib/unfulfillable.ts:fetchAntiCsrfTokenFromInventory",
+			message: "inventory html token fetch",
+			data: {
+				status: response.status,
+				htmlLength: html.length,
+				hasToken: Boolean(token),
+				path: typeof location !== "undefined" ? location.pathname : ""
+			},
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+	// #endregion
+	return token;
 }
 function formatListingStatus(status) {
 	if (!status) return "";
@@ -432,7 +501,29 @@ async function fetchUnfulfillableListings(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
 	const root = options.root ?? document;
 	const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "");
-	const token = readAntiCsrfToken(root, cookie);
+	let token = readAntiCsrfToken(root, cookie);
+	// #region agent log
+	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Debug-Session-Id": "74ba58"
+		},
+		body: JSON.stringify({
+			sessionId: "74ba58",
+			runId: "pre-fix",
+			hypothesisId: "D",
+			location: "src/lib/unfulfillable.ts:fetchUnfulfillableListings",
+			message: "csrf token lookup",
+			data: {
+				hasToken: Boolean(token),
+				path: typeof location !== "undefined" ? location.pathname : ""
+			},
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+	// #endregion
+	if (!token) token = await fetchAntiCsrfTokenFromInventory(fetchImpl);
 	if (!token) throw new Error("Couldn’t read the Seller Central security token.");
 	let query = GET_LISTINGS_V2_QUERY;
 	let cursor;
@@ -474,6 +565,238 @@ async function fetchUnfulfillableListings(options = {}) {
 	}
 	const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings);
 	return mergeRemovalStatus(listings, lineItems);
+}
+
+const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks";
+const FEEDBACK_PAGE_SIZE = 20;
+const FEEDBACK_MAX_PAGES = 40;
+const FEEDBACK_FROM_RATING = 1;
+const FEEDBACK_TO_RATING = 3;
+const FEEDBACK_SHEET_HEADERS = [
+	"Date",
+	"Rating",
+	"Sentiment",
+	"Order ID",
+	"Feedback",
+	"Item as described",
+	"Seller response",
+	"Response date",
+	"Suppressed",
+	"Partially suppressed",
+	"Suppress reason",
+	"Feedback ID"
+];
+const MONTHS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec"
+];
+const HTML_NAMED_ENTITIES = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: "\"",
+	apos: "'",
+	nbsp: " "
+};
+function isNeutralOrNegativeRating(rating) {
+	return typeof rating === "number" && Number.isInteger(rating) && rating >= FEEDBACK_FROM_RATING && rating <= FEEDBACK_TO_RATING;
+}
+function feedbackSentiment(rating) {
+	if (!isNeutralOrNegativeRating(rating)) return "";
+	return rating <= 2 ? "Negative" : "Neutral";
+}
+function decodeHtmlEntities(value) {
+	return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity) => {
+		if (entity.startsWith("#x") || entity.startsWith("#X")) {
+			const code = Number.parseInt(entity.slice(2), 16);
+			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+		}
+		if (entity.startsWith("#")) {
+			const code = Number.parseInt(entity.slice(1), 10);
+			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+		}
+		return HTML_NAMED_ENTITIES[entity] ?? match;
+	});
+}
+function formatFeedbackDate(value) {
+	if (!value) return "";
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return value;
+	const day = String(date.getUTCDate()).padStart(2, "0");
+	const month = MONTHS[date.getUTCMonth()];
+	const year = date.getUTCFullYear();
+	const hours = String(date.getUTCHours()).padStart(2, "0");
+	const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+	const seconds = String(date.getUTCSeconds()).padStart(2, "0");
+	return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`;
+}
+function feedbackCell(value) {
+	if (value == null) return "";
+	return String(value);
+}
+function yesNo(value) {
+	if (value === true) return "Yes";
+	if (value === false) return "No";
+	return "";
+}
+function itemAsDescribed(feedback) {
+	return yesNo(feedback.answerMap?.ItemAsDescribed?.booleanRating);
+}
+function feedbackSheetRow(feedback) {
+	const rating = typeof feedback.numericRating === "number" && Number.isFinite(feedback.numericRating) ? feedback.numericRating : "";
+	return [
+		formatFeedbackDate(feedback.feedbackDate),
+		rating,
+		feedbackSentiment(typeof rating === "number" ? rating : undefined),
+		feedbackCell(feedback.orderId),
+		decodeHtmlEntities(feedback.feedbackText ?? ""),
+		itemAsDescribed(feedback),
+		decodeHtmlEntities(feedback.responseText ?? ""),
+		formatFeedbackDate(feedback.responseDate),
+		yesNo(feedback.suppressed),
+		yesNo(feedback.partiallySuppressed),
+		feedbackCell(feedback.suppressReasonId),
+		feedbackCell(feedback.feedbackId)
+	];
+}
+function feedbackSheetRows(feedbacks) {
+	return [[...FEEDBACK_SHEET_HEADERS], ...feedbacks.map(feedbackSheetRow)];
+}
+function stringField(value) {
+	if (value == null) return value;
+	return typeof value === "string" ? value : undefined;
+}
+function numberField(value) {
+	if (value == null) return value;
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function booleanField(value) {
+	if (value == null) return value;
+	return typeof value === "boolean" ? value : undefined;
+}
+function asFeedback(value) {
+	if (!value || typeof value !== "object") return undefined;
+	const record = value;
+	const answerMap = record.answerMap && typeof record.answerMap === "object" ? record.answerMap : undefined;
+	const itemAsDescribedAnswer = answerMap?.ItemAsDescribed && typeof answerMap.ItemAsDescribed === "object" ? answerMap.ItemAsDescribed : undefined;
+	const feedback = {};
+	const feedbackId = stringField(record.feedbackId);
+	const orderId = stringField(record.orderId);
+	const numericRating = numberField(record.numericRating);
+	const feedbackText = stringField(record.feedbackText);
+	const feedbackDate = stringField(record.feedbackDate);
+	const responseText = stringField(record.responseText);
+	const responseDate = stringField(record.responseDate);
+	const suppressed = booleanField(record.suppressed);
+	const partiallySuppressed = booleanField(record.partiallySuppressed);
+	const suppressReasonId = stringField(record.suppressReasonId);
+	if (feedbackId !== undefined) feedback.feedbackId = feedbackId;
+	if (orderId !== undefined) feedback.orderId = orderId;
+	if (numericRating !== undefined) feedback.numericRating = numericRating;
+	if (feedbackText !== undefined) feedback.feedbackText = feedbackText;
+	if (feedbackDate !== undefined) feedback.feedbackDate = feedbackDate;
+	if (responseText !== undefined) feedback.responseText = responseText;
+	if (responseDate !== undefined) feedback.responseDate = responseDate;
+	if (suppressed !== undefined) feedback.suppressed = suppressed;
+	if (partiallySuppressed !== undefined) feedback.partiallySuppressed = partiallySuppressed;
+	if (suppressReasonId !== undefined) feedback.suppressReasonId = suppressReasonId;
+	if (itemAsDescribedAnswer) {
+		feedback.answerMap = { ItemAsDescribed: { booleanRating: booleanField(itemAsDescribedAnswer.booleanRating) } };
+	}
+	return feedback;
+}
+function parseFeedbacksPage(payload) {
+	if (!payload || typeof payload !== "object") throw new Error("Couldn’t load seller feedback.");
+	const record = payload;
+	if (!Array.isArray(record.feedbacks)) throw new Error("Couldn’t load seller feedback.");
+	const feedbacks = record.feedbacks.map(asFeedback).filter((feedback) => feedback !== undefined);
+	const pageNumber = typeof record.pageNumber === "number" && Number.isFinite(record.pageNumber) ? record.pageNumber : 0;
+	return {
+		feedbacks,
+		lastPage: typeof record.lastPage === "boolean" ? record.lastPage : undefined,
+		pageNumber
+	};
+}
+function feedbacksUrl(pageNumber) {
+	const params = new URLSearchParams({
+		pageNumber: String(pageNumber),
+		pageSize: String(FEEDBACK_PAGE_SIZE),
+		fromRating: String(FEEDBACK_FROM_RATING),
+		toRating: String(FEEDBACK_TO_RATING),
+		sortBy: "Date",
+		descendingOrder: "true",
+		includePartiallySuppressed: "true",
+		excludeTTRFeedback: "false",
+		lastEvaluatedKey: ""
+	});
+	return `${FEEDBACKS_URL}?${params.toString()}`;
+}
+async function getFeedbacksPage(fetchImpl, pageNumber) {
+	const response = await fetchImpl(feedbacksUrl(pageNumber), {
+		method: "GET",
+		credentials: "include",
+		headers: {
+			accept: "application/json, text/plain, */*",
+			"x-requested-with": "XMLHttpRequest"
+		}
+	});
+	// #region agent log
+	void response.clone().text().then((body) => {
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "A",
+				location: "src/lib/feedback.ts:getFeedbacksPage",
+				message: "feedbacks HTTP response",
+				data: {
+					pageNumber,
+					pageSize: FEEDBACK_PAGE_SIZE,
+					status: response.status,
+					ok: response.ok,
+					url: feedbacksUrl(pageNumber),
+					bodyPreview: body.slice(0, 240),
+					path: typeof location !== "undefined" ? location.pathname : ""
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+	}).catch(() => {});
+	// #endregion
+	if (!response.ok) throw new Error(`Couldn’t load seller feedback (${response.status}).`);
+	let payload;
+	try {
+		payload = await response.json();
+	} catch {
+		throw new Error("Couldn’t load seller feedback.");
+	}
+	return parseFeedbacksPage(payload);
+}
+async function fetchNeutralNegativeFeedbacks(options = {}) {
+	const fetchImpl = options.fetch ?? globalThis.fetch;
+	const feedbacks = [];
+	for (let pageNumber = 0; pageNumber < FEEDBACK_MAX_PAGES; pageNumber += 1) {
+		const page = await getFeedbacksPage(fetchImpl, pageNumber);
+		feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)));
+		if (page.lastPage === true || page.feedbacks.length === 0) break;
+		if (page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE) break;
+	}
+	return feedbacks;
 }
 
 const PALETTE_APP_FILE = "palette-app.js";
@@ -525,12 +848,66 @@ function handleContentMessage(message, _sender, sendResponse, load = loadPalette
 		return true;
 	}
 	if (record.type === "REPORTS_FETCH_UNFULFILLABLE") {
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "D",
+				location: "src/content.tsx:REPORTS_FETCH_UNFULFILLABLE",
+				message: "unfulfillable fetch start",
+				data: {
+					path: typeof location !== "undefined" ? location.pathname : "",
+					hasCsrfMeta: Boolean(document.querySelector("meta[name=\"anti-csrftoken-a2z\"]")),
+					hasCsrfCookie: /(?:^|;\s*)anti-csrftoken-a2z=/.test(document.cookie)
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
 		void fetchUnfulfillableListings().then((listings) => sendResponse({
 			ok: true,
 			listings
 		}), (error) => sendResponse({
 			ok: false,
 			error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory."
+		}));
+		return true;
+	}
+	if (record.type === "REPORTS_FETCH_FEEDBACK") {
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "B",
+				location: "src/content.tsx:REPORTS_FETCH_FEEDBACK",
+				message: "feedback fetch start",
+				data: {
+					path: typeof location !== "undefined" ? location.pathname : "",
+					hasCsrfMeta: Boolean(document.querySelector("meta[name=\"anti-csrftoken-a2z\"]")),
+					hasCsrfCookie: /(?:^|;\s*)anti-csrftoken-a2z=/.test(document.cookie)
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
+		void fetchNeutralNegativeFeedbacks().then((feedbacks) => sendResponse({
+			ok: true,
+			feedbacks
+		}), (error) => sendResponse({
+			ok: false,
+			error: error instanceof Error ? error.message : "Couldn’t load seller feedback."
 		}));
 		return true;
 	}

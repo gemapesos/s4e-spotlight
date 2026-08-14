@@ -418,6 +418,36 @@ export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Pro
   return sendUnfulfillableFetch(tabId)
 }
 
+async function sendFeedbackFetch(tabId: number): Promise<{ ok: true; feedbacks: unknown[] }> {
+  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
+  let lastError: string | undefined
+  while (Date.now() < deadline) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_FEEDBACK" }) as {
+        ok?: boolean
+        feedbacks?: unknown
+        error?: string
+      }
+      if (response?.ok) {
+        return { ok: true, feedbacks: Array.isArray(response.feedbacks) ? response.feedbacks : [] }
+      }
+      throw new Error(response?.error ?? "Couldn’t load seller feedback.")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message)
+      lastError = message
+    }
+    await sleep(SESSION_PROBE_INTERVAL_MS)
+  }
+  throw new Error(lastError ?? "Couldn’t load seller feedback.")
+}
+
+export async function fetchFeedbackReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; feedbacks: unknown[] }> {
+  const { tabId } = await ensureSellerCentralTab(senderTab)
+  await waitForTabComplete(tabId)
+  return sendFeedbackFetch(tabId)
+}
+
 export async function probeSellerCentralSession(tabId: number): Promise<boolean> {
   const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
   let last: { loggedInToStore: boolean; settled: boolean } | undefined
@@ -744,6 +774,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       void fetchUnfulfillableReport(sender.tab).then(
         sendResponse,
         (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory." }),
+      )
+      return true
+    }
+    if (type === "REPORTS_FETCH_FEEDBACK") {
+      void fetchFeedbackReport(sender.tab).then(
+        sendResponse,
+        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load seller feedback." }),
       )
       return true
     }

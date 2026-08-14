@@ -1,5 +1,6 @@
 export const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql"
 export const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories"
+export const INVENTORY_MANAGE_URL = "https://sellercentral.amazon.com/myinventory/inventory"
 export const UNFULFILLABLE_PAGE_SIZE = 250
 export const UNFULFILLABLE_MAX_PAGES = 40
 export const UNFULFILLABLE_INVENTORIES_BATCH_SIZE = 50
@@ -203,6 +204,29 @@ export function readAntiCsrfToken(root: ParentNode = document, cookie = typeof d
   } catch {
     return match[1].trim()
   }
+}
+
+export function readAntiCsrfTokenFromHtml(html: string): string | undefined {
+  const named = html.match(/<meta\b[^>]*\bname=["']anti-csrftoken-a2z["'][^>]*\bcontent=["']([^"']+)["'][^>]*>/i)
+  if (named?.[1]) return named[1].trim()
+  const contentFirst = html.match(/<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']anti-csrftoken-a2z["'][^>]*>/i)
+  return contentFirst?.[1]?.trim()
+}
+
+async function fetchAntiCsrfTokenFromInventory(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
+  const response = await fetchImpl(INVENTORY_MANAGE_URL, {
+    method: "GET",
+    credentials: "include",
+    headers: { accept: "text/html" },
+  })
+  if (!response.ok) return undefined
+  let html = ""
+  try {
+    html = await response.text()
+  } catch {
+    return undefined
+  }
+  return readAntiCsrfTokenFromHtml(html)
 }
 
 export function formatListingStatus(status: string | null | undefined): string {
@@ -504,7 +528,8 @@ export async function fetchUnfulfillableListings(
   const fetchImpl = options.fetch ?? globalThis.fetch
   const root = options.root ?? document
   const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "")
-  const token = readAntiCsrfToken(root, cookie)
+  let token = readAntiCsrfToken(root, cookie)
+  if (!token) token = await fetchAntiCsrfTokenFromInventory(fetchImpl)
   if (!token) throw new Error("Couldn’t read the Seller Central security token.")
 
   let query = GET_LISTINGS_V2_QUERY

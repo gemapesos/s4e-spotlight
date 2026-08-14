@@ -179,6 +179,7 @@ describe("content-script mount", () => {
   it("downloads a report named for the current store", async () => {
     const sendMessage = vi.fn(async (message: { type?: string }) => {
       if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }
+      if (message.type === "REPORTS_FETCH_FEEDBACK") return { ok: true, feedbacks: [] }
       return {
         ok: true,
         initialized: true,
@@ -202,12 +203,14 @@ describe("content-script mount", () => {
       await generateReports(new Date(2026, 7, 14))
       expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
       expect(createObjectURL).toHaveBeenCalledOnce()
 
       sendMessage.mockClear()
       await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors")
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
     } finally {
@@ -218,6 +221,7 @@ describe("content-script mount", () => {
   it("names the report Unknown when no current store is set", async () => {
     const sendMessage = vi.fn(async (message: { type?: string }) => {
       if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }
+      if (message.type === "REPORTS_FETCH_FEEDBACK") return { ok: true, feedbacks: [] }
       return {
         ok: true,
         initialized: true,
@@ -242,6 +246,7 @@ describe("content-script mount", () => {
     try {
       await generateReports(new Date(2026, 7, 14))
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")
     } finally {
       click.mockRestore()

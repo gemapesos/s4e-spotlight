@@ -330,7 +330,127 @@ async function sendUnfulfillableFetch(tabId) {
 export async function fetchUnfulfillableReport(senderTab) {
 	const { tabId } = await ensureSellerCentralTab(senderTab);
 	await waitForTabComplete(tabId);
-	return sendUnfulfillableFetch(tabId);
+	const tab = await chrome.tabs.get(tabId);
+	try {
+		const result = await sendUnfulfillableFetch(tabId);
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "D",
+				location: "src/background.ts:fetchUnfulfillableReport",
+				message: "unfulfillable report ok",
+				data: { tabPath: (tab.url ?? "").replace(/https:\/\/sellercentral\.amazon\.com/, "") },
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
+		return result;
+	} catch (error) {
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "D",
+				location: "src/background.ts:fetchUnfulfillableReport",
+				message: "unfulfillable report error",
+				data: {
+					tabPath: (tab.url ?? "").replace(/https:\/\/sellercentral\.amazon\.com/, ""),
+					error: error instanceof Error ? error.message : String(error)
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
+		throw error;
+	}
+}
+async function sendFeedbackFetch(tabId) {
+	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
+	let lastError;
+	while (Date.now() < deadline) {
+		try {
+			const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_FEEDBACK" });
+			if (response?.ok) {
+				return {
+					ok: true,
+					feedbacks: Array.isArray(response.feedbacks) ? response.feedbacks : []
+				};
+			}
+			throw new Error(response?.error ?? "Couldn’t load seller feedback.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message);
+			lastError = message;
+		}
+		await sleep(SESSION_PROBE_INTERVAL_MS);
+	}
+	throw new Error(lastError ?? "Couldn’t load seller feedback.");
+}
+export async function fetchFeedbackReport(senderTab) {
+	const { tabId } = await ensureSellerCentralTab(senderTab);
+	await waitForTabComplete(tabId);
+	const tab = await chrome.tabs.get(tabId);
+	try {
+		const result = await sendFeedbackFetch(tabId);
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "B",
+				location: "src/background.ts:fetchFeedbackReport",
+				message: "feedback report ok",
+				data: {
+					count: result.feedbacks.length,
+					tabPath: (tab.url ?? "").replace(/https:\/\/sellercentral\.amazon\.com/, "")
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
+		return result;
+	} catch (error) {
+		// #region agent log
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "74ba58"
+			},
+			body: JSON.stringify({
+				sessionId: "74ba58",
+				runId: "pre-fix",
+				hypothesisId: "A",
+				location: "src/background.ts:fetchFeedbackReport",
+				message: "feedback report error",
+				data: {
+					tabPath: (tab.url ?? "").replace(/https:\/\/sellercentral\.amazon\.com/, ""),
+					error: error instanceof Error ? error.message : String(error)
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+		// #endregion
+		throw error;
+	}
 }
 export async function probeSellerCentralSession(tabId) {
 	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
@@ -754,6 +874,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 			void fetchUnfulfillableReport(sender.tab).then(sendResponse, (error) => sendResponse({
 				ok: false,
 				error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory."
+			}));
+			return true;
+		}
+		if (type === "REPORTS_FETCH_FEEDBACK") {
+			void fetchFeedbackReport(sender.tab).then(sendResponse, (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t load seller feedback."
 			}));
 			return true;
 		}

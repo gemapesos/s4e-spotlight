@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  fetchFeedbackReport,
   fetchUnfulfillableReport,
   prepareReports,
   SELLER_CENTRAL_HOME_URL,
@@ -182,5 +183,53 @@ describe("Generate Reports unfulfillable fetch", () => {
     expect(update).toHaveBeenCalledWith(22, { active: true })
     expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
+  })
+})
+
+describe("Generate Reports feedback fetch", () => {
+  const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; feedbacks?: unknown[]; error?: string }> => ({ ok: true, feedbacks: [] }))
+  const focusWindow = vi.fn(async () => ({}))
+  const addUpdatedListener = vi.fn()
+  const removeUpdatedListener = vi.fn()
+
+  beforeEach(() => {
+    create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 })
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([])
+    get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, feedbacks: [] })
+    focusWindow.mockReset(); focusWindow.mockResolvedValue({})
+    addUpdatedListener.mockReset()
+    removeUpdatedListener.mockReset()
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create,
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: addUpdatedListener, removeListener: removeUpdatedListener },
+      },
+      windows: { update: focusWindow },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("fetches seller feedback from the current Seller Central tab", async () => {
+    const feedbacks = [{ feedbackId: "A1JYWNJI6O4TQ1", numericRating: 1 }]
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockResolvedValue({ ok: true, feedbacks })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(fetchFeedbackReport(sender)).resolves.toEqual({ ok: true, feedbacks })
+    expect(update).toHaveBeenCalledWith(22, { active: true })
+    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_FEEDBACK" })
   })
 })

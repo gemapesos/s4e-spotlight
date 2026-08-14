@@ -13143,9 +13143,113 @@ function Ps(e, t = window) {
 	let r = () => e.classList.toggle("dark", n.matches);
 	return r(), n.addEventListener("change", r), () => n.removeEventListener("change", r);
 }
+var Fs = [
+	"Date",
+	"Rating",
+	"Sentiment",
+	"Order ID",
+	"Feedback",
+	"Item as described",
+	"Seller response",
+	"Response date",
+	"Suppressed",
+	"Partially suppressed",
+	"Suppress reason",
+	"Feedback ID"
+], Is = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec"
+], Ls = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: "\"",
+	apos: "'",
+	nbsp: " "
+};
+function Rs(e) {
+	return typeof e == "number" && Number.isInteger(e) && e >= 1 && e <= 3;
+}
+function zs(e) {
+	return Rs(e) ? e <= 2 ? "Negative" : "Neutral" : "";
+}
+function Bs(e) {
+	return e.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (e, t) => {
+		if (t.startsWith("#x") || t.startsWith("#X")) {
+			let n = Number.parseInt(t.slice(2), 16);
+			return Number.isFinite(n) ? String.fromCodePoint(n) : e;
+		}
+		if (t.startsWith("#")) {
+			let n = Number.parseInt(t.slice(1), 10);
+			return Number.isFinite(n) ? String.fromCodePoint(n) : e;
+		}
+		return Ls[t] ?? e;
+	});
+}
+function Vs(e) {
+	if (!e) return "";
+	let t = new Date(e);
+	return Number.isNaN(t.getTime()) ? e : `${String(t.getUTCDate()).padStart(2, "0")}-${Is[t.getUTCMonth()]}-${t.getUTCFullYear()} ${String(t.getUTCHours()).padStart(2, "0")}:${String(t.getUTCMinutes()).padStart(2, "0")}:${String(t.getUTCSeconds()).padStart(2, "0")}`;
+}
+function Hs(e) {
+	return e == null ? "" : String(e);
+}
+function Us(e) {
+	return e === !0 ? "Yes" : e === !1 ? "No" : "";
+}
+function Ws(e) {
+	return Us(e.answerMap?.ItemAsDescribed?.booleanRating);
+}
+function Gs(e) {
+	let t = typeof e.numericRating == "number" && Number.isFinite(e.numericRating) ? e.numericRating : "";
+	return [
+		Vs(e.feedbackDate),
+		t,
+		zs(typeof t == "number" ? t : void 0),
+		Hs(e.orderId),
+		Bs(e.feedbackText ?? ""),
+		Ws(e),
+		Bs(e.responseText ?? ""),
+		Vs(e.responseDate),
+		Us(e.suppressed),
+		Us(e.partiallySuppressed),
+		Hs(e.suppressReasonId),
+		Hs(e.feedbackId)
+	];
+}
+function Ks(e) {
+	return [[...Fs], ...e.map(Gs)];
+}
+//#endregion
+//#region src/lib/dailyTasks.ts
+var qs = [
+	"Feedback Manager",
+	"Disposal Orders",
+	"Open Cases"
+];
+function Js(e = []) {
+	return [
+		[qs[0]],
+		...Ks(e),
+		[],
+		[qs[1]],
+		[],
+		[qs[2]]
+	];
+}
 //#endregion
 //#region src/lib/unfulfillable.ts
-var Fs = [
+var Ys = [
 	"SKU",
 	"ASIN",
 	"FNSKU",
@@ -13163,9 +13267,9 @@ var Fs = [
 	"Removal Status",
 	"Last Updated",
 	"Image URL"
-], Is = "query GetListingsV2($pagination: PaginationInput, $usecase: UsecaseInput!, $sortRequest: SortRequest!, $searchTerm: SearchTerm, $multiSelectFilters: [MultiSelectFilter!], $multiSKUList: [String!]) {\n  listingsV2(\n    usecase: $usecase\n    pagination: $pagination\n    sortRequest: $sortRequest\n    searchTerm: $searchTerm\n    multiSelectFilters: $multiSelectFilters\n    multiSKUList: $multiSKUList\n  ) {\n    listings {\n      coreListingFields {\n        sku\n        asin\n        fnSku\n        __typename\n      }\n      listingData {\n        title\n        lastUpdated\n        __typename\n      }\n      imageUrl\n      status {\n        status\n        __typename\n      }\n      availability {\n        unfulfillable\n        unfulfillableDetails {\n          expired\n          damagedByCarrier\n          damagedByCustomer\n          damagedByDistributor\n          damagedByWarehouse\n          defective\n          __typename\n        }\n        __typename\n      }\n      offers {\n        offerId\n        price {\n          price {\n            amount\n            currencyUnit\n            __typename\n          }\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    count";
-`${Is}`, `${Is}`;
-var Ls = "Total available for removal", Rs = "unknown ineligible reason", zs = {
+], Xs = "query GetListingsV2($pagination: PaginationInput, $usecase: UsecaseInput!, $sortRequest: SortRequest!, $searchTerm: SearchTerm, $multiSelectFilters: [MultiSelectFilter!], $multiSKUList: [String!]) {\n  listingsV2(\n    usecase: $usecase\n    pagination: $pagination\n    sortRequest: $sortRequest\n    searchTerm: $searchTerm\n    multiSelectFilters: $multiSelectFilters\n    multiSKUList: $multiSKUList\n  ) {\n    listings {\n      coreListingFields {\n        sku\n        asin\n        fnSku\n        __typename\n      }\n      listingData {\n        title\n        lastUpdated\n        __typename\n      }\n      imageUrl\n      status {\n        status\n        __typename\n      }\n      availability {\n        unfulfillable\n        unfulfillableDetails {\n          expired\n          damagedByCarrier\n          damagedByCustomer\n          damagedByDistributor\n          damagedByWarehouse\n          defective\n          __typename\n        }\n        __typename\n      }\n      offers {\n        offerId\n        price {\n          price {\n            amount\n            currencyUnit\n            __typename\n          }\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    count";
+`${Xs}`, `${Xs}`;
+var Zs = "Total available for removal", Qs = "unknown ineligible reason", $s = {
 	InventoryInPendingRequest: "Inventory already scheduled for removal - no further action required",
 	InventoryIsBound: "Inventory temporarily unavailable for removal as a result of an in-progress transaction or other process – please check again in a few days.",
 	InventoryIsWarehouseDamaged: "Inventory damaged in the fulfillment center - no action required",
@@ -13178,31 +13282,31 @@ var Ls = "Total available for removal", Rs = "unknown ineligible reason", zs = {
 	InventoryInPickupRemovalUnsupportedFc: "Inventory in location that cannot process pickup removals - please process these units through other available channels",
 	InventoryIsHazmatItem: "Inventory is classified as Hazardous Material (Hazmat) - please contact us",
 	InventorySubjectToLendingRestriction: "Inventory cannot be removed due to Lending restrictions - please contact Amazon Lending"
-}, Bs = [
-	Ls,
-	zs.InventoryInPendingRequest,
-	zs.InventoryIsBound,
-	zs.InventoryIsWarehouseDamaged,
-	zs.InventoryIsAllocated,
-	zs.InventoryUnavailable,
-	zs.InventoryIsInBoundProcessing,
-	zs.InventoryInUnsupportedFc,
-	zs.InventoryInUnsupportedBzFc,
-	zs.InventoryInPickupRemovalUnsupportedFc,
-	zs.InventoryIsHazmatItem,
-	zs.InventorySubjectToLendingRestriction,
-	Rs
+}, ec = [
+	Zs,
+	$s.InventoryInPendingRequest,
+	$s.InventoryIsBound,
+	$s.InventoryIsWarehouseDamaged,
+	$s.InventoryIsAllocated,
+	$s.InventoryUnavailable,
+	$s.InventoryIsInBoundProcessing,
+	$s.InventoryInUnsupportedFc,
+	$s.InventoryInUnsupportedBzFc,
+	$s.InventoryInPickupRemovalUnsupportedFc,
+	$s.InventoryIsHazmatItem,
+	$s.InventorySubjectToLendingRestriction,
+	Qs
 ];
-function Vs(e) {
+function tc(e) {
 	return e ? e.split(/[_-]+/).filter(Boolean).map((e) => e.charAt(0).toUpperCase() + e.slice(1).toLowerCase()).join(" ") : "";
 }
-function Hs(e) {
+function nc(e) {
 	return e == null ? "" : String(e);
 }
-function Us(e) {
+function rc(e) {
 	return typeof e == "number" && Number.isFinite(e) ? e : 0;
 }
-function Ws(e) {
+function ic(e) {
 	for (let t of e.offers ?? []) {
 		let e = t?.price?.price;
 		if (!e?.amount) continue;
@@ -13217,70 +13321,70 @@ function Ws(e) {
 		currency: ""
 	};
 }
-function Gs(e) {
+function ac(e) {
 	let t = /* @__PURE__ */ new Map();
 	for (let n of e ?? []) n.quantity <= 0 || t.set(n.label, (t.get(n.label) ?? 0) + n.quantity);
-	let n = Bs.filter((e) => t.has(e)).map((e) => ({
+	let n = ec.filter((e) => t.has(e)).map((e) => ({
 		label: e,
 		quantity: t.get(e) ?? 0
-	})), r = new Set(Bs);
+	})), r = new Set(ec);
 	for (let [e, i] of t) r.has(e) || n.push({
 		label: e,
 		quantity: i
 	});
 	return n.map(({ label: e, quantity: t }) => `${e} - ${t} ${t === 1 ? "unit" : "units"}`).join(" || ");
 }
-function Ks(e) {
-	let t = e.availability?.unfulfillableDetails, n = Ws(e);
+function oc(e) {
+	let t = e.availability?.unfulfillableDetails, n = ic(e);
 	return [
-		Hs(e.coreListingFields?.sku),
-		Hs(e.coreListingFields?.asin),
-		Hs(e.coreListingFields?.fnSku),
-		Hs(e.listingData?.title),
-		Vs(e.status?.status),
+		nc(e.coreListingFields?.sku),
+		nc(e.coreListingFields?.asin),
+		nc(e.coreListingFields?.fnSku),
+		nc(e.listingData?.title),
+		tc(e.status?.status),
 		n.amount,
 		n.currency,
-		Us(e.availability?.unfulfillable),
-		Us(t?.damagedByCarrier),
-		Us(t?.damagedByCustomer),
-		Us(t?.defective),
-		Us(t?.expired),
-		Us(t?.damagedByWarehouse),
-		Us(t?.damagedByDistributor),
-		Gs(e.removal),
-		Hs(e.listingData?.lastUpdated),
-		Hs(e.imageUrl)
+		rc(e.availability?.unfulfillable),
+		rc(t?.damagedByCarrier),
+		rc(t?.damagedByCustomer),
+		rc(t?.defective),
+		rc(t?.expired),
+		rc(t?.damagedByWarehouse),
+		rc(t?.damagedByDistributor),
+		ac(e.removal),
+		nc(e.listingData?.lastUpdated),
+		nc(e.imageUrl)
 	];
 }
-function qs(e) {
-	return [[...Fs], ...e.map(Ks)];
+function sc(e) {
+	return [[...Ys], ...e.map(oc)];
 }
 //#endregion
 //#region src/lib/xlsxWorkbook.ts
-var Js = /* @__PURE__ */ new Uint32Array(256);
+var cc = /* @__PURE__ */ new Uint32Array(256);
 for (let e = 0; e < 256; e += 1) {
 	let t = e;
 	for (let e = 0; e < 8; e += 1) t = t & 1 ? 3988292384 ^ t >>> 1 : t >>> 1;
-	Js[e] = t >>> 0;
+	cc[e] = t >>> 0;
 }
-function Ys(e) {
+function lc(e) {
 	let t = 4294967295;
-	for (let n of e) t = Js[(t ^ n) & 255] ^ t >>> 8;
+	for (let n of e) t = cc[(t ^ n) & 255] ^ t >>> 8;
 	return (t ^ 4294967295) >>> 0;
 }
-function Xs(e, t, n) {
+function uc(e, t, n) {
 	e[t] = n & 255, e[t + 1] = n >>> 8 & 255;
 }
-function Zs(e, t, n) {
+function dc(e, t, n) {
 	e[t] = n & 255, e[t + 1] = n >>> 8 & 255, e[t + 2] = n >>> 16 & 255, e[t + 3] = n >>> 24 & 255;
 }
-function Qs(e) {
+function fc(e) {
 	return new TextEncoder().encode(e);
 }
-function $s(e) {
+function pc(e) {
 	return e.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;").replaceAll("'", "&apos;");
 }
-function ec(e) {
+function mc(e) {
 	let t = "", n = e + 1;
 	for (; n > 0;) {
 		let e = (n - 1) % 26;
@@ -13288,31 +13392,31 @@ function ec(e) {
 	}
 	return t;
 }
-function tc(e, t) {
-	return typeof t == "number" && Number.isFinite(t) ? `<c r="${e}"><v>${String(t)}</v></c>` : `<c r="${e}" t="inlineStr"><is><t>${$s(String(t))}</t></is></c>`;
+function hc(e, t) {
+	return typeof t == "number" && Number.isFinite(t) ? `<c r="${e}"><v>${String(t)}</v></c>` : `<c r="${e}" t="inlineStr"><is><t>${pc(String(t))}</t></is></c>`;
 }
-function nc(e = []) {
+function gc(e = []) {
 	return e.length === 0 ? "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>" : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${e.map((e, t) => {
 		let n = t + 1;
-		return `<row r="${n}">${e.map((e, t) => tc(`${ec(t)}${n}`, e)).join("")}</row>`;
+		return `<row r="${n}">${e.map((e, t) => hc(`${mc(t)}${n}`, e)).join("")}</row>`;
 	}).join("")}</sheetData></worksheet>`;
 }
-function rc(e) {
+function _c(e) {
 	let t = [], n = [], r = 0;
 	for (let i of e) {
-		let e = Qs(i.name), a = Ys(i.data), o = new Uint8Array(30 + e.length + i.data.length);
-		Zs(o, 0, 67324752), Xs(o, 4, 20), Xs(o, 8, 0), Zs(o, 14, a), Zs(o, 18, i.data.length), Zs(o, 22, i.data.length), Xs(o, 26, e.length), o.set(e, 30), o.set(i.data, 30 + e.length), t.push(o);
+		let e = fc(i.name), a = lc(i.data), o = new Uint8Array(30 + e.length + i.data.length);
+		dc(o, 0, 67324752), uc(o, 4, 20), uc(o, 8, 0), dc(o, 14, a), dc(o, 18, i.data.length), dc(o, 22, i.data.length), uc(o, 26, e.length), o.set(e, 30), o.set(i.data, 30 + e.length), t.push(o);
 		let s = new Uint8Array(46 + e.length);
-		Zs(s, 0, 33639248), Xs(s, 4, 20), Xs(s, 6, 20), Zs(s, 16, a), Zs(s, 20, i.data.length), Zs(s, 24, i.data.length), Xs(s, 28, e.length), Zs(s, 42, r), s.set(e, 46), n.push(s), r += o.length;
+		dc(s, 0, 33639248), uc(s, 4, 20), uc(s, 6, 20), dc(s, 16, a), dc(s, 20, i.data.length), dc(s, 24, i.data.length), uc(s, 28, e.length), dc(s, 42, r), s.set(e, 46), n.push(s), r += o.length;
 	}
 	let i = n.reduce((e, t) => e + t.length, 0), a = /* @__PURE__ */ new Uint8Array(22);
-	Zs(a, 0, 101010256), Xs(a, 8, e.length), Xs(a, 10, e.length), Zs(a, 12, i), Zs(a, 16, r);
+	dc(a, 0, 101010256), uc(a, 8, e.length), uc(a, 10, e.length), dc(a, 12, i), dc(a, 16, r);
 	let o = new Uint8Array(r + i + a.length), s = 0;
 	for (let e of t) o.set(e, s), s += e.length;
 	for (let e of n) o.set(e, s), s += e.length;
 	return o.set(a, s), o;
 }
-function ic(e) {
+function vc(e) {
 	if (e.length === 0) throw Error("A workbook needs at least one worksheet.");
 	let t = e.map((e, t) => {
 		let n = t + 1;
@@ -13321,7 +13425,7 @@ function ic(e) {
 			name: e.name,
 			path: `xl/worksheets/sheet${n}.xml`,
 			relId: `rId${n}`,
-			xml: nc(e.rows)
+			xml: gc(e.rows)
 		};
 	}), n = [
 		"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
@@ -13335,7 +13439,7 @@ function ic(e) {
 		"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
 		"<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">",
 		"<sheets>",
-		...t.map((e) => `<sheet name="${$s(e.name)}" sheetId="${e.id}" r:id="${e.relId}"/>`),
+		...t.map((e) => `<sheet name="${pc(e.name)}" sheetId="${e.id}" r:id="${e.relId}"/>`),
 		"</sheets>",
 		"</workbook>"
 	].join(""), i = [
@@ -13344,38 +13448,38 @@ function ic(e) {
 		...t.map((e) => `<Relationship Id="${e.relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${e.id}.xml"/>`),
 		"</Relationships>"
 	].join("");
-	return rc([
+	return _c([
 		{
 			name: "[Content_Types].xml",
-			data: Qs(n)
+			data: fc(n)
 		},
 		{
 			name: "_rels/.rels",
-			data: Qs("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>")
+			data: fc("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>")
 		},
 		{
 			name: "xl/workbook.xml",
-			data: Qs(r)
+			data: fc(r)
 		},
 		{
 			name: "xl/_rels/workbook.xml.rels",
-			data: Qs(i)
+			data: fc(i)
 		},
 		...t.map((e) => ({
 			name: e.path,
-			data: Qs(e.xml)
+			data: fc(e.xml)
 		}))
 	]);
 }
 //#endregion
 //#region src/lib/reports.ts
-var ac = [
+var yc = [
 	"Daily Tasks",
 	"Unfulfillable",
 	"Stranded",
 	"Suppressed",
 	"Shipping Queue"
-], oc = [
+], bc = [
 	"Jan",
 	"Feb",
 	"Mar",
@@ -13388,26 +13492,29 @@ var ac = [
 	"Oct",
 	"Nov",
 	"Dec"
-], sc = /[/\\:*?"<>|]/g;
-function cc(e) {
-	return `${String(e.getDate()).padStart(2, "0")}-${oc[e.getMonth()]}-${e.getFullYear()}`;
+], xc = /[/\\:*?"<>|]/g;
+function Sc(e) {
+	return `${String(e.getDate()).padStart(2, "0")}-${bc[e.getMonth()]}-${e.getFullYear()}`;
 }
-function lc(e) {
-	return e.replace(sc, " ").replace(/\s+/g, " ").trim() || "Unknown";
+function Cc(e) {
+	return e.replace(xc, " ").replace(/\s+/g, " ").trim() || "Unknown";
 }
-function uc(e, t = /* @__PURE__ */ new Date()) {
-	return `${lc(e)} - ${cc(t)}.xlsx`;
+function wc(e, t = /* @__PURE__ */ new Date()) {
+	return `${Cc(e)} - ${Sc(t)}.xlsx`;
 }
-function dc(e = []) {
-	return ac.map((t) => t === "Unfulfillable" ? {
-		name: t,
-		rows: qs(e)
-	} : { name: t });
+function Tc(e = [], t = []) {
+	return yc.map((n) => n === "Daily Tasks" ? {
+		name: n,
+		rows: Js(t)
+	} : n === "Unfulfillable" ? {
+		name: n,
+		rows: sc(e)
+	} : { name: n });
 }
-function fc(e = ac.map((e) => ({ name: e }))) {
-	return ic(e);
+function Ec(e = yc.map((e) => ({ name: e }))) {
+	return vc(e);
 }
-function pc(e, t, n = document) {
+function Dc(e, t, n = document) {
 	let r = new ArrayBuffer(e.byteLength);
 	new Uint8Array(r).set(e);
 	let i = new Blob([r], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), a = URL.createObjectURL(i), o = n.createElement("a");
@@ -13415,18 +13522,18 @@ function pc(e, t, n = document) {
 }
 //#endregion
 //#region src/lib/shortcut.ts
-function mc(e) {
+function Oc(e) {
 	let t = e.code === "Slash" || e.key === "/", n = e.metaKey || e.ctrlKey;
 	return t && n && !e.altKey && !e.shiftKey;
 }
 //#endregion
 //#region src/paletteApp.tsx
-var hc = "command-palette-extension-root", gc = "data-s4e-palette-open", _c = "__s4eSpotlightPasteGuard", vc = "geist-latin-wght-normal.woff2";
-function yc() {
-	let e = typeof chrome < "u" && typeof chrome.runtime?.getURL == "function" ? chrome.runtime.getURL(vc) : "";
+var kc = "command-palette-extension-root", Ac = "data-s4e-palette-open", jc = "__s4eSpotlightPasteGuard", Mc = "geist-latin-wght-normal.woff2";
+function Nc() {
+	let e = typeof chrome < "u" && typeof chrome.runtime?.getURL == "function" ? chrome.runtime.getURL(Mc) : "";
 	return e ? `@font-face{font-family:"Geist Variable";font-style:normal;font-display:swap;font-weight:100 900;src:url("${e}") format("woff2-variations")}` : "";
 }
-function bc(e) {
+function Pc(e) {
 	let t = [e.documentElement, e.body], n = t.map((e) => ({
 		overflow: e.style.overflow,
 		overflowX: e.style.overflowX,
@@ -13440,51 +13547,51 @@ function bc(e) {
 		});
 	};
 }
-function xc(e) {
+function Fc(e) {
 	let t = e.activeElement;
 	for (; t?.shadowRoot?.activeElement;) t = t.shadowRoot.activeElement;
 	return t instanceof HTMLElement ? t : null;
 }
-function Sc(e) {
+function Ic(e) {
 	let t = parseFloat(e.defaultView?.getComputedStyle(e.documentElement).fontSize ?? "16");
 	return !Number.isFinite(t) || t <= 0 ? 1 : 16 / t;
 }
-function Cc(e, t) {
-	let n = Sc(t);
+function G(e, t) {
+	let n = Ic(t);
 	return e.style.zoom = String(n), n;
 }
-async function wc(e) {
+async function Lc(e) {
 	let t = await chrome.runtime.sendMessage({
 		type: "OPEN_CASE_IDS",
 		caseIds: e
 	});
 	if (!t?.ok) throw Error(t?.error ?? "The background worker did not respond.");
 }
-async function Tc(e) {
+async function Rc(e) {
 	let t = await chrome.runtime.sendMessage({
 		type: "OPEN_SHIPMENT_IDS",
 		shipmentIds: e
 	});
 	if (!t?.ok) throw Error(t?.error ?? "The background worker did not respond.");
 }
-async function Ec(e) {
+async function zc(e) {
 	let t = await chrome.runtime.sendMessage({
 		type: "OPEN_SKU_IDS",
 		skuIds: e
 	});
 	if (!t?.ok) throw Error(t?.error ?? "The background worker did not respond.");
 }
-async function Dc() {
+async function Bc() {
 	let e = await chrome.runtime.sendMessage({ type: "OPEN_TIME_OUT" });
 	if (!e?.ok) throw Error(e?.error ?? "The background worker did not respond.");
 }
-async function Oc(e) {
+async function Vc(e) {
 	let t = await chrome.runtime.sendMessage(e);
 	if (!t?.ok) throw Error(t?.error ?? "The background worker did not respond.");
 	return t;
 }
-async function kc() {
-	let e = await Oc({ type: "ACCOUNTS_STATUS" });
+async function Hc() {
+	let e = await Vc({ type: "ACCOUNTS_STATUS" });
 	return {
 		initialized: e.initialized,
 		unlocked: e.unlocked,
@@ -13493,31 +13600,31 @@ async function kc() {
 		currentStore: e.currentStore ?? null
 	};
 }
-async function Ac(e) {
-	await Oc({
+async function Uc(e) {
+	await Vc({
 		type: "ACCOUNTS_UNLOCK",
 		masterPassword: e
 	});
 }
-async function jc(e) {
-	await Oc({
+async function Wc(e) {
+	await Vc({
 		type: "ACCOUNTS_START_SWITCH",
 		storeId: e
 	});
 }
-async function Mc() {
-	await Oc({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" });
+async function Gc() {
+	await Vc({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" });
 }
-async function Nc() {
-	await Oc({ type: "ACCOUNTS_FOCUS_SWITCH" });
+async function Kc() {
+	await Vc({ type: "ACCOUNTS_FOCUS_SWITCH" });
 }
-async function Pc() {
-	await Oc({ type: "ACCOUNTS_CANCEL_SWITCH" });
+async function qc() {
+	await Vc({ type: "ACCOUNTS_CANCEL_SWITCH" });
 }
-async function Fc() {
-	await Oc({ type: "ACCOUNTS_OPEN_OPTIONS" });
+async function Jc() {
+	await Vc({ type: "ACCOUNTS_OPEN_OPTIONS" });
 }
-async function Ic() {
+async function Yc() {
 	if (typeof chrome > "u" || !chrome.runtime?.sendMessage) return xs(void 0);
 	try {
 		let e = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
@@ -13526,7 +13633,7 @@ async function Ic() {
 		return xs(void 0);
 	}
 }
-async function G() {
+async function Xc() {
 	let e = await chrome.runtime.sendMessage({ type: "REPORTS_PREPARE" });
 	if (!e?.ok) throw Error(e?.error ?? "The background worker did not respond.");
 	return {
@@ -13534,26 +13641,31 @@ async function G() {
 		openedPromptOnSellerCentral: e.openedPromptOnSellerCentral
 	};
 }
-async function Lc() {
+async function Zc() {
 	let e = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_UNFULFILLABLE" });
 	if (!e?.ok) throw Error(e?.error ?? "The background worker did not respond.");
 	return Array.isArray(e.listings) ? e.listings : [];
 }
-async function Rc(e = /* @__PURE__ */ new Date(), t = document, n) {
-	let r = n === void 0 ? (await kc()).currentStore?.name ?? "" : n;
-	pc(fc(dc(await Lc())), uc(r, e), t);
+async function Qc() {
+	let e = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_FEEDBACK" });
+	if (!e?.ok) throw Error(e?.error ?? "The background worker did not respond.");
+	return Array.isArray(e.feedbacks) ? e.feedbacks : [];
 }
-function zc({ document: e = window.document, shadowMode: t = "closed" } = {}) {
-	if (e.getElementById(hc)) return null;
+async function $c(e = /* @__PURE__ */ new Date(), t = document, n) {
+	let r = n === void 0 ? (await Hc()).currentStore?.name ?? "" : n;
+	Dc(Ec(Tc(await Zc(), await Qc())), wc(r, e), t);
+}
+function el({ document: e = window.document, shadowMode: t = "closed" } = {}) {
+	if (e.getElementById(kc)) return null;
 	let n = e.createElement("div");
-	n.id = hc, n.setAttribute(gc, "false"), n.style.cssText = [
+	n.id = kc, n.setAttribute(Ac, "false"), n.style.cssText = [
 		"all: initial",
 		"position: fixed",
 		"inset: 0",
 		"z-index: 2147483647",
 		"pointer-events: none"
-	].join(";"), Cc(n, e);
-	let r = Ps(n, e.defaultView ?? window), i = n.attachShadow({ mode: t }), a = e.createElement("style"), o = yc();
+	].join(";"), G(n, e);
+	let r = Ps(n, e.defaultView ?? window), i = n.attachShadow({ mode: t }), a = e.createElement("style"), o = Nc();
 	a.textContent = o ? `${o}\n${y}` : y, i.append(a);
 	let s = e.createElement("div");
 	s.className = "palette-scope", s.style.pointerEvents = "auto", i.append(s), (e.body ?? e.documentElement).append(n);
@@ -13563,19 +13675,19 @@ function zc({ document: e = window.document, shadowMode: t = "closed" } = {}) {
 			enabledFeatures: p,
 			initialMode: u,
 			open: l,
-			onOpenCaseIds: wc,
-			onOpenShipmentIds: Tc,
-			onOpenSkuIds: Ec,
-			onGetAccountsStatus: kc,
-			onUnlockAccounts: Ac,
-			onStartAccountSwitch: jc,
-			onFocusCurrentStore: Mc,
-			onFocusAccountSwitch: Nc,
-			onCancelAccountSwitch: Pc,
-			onManageAccounts: Fc,
-			onPrepareReports: G,
-			onGenerateReports: (t) => Rc(/* @__PURE__ */ new Date(), e, t),
-			onOpenTimeOut: Dc,
+			onOpenCaseIds: Lc,
+			onOpenShipmentIds: Rc,
+			onOpenSkuIds: zc,
+			onGetAccountsStatus: Hc,
+			onUnlockAccounts: Uc,
+			onStartAccountSwitch: Wc,
+			onFocusCurrentStore: Gc,
+			onFocusAccountSwitch: Kc,
+			onCancelAccountSwitch: qc,
+			onManageAccounts: Jc,
+			onPrepareReports: Xc,
+			onGenerateReports: (t) => $c(/* @__PURE__ */ new Date(), e, t),
+			onOpenTimeOut: Bc,
 			onOpenChange: h
 		}) }));
 	}, h = (t, r = "commands") => {
@@ -13583,20 +13695,20 @@ function zc({ document: e = window.document, shadowMode: t = "closed" } = {}) {
 			t && m();
 			return;
 		}
-		t ? (d = xc(e), f = bc(e)) : (f?.(), f = null), l = t, n.setAttribute(gc, String(t)), n.style.pointerEvents = t ? "auto" : "none", t && Cc(n, e), m(), t && Ic().then((e) => {
+		t ? (d = Fc(e), f = Pc(e)) : (f?.(), f = null), l = t, n.setAttribute(Ac, String(t)), n.style.pointerEvents = t ? "auto" : "none", t && G(n, e), m(), t && Yc().then((e) => {
 			l && (Cs(p, e.features) || (p = e.features, m()));
 		}), t || requestAnimationFrame(() => d?.focus({ preventScroll: !0 }));
 	}, g = (e) => {
-		mc(e) && (e.preventDefault(), e.stopImmediatePropagation(), h(!l));
+		Oc(e) && (e.preventDefault(), e.stopImmediatePropagation(), h(!l));
 	};
 	return e.defaultView?.addEventListener("keydown", g, !0), {
 		host: n,
 		shadowRoot: i,
 		setOpen: h,
 		destroy: () => {
-			n.setAttribute(gc, "false"), f?.(), f = null, e.defaultView?.removeEventListener("keydown", g, !0), e.defaultView?.[_c]?.destroy(), r(), c?.unmount(), c = null, n.remove();
+			n.setAttribute(Ac, "false"), f?.(), f = null, e.defaultView?.removeEventListener("keydown", g, !0), e.defaultView?.[jc]?.destroy(), r(), c?.unmount(), c = null, n.remove();
 		}
 	};
 }
 //#endregion
-export { Pc as cancelAccountSwitch, Lc as fetchUnfulfillableListingsFromBackground, Nc as focusAccountSwitch, Mc as focusCurrentStore, Rc as generateReports, kc as getAccountsStatus, Sc as getPaletteRemScale, Ic as getSettings, Fc as manageAccounts, zc as mountCommandPalette, wc as openCaseIds, Tc as openShipmentIds, Ec as openSkuIds, Dc as openTimeOut, G as prepareReports, jc as startAccountSwitch, Ac as unlockAccounts };
+export { qc as cancelAccountSwitch, Qc as fetchFeedbacksFromBackground, Zc as fetchUnfulfillableListingsFromBackground, Kc as focusAccountSwitch, Gc as focusCurrentStore, $c as generateReports, Hc as getAccountsStatus, Ic as getPaletteRemScale, Yc as getSettings, Jc as manageAccounts, el as mountCommandPalette, Lc as openCaseIds, Rc as openShipmentIds, zc as openSkuIds, Bc as openTimeOut, Xc as prepareReports, Wc as startAccountSwitch, Uc as unlockAccounts };

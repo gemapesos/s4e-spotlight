@@ -12,6 +12,7 @@ import {
   type EnabledFeatures,
   type ExtensionSettings,
 } from "./lib/settings"
+import type { SellerFeedback } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
 import type { UnfulfillableListing } from "./lib/unfulfillable"
 
@@ -239,6 +240,16 @@ export async function fetchUnfulfillableListingsFromBackground(): Promise<Unfulf
   return Array.isArray(response.listings) ? response.listings : []
 }
 
+export async function fetchFeedbacksFromBackground(): Promise<SellerFeedback[]> {
+  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_FEEDBACK" }) as {
+    ok?: boolean
+    feedbacks?: SellerFeedback[]
+    error?: string
+  }
+  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  return Array.isArray(response.feedbacks) ? response.feedbacks : []
+}
+
 export async function generateReports(
   now = new Date(),
   targetDocument: Document = document,
@@ -249,7 +260,8 @@ export async function generateReports(
       ? currentStoreName
       : (await getAccountsStatus()).currentStore?.name ?? ""
   const listings = await fetchUnfulfillableListingsFromBackground()
-  downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings)), reportFileName(storeName, now), targetDocument)
+  const feedbacks = await fetchFeedbacksFromBackground()
+  downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks)), reportFileName(storeName, now), targetDocument)
 }
 
 export function mountCommandPalette({

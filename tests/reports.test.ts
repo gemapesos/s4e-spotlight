@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { dailyTasksSheetRows } from "../src/lib/dailyTasks"
 import {
   REPORT_SHEETS,
   buildReportWorkbook,
@@ -48,22 +49,81 @@ describe("report workbook", () => {
     }
   })
 
-  it("fills Unfulfillable rows and leaves the other worksheets empty", () => {
-    const bytes = buildReportWorkbook(reportWorkbookSheets([
+  it("stacks Daily Tasks sections with Feedback Manager data and reserved titles", () => {
+    const rows = dailyTasksSheetRows([
       {
-        coreListingFields: { sku: "20231103_9.00_Sephora_67493", asin: "B00JJPVVYQ", fnSku: "X004110PZF" },
-        listingData: { title: "Sephora Collection Colorful Waterproof Eyeliner", lastUpdated: "11/15/2024 15:18:56" },
-        status: { status: "INACTIVE" },
-        availability: {
-          unfulfillable: 2,
-          unfulfillableDetails: { expired: 2, damagedByCarrier: 0, damagedByCustomer: 0, damagedByDistributor: 0, damagedByWarehouse: 0, defective: 0 },
-        },
-        offers: [{ price: { price: { amount: "21.75", currencyUnit: "USD" } } }],
+        feedbackId: "A1JYWNJI6O4TQ1",
+        orderId: "112-6224287-0679468",
+        numericRating: 1,
+        feedbackText: "Why has it not been credited?",
+        feedbackDate: "2026-08-03T19:22:21.216Z",
+        suppressed: false,
+        partiallySuppressed: false,
       },
-    ]))
+    ])
+    expect(rows[0]).toEqual(["Feedback Manager"])
+    expect(rows[1][0]).toBe("Date")
+    expect(rows[1]).toContain("Order ID")
+    expect(rows[2][3]).toBe("112-6224287-0679468")
+    expect(rows[3]).toEqual([])
+    expect(rows[4]).toEqual(["Disposal Orders"])
+    expect(rows[5]).toEqual([])
+    expect(rows[6]).toEqual(["Open Cases"])
+    expect(rows).toHaveLength(7)
+  })
+
+  it("still writes Feedback Manager headers when there is no feedback", () => {
+    expect(dailyTasksSheetRows()).toEqual([
+      ["Feedback Manager"],
+      ["Date", "Rating", "Sentiment", "Order ID", "Feedback", "Item as described", "Seller response", "Response date", "Suppressed", "Partially suppressed", "Suppress reason", "Feedback ID"],
+      [],
+      ["Disposal Orders"],
+      [],
+      ["Open Cases"],
+    ])
+  })
+
+  it("fills Unfulfillable rows and stacks Daily Tasks sections", () => {
+    const bytes = buildReportWorkbook(reportWorkbookSheets(
+      [
+        {
+          coreListingFields: { sku: "20231103_9.00_Sephora_67493", asin: "B00JJPVVYQ", fnSku: "X004110PZF" },
+          listingData: { title: "Sephora Collection Colorful Waterproof Eyeliner", lastUpdated: "11/15/2024 15:18:56" },
+          status: { status: "INACTIVE" },
+          availability: {
+            unfulfillable: 2,
+            unfulfillableDetails: { expired: 2, damagedByCarrier: 0, damagedByCustomer: 0, damagedByDistributor: 0, damagedByWarehouse: 0, defective: 0 },
+          },
+          offers: [{ price: { price: { amount: "21.75", currencyUnit: "USD" } } }],
+        },
+      ],
+      [
+        {
+          feedbackId: "A1JYWNJI6O4TQ1",
+          orderId: "112-6224287-0679468",
+          numericRating: 1,
+          feedbackText: "I sent this back with Your UPS label on it.",
+          feedbackDate: "2026-08-03T19:22:21.216Z",
+          suppressed: false,
+          partiallySuppressed: false,
+        },
+      ],
+    ))
     expect(listWorkbookSheetNames(bytes)).toEqual([...REPORT_SHEETS])
 
     const files = readStoredZip(bytes)
+    const dailyTasks = new TextDecoder().decode(files.get("xl/worksheets/sheet1.xml"))
+    expect(dailyTasks).toContain("Feedback Manager")
+    expect(dailyTasks).toContain("Date")
+    expect(dailyTasks).toContain("Sentiment")
+    expect(dailyTasks).toContain("Order ID")
+    expect(dailyTasks).toContain("112-6224287-0679468")
+    expect(dailyTasks).toContain("Negative")
+    expect(dailyTasks).toContain("Disposal Orders")
+    expect(dailyTasks).toContain("Open Cases")
+    expect(dailyTasks.indexOf("Feedback Manager")).toBeLessThan(dailyTasks.indexOf("Disposal Orders"))
+    expect(dailyTasks.indexOf("Disposal Orders")).toBeLessThan(dailyTasks.indexOf("Open Cases"))
+
     const unfulfillable = new TextDecoder().decode(files.get("xl/worksheets/sheet2.xml"))
     expect(unfulfillable).toContain("<row r=\"1\">")
     expect(unfulfillable).toContain("SKU")
@@ -77,7 +137,7 @@ describe("report workbook", () => {
     expect(unfulfillable).not.toContain('<c r="F2" t="inlineStr">')
     expect(unfulfillable).not.toContain('<c r="H2" t="inlineStr">')
 
-    for (const index of [0, 2, 3, 4]) {
+    for (const index of [2, 3, 4]) {
       const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
       expect(sheet).toContain("<sheetData/>")
       expect(sheet).not.toContain("<row")
