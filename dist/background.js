@@ -9,6 +9,7 @@ export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_log
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0";
 export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/";
 export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*";
+export const UNFULFILLABLE_INVENTORY_URL = "https://sellercentral.amazon.com/myinventory/unfulfillable/index.html";
 const MAX_BULK_IDS = 50;
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1e3;
 export class TabBatchError extends Error {
@@ -284,8 +285,20 @@ export async function focusOrOpenSellerCentralTab(senderTab) {
 	};
 }
 export async function waitForTabComplete(tabId, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
+	await waitForTabCompleteMatching(tabId, (url) => Boolean(url && url !== "about:blank"), timeoutMs);
+}
+export function isUnfulfillableInventoryUrl(url) {
+	if (!url) return false;
+	try {
+		const parsed = new URL(url);
+		return parsed.origin === "https://sellercentral.amazon.com" && parsed.pathname.startsWith("/myinventory/unfulfillable/");
+	} catch {
+		return false;
+	}
+}
+export async function waitForTabCompleteMatching(tabId, urlMatches, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
 	const current = await chrome.tabs.get(tabId);
-	if (current.status === "complete" && current.url && current.url !== "about:blank") return;
+	if (current.status === "complete" && urlMatches(current.url)) return;
 	await new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
 			chrome.tabs.onUpdated.removeListener(onUpdated);
@@ -294,13 +307,49 @@ export async function waitForTabComplete(tabId, timeoutMs = TAB_LOAD_TIMEOUT_MS)
 		function onUpdated(updatedTabId, changeInfo, tab) {
 			if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
 			const url = changeInfo.url ?? tab.url;
-			if (!url || url === "about:blank") return;
+			if (!urlMatches(url)) return;
 			clearTimeout(timer);
 			chrome.tabs.onUpdated.removeListener(onUpdated);
 			resolve();
 		}
 		chrome.tabs.onUpdated.addListener(onUpdated);
 	});
+}
+export async function navigateToUnfulfillableInventory(tabId) {
+	const current = await chrome.tabs.get(tabId);
+	if (isUnfulfillableInventoryUrl(current.url)) {
+		await waitForTabCompleteMatching(tabId, isUnfulfillableInventoryUrl);
+		return;
+	}
+	await chrome.tabs.update(tabId, { url: UNFULFILLABLE_INVENTORY_URL });
+	await waitForTabCompleteMatching(tabId, isUnfulfillableInventoryUrl);
+}
+async function sendUnfulfillableFetch(tabId) {
+	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
+	let lastError;
+	while (Date.now() < deadline) {
+		try {
+			const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_UNFULFILLABLE" });
+			if (response?.ok) {
+				return {
+					ok: true,
+					listings: Array.isArray(response.listings) ? response.listings : []
+				};
+			}
+			throw new Error(response?.error ?? "Couldn’t load unfulfillable inventory.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message);
+			lastError = message;
+		}
+		await sleep(SESSION_PROBE_INTERVAL_MS);
+	}
+	throw new Error(lastError ?? "Couldn’t load unfulfillable inventory.");
+}
+export async function fetchUnfulfillableReport(senderTab) {
+	const { tabId } = await ensureSellerCentralTab(senderTab);
+	await navigateToUnfulfillableInventory(tabId);
+	return sendUnfulfillableFetch(tabId);
 }
 export async function probeSellerCentralSession(tabId) {
 	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
@@ -717,6 +766,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 			void prepareReports(sender.tab).then(sendResponse, (error) => sendResponse({
 				ok: false,
 				error: error instanceof Error ? error.message : "Couldn’t open Seller Central."
+			}));
+			return true;
+		}
+		if (type === "REPORTS_FETCH_UNFULFILLABLE") {
+			void fetchUnfulfillableReport(sender.tab).then(sendResponse, (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory."
 			}));
 			return true;
 		}

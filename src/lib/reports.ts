@@ -1,3 +1,4 @@
+import { unfulfillableSheetRows, type UnfulfillableListing } from "./unfulfillable"
 import { buildWorkbook, type WorkbookSheet } from "./xlsxWorkbook"
 
 export const REPORT_SHEETS = [
@@ -38,6 +39,12 @@ export function sanitizeStoreName(storeName: string): string {
 
 export function reportFileName(storeName: string, date: Date = new Date()): string {
   return `${sanitizeStoreName(storeName)} - ${formatReportDate(date)}.xlsx`
+}
+
+export function reportWorkbookSheets(unfulfillableListings: readonly UnfulfillableListing[] = []): WorkbookSheet[] {
+  return REPORT_SHEETS.map((name) =>
+    name === "Unfulfillable" ? { name, rows: unfulfillableSheetRows(unfulfillableListings) } : { name },
+  )
 }
 
 export function buildReportWorkbook(sheets: readonly WorkbookSheet[] = REPORT_SHEETS.map((name) => ({ name }))): Uint8Array {

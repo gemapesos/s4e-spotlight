@@ -36,4 +36,69 @@ describe("content script report messages", () => {
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true }))
     expect(setOpen).toHaveBeenCalledWith(true, "report-login")
   })
+
+  it("fetches unfulfillable listings from Seller Central", async () => {
+    document.head.insertAdjacentHTML("beforeend", '<meta name="anti-csrftoken-a2z" content="csrf-token">')
+    const listing = {
+      coreListingFields: { sku: "ABC-123", asin: "B00TEST", fnSku: "X00TEST" },
+      listingData: { title: "Test listing", lastUpdated: "08/15/2026 01:00:00" },
+      status: { status: "ACTIVE" },
+      availability: {
+        unfulfillable: 1,
+        unfulfillableDetails: {
+          expired: 0,
+          damagedByCarrier: 1,
+          damagedByCustomer: 0,
+          damagedByDistributor: 0,
+          damagedByWarehouse: 0,
+          defective: 0,
+        },
+      },
+      offers: [{ price: { price: { amount: "9.99", currencyUnit: "USD" } } }],
+    }
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("/recovery/inventories")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            lineItems: [{
+              merchantSku: "ABC-123",
+              fulfillmentNetworkSku: "X00TEST",
+              totalUnsellableQuantity: 1,
+              unsellableIneligibleQuantity: 0,
+              unsellableIneligibleQuantities: [],
+            }],
+          }),
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { listingsV2: { listings: [listing], count: 1, cursor: null } } }),
+      }
+    })
+    vi.stubGlobal("fetch", fetchImpl)
+    const sendResponse = vi.fn()
+
+    try {
+      expect(handleContentMessage(
+        { type: "REPORTS_FETCH_UNFULFILLABLE" },
+        {} as chrome.runtime.MessageSender,
+        sendResponse,
+      )).toBe(true)
+
+      await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+        ok: true,
+        listings: [{
+          ...listing,
+          removal: [{ label: "Total available for removal", quantity: 1 }],
+        }],
+      }))
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } finally {
+      document.querySelectorAll('meta[name="anti-csrftoken-a2z"]').forEach((node) => node.remove())
+      vi.unstubAllGlobals()
+    }
+  })
 })

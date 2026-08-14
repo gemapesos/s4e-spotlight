@@ -37,6 +37,7 @@ function extensionScriptsPlugin(): Plugin {
   const accountsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/accounts.ts")
   const settingsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/settings.ts")
   const sellerCentralSessionPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/sellerCentralSession.ts")
+  const unfulfillablePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/unfulfillable.ts")
   const contentPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/content.tsx")
   const shortcutPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/shortcut.ts")
 
@@ -52,11 +53,12 @@ function extensionScriptsPlugin(): Plugin {
       this.addWatchFile(accountsPath)
       this.addWatchFile(settingsPath)
       this.addWatchFile(sellerCentralSessionPath)
+      this.addWatchFile(unfulfillablePath)
       this.addWatchFile(contentPath)
       this.addWatchFile(shortcutPath)
     },
     async generateBundle(_options, bundle) {
-      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource, settingsSource, sellerCentralSessionSource, contentSource, shortcutSource, geistFont] = await Promise.all([
+      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource, settingsSource, sellerCentralSessionSource, unfulfillableSource, contentSource, shortcutSource, geistFont] = await Promise.all([
         readFile(backgroundPath, "utf8"),
         readFile(pasteGuardPath, "utf8"),
         readFile(passkeyGuardPath, "utf8"),
@@ -65,11 +67,12 @@ function extensionScriptsPlugin(): Plugin {
         readFile(accountsPath, "utf8"),
         readFile(settingsPath, "utf8"),
         readFile(sellerCentralSessionPath, "utf8"),
+        readFile(unfulfillablePath, "utf8"),
         readFile(contentPath, "utf8"),
         readFile(shortcutPath, "utf8"),
         readFile(geistFontPath),
       ])
-      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult, settingsResult, sellerCentralSessionResult, contentResult, shortcutResult] = await Promise.all([
+      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult, settingsResult, sellerCentralSessionResult, unfulfillableResult, contentResult, shortcutResult] = await Promise.all([
         transformWithOxc(backgroundSource, backgroundPath),
         transformWithOxc(pasteGuardSource, pasteGuardPath),
         transformWithOxc(passkeyGuardSource, passkeyGuardPath),
@@ -78,13 +81,14 @@ function extensionScriptsPlugin(): Plugin {
         transformWithOxc(accountsSource, accountsPath),
         transformWithOxc(settingsSource, settingsPath),
         transformWithOxc(sellerCentralSessionSource, sellerCentralSessionPath),
+        transformWithOxc(unfulfillableSource, unfulfillablePath),
         transformWithOxc(contentSource, contentPath),
         transformWithOxc(shortcutSource, shortcutPath),
       ])
       const passkeyGuardBundle = `${stripModuleSyntax(passkeyGuardCoreResult.code)}\n${stripModuleSyntax(passkeyGuardResult.code)}`
       const sellerCentralSessionBoot = stripModuleSyntax(sellerCentralSessionResult.code)
       const accountAutomationBundle = `${sellerCentralSessionBoot}\n${stripModuleSyntax(accountAutomationResult.code)}`
-      const contentBoot = `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(contentResult.code)}`
+      const contentBoot = `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(unfulfillableResult.code)}\n${stripModuleSyntax(contentResult.code)}`
 
       this.emitFile({
         type: "asset",

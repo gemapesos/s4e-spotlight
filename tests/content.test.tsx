@@ -177,12 +177,15 @@ describe("content-script mount", () => {
   })
 
   it("downloads a report named for the current store", async () => {
-    const sendMessage = vi.fn().mockResolvedValue({
-      ok: true,
-      initialized: true,
-      unlocked: true,
-      stores: [{ id: "store-1", name: "JMG Outdoors" }],
-      currentStore: { id: "store-1", name: "JMG Outdoors" },
+    const sendMessage = vi.fn(async (message: { type?: string }) => {
+      if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }
+      return {
+        ok: true,
+        initialized: true,
+        unlocked: true,
+        stores: [{ id: "store-1", name: "JMG Outdoors" }],
+        currentStore: { id: "store-1", name: "JMG Outdoors" },
+      }
     })
     vi.stubGlobal("chrome", { runtime: { sendMessage } })
     const createObjectURL = vi.fn().mockReturnValue("blob:report")
@@ -198,12 +201,14 @@ describe("content-script mount", () => {
     try {
       await generateReports(new Date(2026, 7, 14))
       expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
       expect(createObjectURL).toHaveBeenCalledOnce()
 
       sendMessage.mockClear()
       await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors")
-      expect(sendMessage).not.toHaveBeenCalled()
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
+      expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
     } finally {
       click.mockRestore()
@@ -211,12 +216,15 @@ describe("content-script mount", () => {
   })
 
   it("names the report Unknown when no current store is set", async () => {
-    const sendMessage = vi.fn().mockResolvedValue({
-      ok: true,
-      initialized: true,
-      unlocked: false,
-      stores: [],
-      currentStore: null,
+    const sendMessage = vi.fn(async (message: { type?: string }) => {
+      if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }
+      return {
+        ok: true,
+        initialized: true,
+        unlocked: false,
+        stores: [],
+        currentStore: null,
+      }
     })
     vi.stubGlobal("chrome", { runtime: { sendMessage } })
     vi.stubGlobal("URL", {
@@ -233,6 +241,7 @@ describe("content-script mount", () => {
 
     try {
       await generateReports(new Date(2026, 7, 14))
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")
     } finally {
       click.mockRestore()

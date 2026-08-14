@@ -1,6 +1,8 @@
+export type WorkbookCell = string | number
+
 export interface WorkbookSheet {
   name: string
-  rows?: readonly (readonly string[])[]
+  rows?: readonly (readonly WorkbookCell[])[]
 }
 
 const CRC_TABLE = new Uint32Array(256)
@@ -73,17 +75,21 @@ function columnName(index: number): string {
   return name
 }
 
-function worksheetXml(rows: readonly (readonly string[])[] = []): string {
+function cellXml(ref: string, value: WorkbookCell): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `<c r="${ref}"><v>${String(value)}</v></c>`
+  }
+  return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(String(value))}</t></is></c>`
+}
+
+function worksheetXml(rows: readonly (readonly WorkbookCell[])[] = []): string {
   if (rows.length === 0) {
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
   }
 
   const rowXml = rows.map((row, rowIndex) => {
     const r = rowIndex + 1
-    const cells = row.map((value, colIndex) => {
-      const ref = `${columnName(colIndex)}${r}`
-      return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`
-    }).join("")
+    const cells = row.map((value, colIndex) => cellXml(`${columnName(colIndex)}${r}`, value)).join("")
     return `<row r="${r}">${cells}</row>`
   }).join("")
 

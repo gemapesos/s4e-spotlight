@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client"
 import styles from "./styles.css?inline"
 import { CommandPalette, type AccountsStatus, type PaletteMode, type ReportsPrepareResult } from "./CommandPalette"
 import { applyPrefersColorScheme } from "./lib/colorScheme"
-import { buildReportWorkbook, downloadBytes, reportFileName } from "./lib/reports"
+import { buildReportWorkbook, downloadBytes, reportFileName, reportWorkbookSheets } from "./lib/reports"
 import {
   DEFAULT_ENABLED_FEATURES,
   enabledFeaturesEqual,
@@ -13,6 +13,7 @@ import {
   type ExtensionSettings,
 } from "./lib/settings"
 import { isPaletteShortcut } from "./lib/shortcut"
+import type { UnfulfillableListing } from "./lib/unfulfillable"
 
 const HOST_ID = "command-palette-extension-root"
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open"
@@ -228,6 +229,16 @@ export async function prepareReports(): Promise<ReportsPrepareResult> {
   }
 }
 
+export async function fetchUnfulfillableListingsFromBackground(): Promise<UnfulfillableListing[]> {
+  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_UNFULFILLABLE" }) as {
+    ok?: boolean
+    listings?: UnfulfillableListing[]
+    error?: string
+  }
+  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  return Array.isArray(response.listings) ? response.listings : []
+}
+
 export async function generateReports(
   now = new Date(),
   targetDocument: Document = document,
@@ -237,7 +248,8 @@ export async function generateReports(
     currentStoreName !== undefined
       ? currentStoreName
       : (await getAccountsStatus()).currentStore?.name ?? ""
-  downloadBytes(buildReportWorkbook(), reportFileName(storeName, now), targetDocument)
+  const listings = await fetchUnfulfillableListingsFromBackground()
+  downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings)), reportFileName(storeName, now), targetDocument)
 }
 
 export function mountCommandPalette({

@@ -6,6 +6,7 @@ import {
   downloadBytes,
   formatReportDate,
   reportFileName,
+  reportWorkbookSheets,
   sanitizeStoreName,
 } from "../src/lib/reports"
 import { listWorkbookSheetNames, readStoredZip } from "../src/lib/xlsxWorkbook"
@@ -41,6 +42,42 @@ describe("report workbook", () => {
 
     const files = readStoredZip(bytes)
     for (const index of REPORT_SHEETS.keys()) {
+      const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
+      expect(sheet).toContain("<sheetData/>")
+      expect(sheet).not.toContain("<row")
+    }
+  })
+
+  it("fills Unfulfillable rows and leaves the other worksheets empty", () => {
+    const bytes = buildReportWorkbook(reportWorkbookSheets([
+      {
+        coreListingFields: { sku: "20231103_9.00_Sephora_67493", asin: "B00JJPVVYQ", fnSku: "X004110PZF" },
+        listingData: { title: "Sephora Collection Colorful Waterproof Eyeliner", lastUpdated: "11/15/2024 15:18:56" },
+        status: { status: "INACTIVE" },
+        availability: {
+          unfulfillable: 2,
+          unfulfillableDetails: { expired: 2, damagedByCarrier: 0, damagedByCustomer: 0, damagedByDistributor: 0, damagedByWarehouse: 0, defective: 0 },
+        },
+        offers: [{ price: { price: { amount: "21.75", currencyUnit: "USD" } } }],
+      },
+    ]))
+    expect(listWorkbookSheetNames(bytes)).toEqual([...REPORT_SHEETS])
+
+    const files = readStoredZip(bytes)
+    const unfulfillable = new TextDecoder().decode(files.get("xl/worksheets/sheet2.xml"))
+    expect(unfulfillable).toContain("<row r=\"1\">")
+    expect(unfulfillable).toContain("SKU")
+    expect(unfulfillable).toContain("Carrier Damaged")
+    expect(unfulfillable).toContain("Removal Status")
+    expect(unfulfillable).toContain("Unfulfillable")
+    expect(unfulfillable).not.toContain("Eligible for Removal")
+    expect(unfulfillable).toContain("20231103_9.00_Sephora_67493")
+    expect(unfulfillable).toContain('<c r="F2"><v>21.75</v></c>')
+    expect(unfulfillable).toContain('<c r="H2"><v>2</v></c>')
+    expect(unfulfillable).not.toContain('<c r="F2" t="inlineStr">')
+    expect(unfulfillable).not.toContain('<c r="H2" t="inlineStr">')
+
+    for (const index of [0, 2, 3, 4]) {
       const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
       expect(sheet).toContain("<sheetData/>")
       expect(sheet).not.toContain("<row")

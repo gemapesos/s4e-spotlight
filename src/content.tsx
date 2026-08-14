@@ -1,5 +1,6 @@
 import { isPaletteShortcut } from "./lib/shortcut"
 import { sellerCentralSessionStatus } from "./lib/sellerCentralSession"
+import { fetchUnfulfillableListings } from "./lib/unfulfillable"
 
 const PALETTE_APP_FILE = "palette-app.js"
 
@@ -73,6 +74,16 @@ export function handleContentMessage(
           error: error instanceof Error ? error.message : "Couldn’t open the command palette.",
         }),
       )
+    return true
+  }
+  if (record.type === "REPORTS_FETCH_UNFULFILLABLE") {
+    void fetchUnfulfillableListings().then(
+      (listings) => sendResponse({ ok: true, listings }),
+      (error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory.",
+      }),
+    )
     return true
   }
   return undefined

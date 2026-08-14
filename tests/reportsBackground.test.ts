@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  fetchUnfulfillableReport,
   prepareReports,
   SELLER_CENTRAL_HOME_URL,
   SELLER_CENTRAL_TAB_URL_PATTERN,
+  UNFULFILLABLE_INVENTORY_URL,
 } from "../src/background"
 
 describe("Generate Reports Seller Central preflight", () => {
@@ -11,7 +13,7 @@ describe("Generate Reports Seller Central preflight", () => {
   const update = vi.fn(async () => ({}))
   const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
   const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
-  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; loggedInToStore?: boolean; settled?: boolean }> => ({
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; loggedInToStore?: boolean; settled?: boolean; listings?: unknown[] }> => ({
     ok: true,
     loggedInToStore: true,
     settled: true,
@@ -118,5 +120,70 @@ describe("Generate Reports Seller Central preflight", () => {
       openedPromptOnSellerCentral: true,
     })
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "OPEN_PALETTE", mode: "report-login" })
+  })
+})
+
+describe("Generate Reports unfulfillable fetch", () => {
+  const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; listings?: unknown[]; error?: string }> => ({ ok: true, listings: [] }))
+  const focusWindow = vi.fn(async () => ({}))
+  const addUpdatedListener = vi.fn()
+  const removeUpdatedListener = vi.fn()
+
+  beforeEach(() => {
+    create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 })
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([])
+    get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, listings: [] })
+    focusWindow.mockReset(); focusWindow.mockResolvedValue({})
+    addUpdatedListener.mockReset()
+    removeUpdatedListener.mockReset()
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create,
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: addUpdatedListener, removeListener: removeUpdatedListener },
+      },
+      windows: { update: focusWindow },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("navigates to unfulfillable inventory and returns listings", async () => {
+    const listings = [{ coreListingFields: { sku: "ABC-123" } }]
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get
+      .mockResolvedValueOnce({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+      .mockResolvedValueOnce({ id: 22, status: "loading", url: UNFULFILLABLE_INVENTORY_URL } as chrome.tabs.Tab)
+    addUpdatedListener.mockImplementation((listener: (tabId: number, changeInfo: { status?: string; url?: string }, tab: chrome.tabs.Tab) => void) => {
+      listener(22, { status: "complete" }, { id: 22, url: UNFULFILLABLE_INVENTORY_URL } as chrome.tabs.Tab)
+    })
+    sendMessage.mockResolvedValue({ ok: true, listings })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings })
+    expect(update).toHaveBeenCalledWith(22, { active: true })
+    expect(update).toHaveBeenCalledWith(22, { url: UNFULFILLABLE_INVENTORY_URL })
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
+  })
+
+  it("does not reload when the tab is already on the unfulfillable page", async () => {
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: `${UNFULFILLABLE_INVENTORY_URL}?ref_=myi_ul_vl_unfulfillable` } as chrome.tabs.Tab)
+    sendMessage.mockResolvedValue({ ok: true, listings: [] })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings: [] })
+    expect(update).toHaveBeenCalledWith(22, { active: true })
+    expect(update).not.toHaveBeenCalledWith(22, { url: UNFULFILLABLE_INVENTORY_URL })
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
   })
 })
