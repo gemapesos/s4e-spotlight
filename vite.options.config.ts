@@ -20,13 +20,17 @@ export default defineConfig({
     emptyOutDir: false,
     cssCodeSplit: false,
     rollupOptions: {
-      input: resolve(root, "options.html"),
+      input: {
+        options: resolve(root, "options.html"),
+        popup: resolve(root, "popup.html"),
+        timeout: resolve(root, "timeout.html"),
+      },
       output: {
-        entryFileNames: "options.js",
-        chunkFileNames: "options-[name].js",
+        entryFileNames: "[name].js",
+        chunkFileNames: "[name]-[hash].js",
         assetFileNames: (assetInfo) => {
           const name = assetInfo.names?.[0] ?? ""
-          if (name.endsWith(".css")) return "options.css"
+          if (name.endsWith(".css")) return "pages.css"
           return "assets/[name][extname]"
         },
       },

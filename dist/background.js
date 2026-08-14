@@ -1,10 +1,14 @@
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, SESSION_KEY_STORAGE_KEY, STORE_INDEX_KEY, VAULT_STORAGE_KEY, decryptVault, decryptVaultWithKey, deserializeKey, emptyVault, encryptVault, encryptVaultWithKey, generateTotp, parseOtpAuthUri, publicStoreIndex, serializeKey, validateStoreUrl } from "./lib/accounts.js";
+import { DEFAULT_TIME_OUT_FORM_VALUES, loadSettings, TIME_OUT_FORM_BASE_URL, TIME_OUT_FORM_ENTRY_IDS } from "./lib/settings.js";
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=";
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/";
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm=";
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx";
+export const TIME_OUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1E7gfUVzy47vboZHOJ6xd8Jwx-1N6oewaVggrtI7G4yw/edit?gid=0#gid=0";
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx";
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0";
+export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/";
+export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*";
 const MAX_BULK_IDS = 50;
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1e3;
 export class TabBatchError extends Error {
@@ -35,40 +39,73 @@ export function buildShipmentUrl(id) {
 export function buildSkuUrl(id) {
 	return `${SKU_URL}${encodeURIComponent(id)}${SKU_URL_SUFFIX}`;
 }
+export function buildTimeOutFormUrl(date, values = DEFAULT_TIME_OUT_FORM_VALUES) {
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	const params = new URLSearchParams({ [`entry.${TIME_OUT_FORM_ENTRY_IDS.date}`]: `${year}-${month}-${day}` });
+	for (const [key, entryId] of Object.entries(TIME_OUT_FORM_ENTRY_IDS)) {
+		if (key === "date") continue;
+		const value = values[key];
+		if (value) params.set(`entry.${entryId}`, value);
+	}
+	return `${TIME_OUT_FORM_BASE_URL}?${params.toString()}`;
+}
+async function rollbackCreatedTabs(created, removeTabs) {
+	const rolledBackIds = [];
+	const openedIds = [];
+	for (const item of created) {
+		try {
+			await removeTabs([item.tabId]);
+			rolledBackIds.push(item.id);
+		} catch {
+			openedIds.push(item.id);
+		}
+	}
+	return {
+		openedIds,
+		rolledBackIds
+	};
+}
+function tabBatchError(cause, openedIds, rolledBackIds) {
+	const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab.";
+	const suffix = openedIds.length ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.` : " Any tabs opened by this attempt were closed.";
+	return new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds);
+}
+async function createTabsInParallel(targets, senderTab, createTab, removeTabs) {
+	const results = await Promise.allSettled(targets.map(async (target) => {
+		const tab = await createTab({
+			active: target.active,
+			openerTabId: senderTab.id,
+			url: target.url,
+			windowId: senderTab.windowId
+		});
+		if (tab.id === undefined) throw new Error("Chrome created a tab without an ID.");
+		return {
+			id: target.id,
+			tabId: tab.id
+		};
+	}));
+	const created = [];
+	let failure;
+	for (const result of results) {
+		if (result.status === "fulfilled") created.push(result.value);
+		else if (failure === undefined) failure = result.reason;
+	}
+	if (failure !== undefined) {
+		const { openedIds, rolledBackIds } = await rollbackCreatedTabs(created, removeTabs);
+		throw tabBatchError(failure, openedIds, rolledBackIds);
+	}
+	return { openedCount: created.length };
+}
 async function createBackgroundTabs(ids, senderTab, buildUrl, createTab, removeTabs) {
 	if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.");
 	if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`);
-	const created = [];
-	try {
-		for (const id of ids) {
-			const tab = await createTab({
-				active: false,
-				openerTabId: senderTab.id,
-				url: buildUrl(id),
-				windowId: senderTab.windowId
-			});
-			if (tab.id === undefined) throw new Error("Chrome created a tab without an ID.");
-			created.push({
-				id,
-				tabId: tab.id
-			});
-		}
-		return { openedCount: created.length };
-	} catch (cause) {
-		const rolledBackIds = [];
-		const openedIds = [];
-		for (const item of created) {
-			try {
-				await removeTabs([item.tabId]);
-				rolledBackIds.push(item.id);
-			} catch {
-				openedIds.push(item.id);
-			}
-		}
-		const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab.";
-		const suffix = openedIds.length ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.` : " Any tabs opened by this attempt were closed.";
-		throw new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds);
-	}
+	return createTabsInParallel(ids.map((id) => ({
+		id,
+		active: false,
+		url: buildUrl(id)
+	})), senderTab, createTab, removeTabs);
 }
 export async function openCaseTabs(ids, senderTab, createTab = (properties) => chrome.tabs.create(properties), removeTabs = (tabIds) => chrome.tabs.remove(tabIds)) {
 	const normalized = normalizeCaseIds(ids);
@@ -85,10 +122,37 @@ export async function openSkuTabs(ids, senderTab, createTab = (properties) => ch
 	if (!normalized.length) throw new Error("No valid SKUs were provided.");
 	return createBackgroundTabs(normalized, senderTab, buildSkuUrl, createTab, removeTabs);
 }
-export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipments = openShipmentTabs, openSkus = openSkuTabs) {
+export async function openTimeOutTabs(senderTab, createTab = (properties) => chrome.tabs.create(properties), removeTabs = (tabIds) => chrome.tabs.remove(tabIds), date = new Date(), loadFormValues = async () => (await loadSettings()).timeOutForm) {
+	if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.");
+	const values = await loadFormValues();
+	return createTabsInParallel([{
+		id: "Google Sheet",
+		active: false,
+		url: TIME_OUT_SHEET_URL
+	}, {
+		id: "Google Form",
+		active: true,
+		url: buildTimeOutFormUrl(date, values)
+	}], senderTab, createTab, removeTabs);
+}
+export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipments = openShipmentTabs, openSkus = openSkuTabs, openTimeOut = openTimeOutTabs) {
 	return (message, sender, sendResponse) => {
 		if (!message || typeof message !== "object" || !("type" in message)) return undefined;
 		const record = message;
+		if (record.type === "OPEN_TIME_OUT") {
+			void openTimeOut(sender.tab).then((result) => sendResponse({
+				ok: true,
+				openedCount: result.openedCount
+			}), (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t open Time Out.",
+				...error instanceof TabBatchError ? {
+					openedIds: error.openedIds,
+					rolledBackIds: error.rolledBackIds
+				} : {}
+			}));
+			return true;
+		}
 		const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : record.type === "OPEN_SKU_IDS" ? openSkus : null;
 		if (!handler) return undefined;
 		const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.type === "OPEN_SHIPMENT_IDS" ? record.shipmentIds : record.skuIds;
@@ -172,6 +236,133 @@ async function pruneCurrentStore(storeIds) {
 function currentStoreFromIndex(stores, storeId) {
 	if (!storeId) return null;
 	return stores.find((store) => store.id === storeId) ?? null;
+}
+export function pickSellerCentralTab(tabs, preferredWindowId) {
+	const withId = tabs.filter((tab) => tab.id !== undefined);
+	if (withId.length === 0) return undefined;
+	return [...withId].sort((a, b) => {
+		const aPreferred = a.windowId === preferredWindowId ? 1 : 0;
+		const bPreferred = b.windowId === preferredWindowId ? 1 : 0;
+		if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+		return (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+	})[0];
+}
+const TAB_LOAD_TIMEOUT_MS = 3e4;
+const SESSION_PROBE_TIMEOUT_MS = 15e3;
+const SESSION_PROBE_INTERVAL_MS = 250;
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+export async function ensureSellerCentralTab(senderTab) {
+	const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN });
+	const tab = pickSellerCentralTab(tabs, senderTab?.windowId);
+	if (tab?.id !== undefined) {
+		await chrome.tabs.update(tab.id, { active: true });
+		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+		return {
+			tabId: tab.id,
+			focused: true
+		};
+	}
+	const created = await chrome.tabs.create({
+		active: true,
+		url: SELLER_CENTRAL_HOME_URL,
+		...senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }
+	});
+	if (created.id === undefined) throw new Error("Chrome did not create the Seller Central tab.");
+	return {
+		tabId: created.id,
+		opened: true
+	};
+}
+export async function focusOrOpenSellerCentralTab(senderTab) {
+	const { focused, opened } = await ensureSellerCentralTab(senderTab);
+	return {
+		ok: true,
+		...focused ? { focused: true } : {},
+		...opened ? { opened: true } : {}
+	};
+}
+export async function waitForTabComplete(tabId, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
+	const current = await chrome.tabs.get(tabId);
+	if (current.status === "complete" && current.url && current.url !== "about:blank") return;
+	await new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			chrome.tabs.onUpdated.removeListener(onUpdated);
+			reject(new Error("Seller Central did not finish loading."));
+		}, timeoutMs);
+		function onUpdated(updatedTabId, changeInfo, tab) {
+			if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
+			const url = changeInfo.url ?? tab.url;
+			if (!url || url === "about:blank") return;
+			clearTimeout(timer);
+			chrome.tabs.onUpdated.removeListener(onUpdated);
+			resolve();
+		}
+		chrome.tabs.onUpdated.addListener(onUpdated);
+	});
+}
+export async function probeSellerCentralSession(tabId) {
+	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
+	let last;
+	while (Date.now() < deadline) {
+		try {
+			const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_SESSION_STATUS" });
+			if (response?.ok && typeof response.loggedInToStore === "boolean") {
+				last = {
+					loggedInToStore: response.loggedInToStore,
+					settled: Boolean(response.settled)
+				};
+				if (last.settled) return last.loggedInToStore;
+			}
+		} catch {}
+		await sleep(SESSION_PROBE_INTERVAL_MS);
+	}
+	if (!last) throw new Error("Couldn’t confirm the Seller Central session.");
+	return last.loggedInToStore;
+}
+export async function prepareReports(senderTab) {
+	const { tabId } = await ensureSellerCentralTab(senderTab);
+	await waitForTabComplete(tabId);
+	const loggedInToStore = await probeSellerCentralSession(tabId);
+	if (loggedInToStore) return {
+		ok: true,
+		loggedInToStore: true,
+		sellerCentralTabId: tabId
+	};
+	if (senderTab?.id === tabId) return {
+		ok: true,
+		loggedInToStore: false,
+		sellerCentralTabId: tabId
+	};
+	const opened = await chrome.tabs.sendMessage(tabId, {
+		type: "OPEN_PALETTE",
+		mode: "report-login"
+	});
+	if (!opened?.ok) throw new Error(opened?.error ?? "Couldn’t open the command palette on Seller Central.");
+	return {
+		ok: true,
+		loggedInToStore: false,
+		sellerCentralTabId: tabId,
+		openedPromptOnSellerCentral: true
+	};
+}
+async function openStoreUrl(storeUrl, senderTab) {
+	const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN });
+	const tab = pickSellerCentralTab(tabs, senderTab?.windowId);
+	if (tab?.id !== undefined) {
+		await chrome.tabs.update(tab.id, {
+			active: true,
+			url: storeUrl
+		});
+		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+		return;
+	}
+	await chrome.tabs.create({
+		active: true,
+		url: storeUrl,
+		...senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }
+	});
 }
 async function getActiveJob() {
 	const job = (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY];
@@ -319,6 +510,13 @@ export async function handleAccountsMessage(message, sender) {
 				const { vault } = await getUnlockedVault();
 				const store = vault.stores.find(({ id }) => id === message.storeId);
 				if (!store) throw new Error("The selected store was not found.");
+				const currentStoreId = await getCurrentStoreId();
+				const currentStore = currentStoreId ? vault.stores.find(({ id }) => id === currentStoreId) : undefined;
+				if (currentStore && currentStore.credentialId === store.credentialId) {
+					await openStoreUrl(store.storeUrl, sender.tab);
+					await setCurrentStoreId(store.id);
+					return { ok: true };
+				}
 				let tabId;
 				try {
 					const tab = await chrome.tabs.create({
@@ -348,6 +546,10 @@ export async function handleAccountsMessage(message, sender) {
 					throw error;
 				}
 			});
+		}
+		case "ACCOUNTS_FOCUS_CURRENT_STORE": {
+			if (!await getCurrentStoreId()) throw new Error("No store is currently selected.");
+			return focusOrOpenSellerCentralTab(sender.tab);
 		}
 		case "ACCOUNTS_FOCUS_SWITCH": {
 			const job = await getActiveJob();
@@ -499,7 +701,26 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 	chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		const handled = idsListener(message, sender, sendResponse);
 		if (handled) return true;
-		if (!message || typeof message !== "object" || !("type" in message) || !String(message.type).startsWith("ACCOUNT")) return undefined;
+		if (!message || typeof message !== "object" || !("type" in message)) return undefined;
+		const type = String(message.type);
+		if (type === "GET_SETTINGS") {
+			void loadSettings().then((settings) => sendResponse({
+				ok: true,
+				settings
+			}), (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t load settings."
+			}));
+			return true;
+		}
+		if (type === "REPORTS_PREPARE") {
+			void prepareReports(sender.tab).then(sendResponse, (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t open Seller Central."
+			}));
+			return true;
+		}
+		if (!type.startsWith("ACCOUNT")) return undefined;
 		void handleAccountsMessage(message, sender).then(sendResponse, (error) => sendResponse({
 			ok: false,
 			error: error instanceof Error ? error.message : "Account operation failed."

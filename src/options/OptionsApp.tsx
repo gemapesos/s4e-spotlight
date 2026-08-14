@@ -21,6 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { PageShell } from "@/components/PageShell"
 import {
   Dialog,
   DialogContent,
@@ -30,6 +31,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -55,24 +62,20 @@ function SecretField({ label, value }: { label: string; value: string }) {
   }, [revealed])
 
   return (
-    <div className="flex w-full">
-      <Input
+    <InputGroup>
+      <InputGroupInput
         aria-label={label}
-        className="rounded-r-none"
         onBlur={() => setRevealed(false)}
         readOnly
         type={revealed ? "text" : "password"}
         value={value}
       />
-      <Button
-        className="rounded-l-none border-l-0"
-        onClick={() => setRevealed((open) => !open)}
-        type="button"
-        variant="outline"
-      >
-        {revealed ? "Hide" : "Reveal"}
-      </Button>
-    </div>
+      <InputGroupAddon align="inline-end">
+        <InputGroupButton onClick={() => setRevealed((open) => !open)}>
+          {revealed ? "Hide" : "Reveal"}
+        </InputGroupButton>
+      </InputGroupAddon>
+    </InputGroup>
   )
 }
 
@@ -90,6 +93,10 @@ export function OptionsApp() {
   const [resetOpen, setResetOpen] = React.useState(false)
   const [resetConfirmation, setResetConfirmation] = React.useState("")
   const [storeCredentialId, setStoreCredentialId] = React.useState("")
+  const credentialsById = React.useMemo(
+    () => new Map((vault?.credentials ?? []).map((item) => [item.id, item])),
+    [vault],
+  )
 
   const showNotice = React.useCallback((message = "", error = false) => {
     setNotice(message ? { message, error } : null)
@@ -257,26 +264,41 @@ export function OptionsApp() {
   }
 
   return (
-    <div className="mx-auto min-h-svh w-full max-w-6xl px-8 py-12">
-      <header className="mb-6 flex flex-col gap-6 border-b pb-6 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="mb-1.5 text-xs font-semibold tracking-[0.08em] text-muted-foreground uppercase">S4E Spotlight</p>
-          <h1 className="text-3xl font-bold tracking-tight">Accounts</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">Manage encrypted Seller Central stores and shared credentials.</p>
-        </div>
-        {page === "editor" ? (
+    <PageShell
+      actions={
+        page === "editor" ? (
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => setPasswordOpen(true)} type="button" variant="outline">Change master password</Button>
             <Button onClick={() => void api({ type: "ACCOUNTS_LOCK" }).then(load, (error) => showNotice(error instanceof Error ? error.message : "Could not lock accounts.", true))} type="button" variant="outline">Lock</Button>
           </div>
+        ) : undefined
+      }
+      description="Manage encrypted Seller Central stores and shared credentials."
+      title="Accounts"
+    >
+      <main aria-busy={busy || page === "loading"} className={`grid gap-6${busy ? " opacity-60" : ""}`}>
+        {notice ? (
+          <Alert
+            role={notice.error ? "alert" : "status"}
+            variant={notice.error ? "destructive" : "default"}
+          >
+            {notice.error ? <CircleAlert /> : <CircleCheck />}
+            <AlertTitle>{notice.error ? "Something went wrong" : "Success"}</AlertTitle>
+            <AlertDescription>{notice.message}</AlertDescription>
+            <AlertAction>
+              <Button aria-label="Close notification" onClick={() => showNotice()} size="xs" type="button" variant="outline">Dismiss</Button>
+            </AlertAction>
+          </Alert>
         ) : null}
-      </header>
 
-      <main aria-busy={busy || page === "loading"} className={busy ? "opacity-60" : undefined}>
+        {page === "loading" ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : null}
+
         {page === "create" ? (
           <Card className="max-w-xl">
             <CardHeader>
-              <CardTitle><h2>Create encrypted vault</h2></CardTitle>
+              <CardTitle>Create encrypted vault</CardTitle>
               <CardDescription>Your master password encrypts every account locally. It cannot be recovered.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -301,7 +323,7 @@ export function OptionsApp() {
           <div className="grid max-w-xl gap-4">
             <Card>
               <CardHeader>
-                <CardTitle><h2>Unlock accounts</h2></CardTitle>
+                <CardTitle>Unlock accounts</CardTitle>
                 <CardDescription>Enter the master password to edit stores and credentials.</CardDescription>
               </CardHeader>
               <CardContent>
@@ -318,7 +340,7 @@ export function OptionsApp() {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle className="text-destructive"><h2>Forgotten master password</h2></CardTitle>
+                <CardTitle className="text-destructive">Forgotten master password</CardTitle>
                 <CardDescription>Resetting permanently deletes the encrypted account vault. This action cannot be undone.</CardDescription>
               </CardHeader>
               <CardContent>
@@ -332,7 +354,7 @@ export function OptionsApp() {
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle><h2>Credentials</h2></CardTitle>
+                <CardTitle>Credentials</CardTitle>
                 <CardDescription>Domains, passwords, and TOTP secrets.</CardDescription>
                 <CardAction>
                   <Button onClick={() => openCredential()} type="button">Add credential</Button>
@@ -340,9 +362,9 @@ export function OptionsApp() {
               </CardHeader>
               <CardContent className="grid gap-3">
                 {vault.credentials.length === 0 ? (
-                  <div className="flex min-h-32 items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">No credentials yet.</div>
+                  <div className="flex min-h-32 items-center justify-center rounded-xl text-sm text-muted-foreground ring-1 ring-foreground/10">No credentials yet.</div>
                 ) : vault.credentials.map((item) => (
-                  <article className="grid gap-3 rounded-lg border p-4" key={item.id}>
+                  <article className="grid gap-3 rounded-xl p-4 ring-1 ring-foreground/10" key={item.id}>
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div>
                         <h3 className="text-sm font-medium">{item.domain}</h3>
@@ -361,7 +383,7 @@ export function OptionsApp() {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle><h2>Stores</h2></CardTitle>
+                <CardTitle>Stores</CardTitle>
                 <CardDescription>Seller Central destinations.</CardDescription>
                 <CardAction>
                   <Button disabled={vault.credentials.length === 0} onClick={() => openStore()} type="button">Add store</Button>
@@ -369,11 +391,11 @@ export function OptionsApp() {
               </CardHeader>
               <CardContent className="grid gap-3">
                 {vault.stores.length === 0 ? (
-                  <div className="flex min-h-32 items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">Add a credential, then add your first store.</div>
+                  <div className="flex min-h-32 items-center justify-center rounded-xl text-sm text-muted-foreground ring-1 ring-foreground/10">Add a credential, then add your first store.</div>
                 ) : vault.stores.map((item) => {
-                  const domain = vault.credentials.find(({ id }) => id === item.credentialId)?.domain ?? "Missing credential"
+                  const domain = credentialsById.get(item.credentialId)?.domain ?? "Missing credential"
                   return (
-                    <article className="grid gap-3 rounded-lg border p-4" key={item.id}>
+                    <article className="grid gap-3 rounded-xl p-4 ring-1 ring-foreground/10" key={item.id}>
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div>
                           <h3 className="text-sm font-medium">{item.name}</h3>
@@ -511,21 +533,6 @@ export function OptionsApp() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      {notice ? (
-        <Alert
-          className="fixed top-6 right-6 z-50 w-[min(22rem,calc(100vw-2rem))]"
-          role={notice.error ? "alert" : "status"}
-          variant={notice.error ? "destructive" : "default"}
-        >
-          {notice.error ? <CircleAlert /> : <CircleCheck />}
-          <AlertTitle>{notice.error ? "Something went wrong" : "Success"}</AlertTitle>
-          <AlertDescription>{notice.message}</AlertDescription>
-          <AlertAction>
-            <Button aria-label="Close notification" onClick={() => showNotice()} size="xs" type="button" variant="outline">Dismiss</Button>
-          </AlertAction>
-        </Alert>
-      ) : null}
-    </div>
+    </PageShell>
   )
 }

@@ -14,7 +14,7 @@ Chrome users who want a fast, keyboard-first command surface available while bro
 
 ## Product Purpose
 
-Provide one dependable shortcut for Seller Central operational tools: turn messy Case ID or Shipment ID text into tabs and switch stores using locally encrypted account data.
+Provide one dependable shortcut for Seller Central operational tools: turn messy Case ID or Shipment ID text into tabs, open Time Out resources, and switch stores using locally encrypted account data.
 
 ## Positioning
 

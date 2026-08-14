@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
+  focusCurrentStore,
   generateReports,
   getAccountsStatus,
+  getSettings,
   mountCommandPalette,
   openCaseIds,
   openShipmentIds,
   openSkuIds,
+  openTimeOut,
+  prepareReports,
   type MountedCommandPalette,
-} from "../src/content"
+} from "../src/paletteApp"
 
 let mounted: MountedCommandPalette | null = null
 
@@ -69,6 +73,17 @@ describe("content-script mount", () => {
     await expect(openSkuIds(["ABC-123"])).rejects.toThrow("worker failed")
   })
 
+  it("asks the background worker to open Time Out and requires success", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true, openedCount: 2 })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+
+    await expect(openTimeOut()).resolves.toBeUndefined()
+    expect(sendMessage).toHaveBeenCalledWith({ type: "OPEN_TIME_OUT" })
+
+    sendMessage.mockResolvedValue({ ok: false, error: "worker failed" })
+    await expect(openTimeOut()).rejects.toThrow("worker failed")
+  })
+
   it("loads accounts status from the background worker", async () => {
     const sendMessage = vi.fn().mockResolvedValue({
       ok: true,
@@ -86,6 +101,79 @@ describe("content-script mount", () => {
       currentStore: null,
     })
     expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
+  })
+
+  it("asks the background worker to focus or open Seller Central for the current store", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+
+    await expect(focusCurrentStore()).resolves.toBeUndefined()
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" })
+
+    sendMessage.mockResolvedValue({ ok: false, error: "worker failed" })
+    await expect(focusCurrentStore()).rejects.toThrow("worker failed")
+  })
+
+  it("asks the background worker to prepare Seller Central for reports", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      ok: true,
+      loggedInToStore: true,
+      sellerCentralTabId: 22,
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+
+    await expect(prepareReports()).resolves.toEqual({
+      loggedInToStore: true,
+      openedPromptOnSellerCentral: undefined,
+    })
+    expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_PREPARE" })
+
+    sendMessage.mockResolvedValue({ ok: false, error: "worker failed" })
+    await expect(prepareReports()).rejects.toThrow("worker failed")
+  })
+
+  it("asks the background worker for settings when the palette opens", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      ok: true,
+      settings: {
+        features: {
+          "open-case-ids": false,
+          "open-shipment-ids": true,
+          "search-skus": true,
+          "time-out": true,
+          "generate-reports": true,
+          accounts: true,
+        },
+        timeOutForm: {
+          staffName: "Dhylan Mapesos",
+          business: "S4E",
+          supervisor: "Lou",
+          hoursWorked: "4",
+          scheduledAccountsCompleted: "Yes",
+          blockersOrRedFlags: "No",
+        },
+      },
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+    mounted?.setOpen(true)
+
+    await vi.waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({ type: "GET_SETTINGS" })
+    })
+  })
+
+  it("loads settings from the background worker", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      ok: true,
+      settings: { features: { "open-case-ids": false } },
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+
+    await expect(getSettings()).resolves.toMatchObject({
+      features: { "open-case-ids": false, "time-out": true },
+    })
+    expect(sendMessage).toHaveBeenCalledWith({ type: "GET_SETTINGS" })
   })
 
   it("downloads a report named for the current store", async () => {
@@ -112,6 +200,11 @@ describe("content-script mount", () => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
       expect(createObjectURL).toHaveBeenCalledOnce()
+
+      sendMessage.mockClear()
+      await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors")
+      expect(sendMessage).not.toHaveBeenCalled()
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
     } finally {
       click.mockRestore()
     }
@@ -153,6 +246,7 @@ describe("content-script mount", () => {
     expect(mounted?.host.parentElement).toBe(document.body)
     expect(mounted?.host).toHaveAttribute("data-s4e-palette-open", "false")
     expect(mounted?.shadowRoot.querySelector("style")).not.toBeNull()
+    expect(mounted?.shadowRoot.querySelector("[role=dialog]")).toBeNull()
     expect(mountCommandPalette({ document, shadowMode: "open" })).toBeNull()
   })
 

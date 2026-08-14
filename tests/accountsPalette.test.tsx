@@ -22,6 +22,7 @@ function renderAccounts(overrides: Record<string, unknown> = {}) {
     onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: true, unlocked: true, stores: [{ id: "store-1", name: "JMG Outdoors" }] }),
     onUnlockAccounts: vi.fn().mockResolvedValue(undefined),
     onStartAccountSwitch: vi.fn().mockResolvedValue(undefined),
+    onFocusCurrentStore: vi.fn().mockResolvedValue(undefined),
     onFocusAccountSwitch: vi.fn().mockResolvedValue(undefined),
     onCancelAccountSwitch: vi.fn().mockResolvedValue(undefined),
     onManageAccounts: vi.fn().mockResolvedValue(undefined),
@@ -81,6 +82,7 @@ describe("Accounts palette", () => {
     const props = renderAccounts()
     await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+    expect(props.onGetAccountsStatus).toHaveBeenCalledOnce()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
     expect(props.onOpenChange).toHaveBeenCalledWith(false)
   })
@@ -236,7 +238,7 @@ describe("Accounts palette", () => {
     expect(await screen.findByRole("status", { name: /Current store: Unknown/ })).toBeVisible()
   })
 
-  it("shows the current store, marks it, and skips switching to it", async () => {
+  it("shows the current store, marks it, and focuses Seller Central when it is reselected", async () => {
     const user = userEvent.setup()
     const props = renderAccounts({
       onGetAccountsStatus: vi.fn().mockResolvedValue({
@@ -252,10 +254,24 @@ describe("Accounts palette", () => {
     expect(screen.getByRole("option", { name: "North Shop" })).not.toHaveAttribute("data-checked")
 
     await user.click(screen.getByRole("option", { name: "JMG Outdoors" }))
+    expect(props.onFocusCurrentStore).toHaveBeenCalledOnce()
     expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
-    expect(props.onOpenChange).not.toHaveBeenCalled()
+    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+  })
 
-    await user.click(screen.getByRole("option", { name: "North Shop" }))
+  it("starts a switch when a different store is selected", async () => {
+    const user = userEvent.setup()
+    const props = renderAccounts({
+      onGetAccountsStatus: vi.fn().mockResolvedValue({
+        initialized: true,
+        unlocked: true,
+        stores: [{ id: "store-1", name: "JMG Outdoors" }, { id: "store-2", name: "North Shop" }],
+        currentStore: { id: "store-1", name: "JMG Outdoors" },
+      }),
+    })
+    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(await screen.findByRole("option", { name: "North Shop" }))
+    expect(props.onFocusCurrentStore).not.toHaveBeenCalled()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-2")
     expect(props.onOpenChange).toHaveBeenCalledWith(false)
   })

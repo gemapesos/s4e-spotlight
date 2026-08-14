@@ -21,13 +21,23 @@ import {
   type StoreIndexRecord,
   type StoreRecord,
 } from "./lib/accounts.js"
+import {
+  DEFAULT_TIME_OUT_FORM_VALUES,
+  loadSettings,
+  TIME_OUT_FORM_BASE_URL,
+  TIME_OUT_FORM_ENTRY_IDS,
+  type TimeOutFormValues,
+} from "./lib/settings.js"
 
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID="
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/"
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm="
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
+export const TIME_OUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1E7gfUVzy47vboZHOJ6xd8Jwx-1N6oewaVggrtI7G4yw/edit?gid=0#gid=0"
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx"
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
+export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/"
+export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*"
 
 export type OpenIdsResponse =
   | { ok: true; openedCount: number }
@@ -35,6 +45,8 @@ export type OpenIdsResponse =
 type CreateTab = (properties: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>
 type RemoveTabs = (tabIds: number[]) => Promise<void>
 type OpenTabs = (ids: unknown, senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
+type OpenTimeOut = (senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
+type LoadTimeOutFormValues = () => Promise<TimeOutFormValues>
 
 const MAX_BULK_IDS = 50
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
@@ -66,6 +78,79 @@ export function normalizeSkuIds(value: unknown): string[] {
 export function buildCaseUrl(id: string): string { return `${CASE_URL}${id}` }
 export function buildShipmentUrl(id: string): string { return `${SHIPMENT_URL}${id}/contents` }
 export function buildSkuUrl(id: string): string { return `${SKU_URL}${encodeURIComponent(id)}${SKU_URL_SUFFIX}` }
+export function buildTimeOutFormUrl(date: Date, values: TimeOutFormValues = DEFAULT_TIME_OUT_FORM_VALUES): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  const params = new URLSearchParams({
+    [`entry.${TIME_OUT_FORM_ENTRY_IDS.date}`]: `${year}-${month}-${day}`,
+  })
+  for (const [key, entryId] of Object.entries(TIME_OUT_FORM_ENTRY_IDS)) {
+    if (key === "date") continue
+    const value = values[key as keyof TimeOutFormValues]
+    if (value) params.set(`entry.${entryId}`, value)
+  }
+  return `${TIME_OUT_FORM_BASE_URL}?${params.toString()}`
+}
+
+async function rollbackCreatedTabs(
+  created: Array<{ id: string; tabId: number }>,
+  removeTabs: RemoveTabs,
+): Promise<{ openedIds: string[]; rolledBackIds: string[] }> {
+  const rolledBackIds: string[] = []
+  const openedIds: string[] = []
+  for (const item of created) {
+    try {
+      await removeTabs([item.tabId])
+      rolledBackIds.push(item.id)
+    } catch {
+      openedIds.push(item.id)
+    }
+  }
+  return { openedIds, rolledBackIds }
+}
+
+function tabBatchError(cause: unknown, openedIds: string[], rolledBackIds: string[]): TabBatchError {
+  const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab."
+  const suffix = openedIds.length
+    ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.`
+    : " Any tabs opened by this attempt were closed."
+  return new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds)
+}
+
+async function createTabsInParallel(
+  targets: ReadonlyArray<{ id: string; active: boolean; url: string }>,
+  senderTab: chrome.tabs.Tab & { id: number; windowId: number },
+  createTab: CreateTab,
+  removeTabs: RemoveTabs,
+): Promise<{ openedCount: number }> {
+  const results = await Promise.allSettled(
+    targets.map(async (target) => {
+      const tab = await createTab({
+        active: target.active,
+        openerTabId: senderTab.id,
+        url: target.url,
+        windowId: senderTab.windowId,
+      })
+      if (tab.id === undefined) throw new Error("Chrome created a tab without an ID.")
+      return { id: target.id, tabId: tab.id }
+    }),
+  )
+
+  const created: Array<{ id: string; tabId: number }> = []
+  let failure: unknown
+  for (const result of results) {
+    if (result.status === "fulfilled") created.push(result.value)
+    else if (failure === undefined) failure = result.reason
+  }
+
+  if (failure !== undefined) {
+    const { openedIds, rolledBackIds } = await rollbackCreatedTabs(created, removeTabs)
+    throw tabBatchError(failure, openedIds, rolledBackIds)
+  }
+
+  return { openedCount: created.length }
+}
 
 async function createBackgroundTabs(
   ids: string[],
@@ -77,31 +162,12 @@ async function createBackgroundTabs(
   if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.")
   if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
 
-  const created: Array<{ id: string; tabId: number }> = []
-  try {
-    for (const id of ids) {
-      const tab = await createTab({ active: false, openerTabId: senderTab.id, url: buildUrl(id), windowId: senderTab.windowId })
-      if (tab.id === undefined) throw new Error("Chrome created a tab without an ID.")
-      created.push({ id, tabId: tab.id })
-    }
-    return { openedCount: created.length }
-  } catch (cause) {
-    const rolledBackIds: string[] = []
-    const openedIds: string[] = []
-    for (const item of created) {
-      try {
-        await removeTabs([item.tabId])
-        rolledBackIds.push(item.id)
-      } catch {
-        openedIds.push(item.id)
-      }
-    }
-    const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab."
-    const suffix = openedIds.length
-      ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.`
-      : " Any tabs opened by this attempt were closed."
-    throw new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds)
-  }
+  return createTabsInParallel(
+    ids.map((id) => ({ id, active: false, url: buildUrl(id) })),
+    senderTab as chrome.tabs.Tab & { id: number; windowId: number },
+    createTab,
+    removeTabs,
+  )
 }
 export async function openCaseTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
   const normalized = normalizeCaseIds(ids)
@@ -119,10 +185,42 @@ export async function openSkuTabs(ids: unknown, senderTab: chrome.tabs.Tab | und
   return createBackgroundTabs(normalized, senderTab, buildSkuUrl, createTab, removeTabs)
 }
 
-export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs, openShipments: OpenTabs = openShipmentTabs, openSkus: OpenTabs = openSkuTabs) {
+export async function openTimeOutTabs(
+  senderTab: chrome.tabs.Tab | undefined,
+  createTab: CreateTab = (properties) => chrome.tabs.create(properties),
+  removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds),
+  date = new Date(),
+  loadFormValues: LoadTimeOutFormValues = async () => (await loadSettings()).timeOutForm,
+): Promise<{ openedCount: number }> {
+  if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.")
+  const values = await loadFormValues()
+
+  return createTabsInParallel(
+    [
+      { id: "Google Sheet", active: false, url: TIME_OUT_SHEET_URL },
+      { id: "Google Form", active: true, url: buildTimeOutFormUrl(date, values) },
+    ],
+    senderTab as chrome.tabs.Tab & { id: number; windowId: number },
+    createTab,
+    removeTabs,
+  )
+}
+
+export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs, openShipments: OpenTabs = openShipmentTabs, openSkus: OpenTabs = openSkuTabs, openTimeOut: OpenTimeOut = openTimeOutTabs) {
   return (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: OpenIdsResponse) => void): boolean | undefined => {
     if (!message || typeof message !== "object" || !("type" in message)) return undefined
     const record = message as Record<string, unknown>
+    if (record.type === "OPEN_TIME_OUT") {
+      void openTimeOut(sender.tab).then(
+        (result) => sendResponse({ ok: true, openedCount: result.openedCount }),
+        (error: unknown) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : "Couldn’t open Time Out.",
+          ...(error instanceof TabBatchError ? { openedIds: error.openedIds, rolledBackIds: error.rolledBackIds } : {}),
+        }),
+      )
+      return true
+    }
     const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : record.type === "OPEN_SKU_IDS" ? openSkus : null
     if (!handler) return undefined
     const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.type === "OPEN_SHIPMENT_IDS" ? record.shipmentIds : record.skuIds
@@ -209,6 +307,127 @@ async function pruneCurrentStore(storeIds: readonly string[]): Promise<void> {
 function currentStoreFromIndex(stores: StoreIndexRecord[], storeId?: string): StoreIndexRecord | null {
   if (!storeId) return null
   return stores.find((store) => store.id === storeId) ?? null
+}
+
+export function pickSellerCentralTab(tabs: readonly chrome.tabs.Tab[], preferredWindowId?: number): chrome.tabs.Tab | undefined {
+  const withId = tabs.filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined)
+  if (withId.length === 0) return undefined
+  return [...withId].sort((a, b) => {
+    const aPreferred = a.windowId === preferredWindowId ? 1 : 0
+    const bPreferred = b.windowId === preferredWindowId ? 1 : 0
+    if (aPreferred !== bPreferred) return bPreferred - aPreferred
+    return (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)
+  })[0]
+}
+
+const TAB_LOAD_TIMEOUT_MS = 30_000
+const SESSION_PROBE_TIMEOUT_MS = 15_000
+const SESSION_PROBE_INTERVAL_MS = 250
+
+export interface ReportsPrepareResult {
+  ok: true
+  loggedInToStore: boolean
+  sellerCentralTabId: number
+  openedPromptOnSellerCentral?: true
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export async function ensureSellerCentralTab(senderTab?: chrome.tabs.Tab): Promise<{ tabId: number; focused?: true; opened?: true }> {
+  const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
+  const tab = pickSellerCentralTab(tabs, senderTab?.windowId)
+  if (tab?.id !== undefined) {
+    await chrome.tabs.update(tab.id, { active: true })
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+    return { tabId: tab.id, focused: true }
+  }
+  const created = await chrome.tabs.create({
+    active: true,
+    url: SELLER_CENTRAL_HOME_URL,
+    ...(senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }),
+  })
+  if (created.id === undefined) throw new Error("Chrome did not create the Seller Central tab.")
+  return { tabId: created.id, opened: true }
+}
+
+export async function focusOrOpenSellerCentralTab(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; focused?: true; opened?: true }> {
+  const { focused, opened } = await ensureSellerCentralTab(senderTab)
+  return { ok: true, ...(focused ? { focused: true } : {}), ...(opened ? { opened: true } : {}) }
+}
+
+export async function waitForTabComplete(tabId: number, timeoutMs = TAB_LOAD_TIMEOUT_MS): Promise<void> {
+  const current = await chrome.tabs.get(tabId)
+  if (current.status === "complete" && current.url && current.url !== "about:blank") return
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated)
+      reject(new Error("Seller Central did not finish loading."))
+    }, timeoutMs)
+
+    function onUpdated(updatedTabId: number, changeInfo: { status?: string; url?: string }, tab: chrome.tabs.Tab): void {
+      if (updatedTabId !== tabId || changeInfo.status !== "complete") return
+      const url = changeInfo.url ?? tab.url
+      if (!url || url === "about:blank") return
+      clearTimeout(timer)
+      chrome.tabs.onUpdated.removeListener(onUpdated)
+      resolve()
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated)
+  })
+}
+
+export async function probeSellerCentralSession(tabId: number): Promise<boolean> {
+  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
+  let last: { loggedInToStore: boolean; settled: boolean } | undefined
+  while (Date.now() < deadline) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_SESSION_STATUS" }) as {
+        ok?: boolean
+        loggedInToStore?: boolean
+        settled?: boolean
+      }
+      if (response?.ok && typeof response.loggedInToStore === "boolean") {
+        last = { loggedInToStore: response.loggedInToStore, settled: Boolean(response.settled) }
+        if (last.settled) return last.loggedInToStore
+      }
+    } catch {
+      /* content script may not be ready yet */
+    }
+    await sleep(SESSION_PROBE_INTERVAL_MS)
+  }
+  if (!last) throw new Error("Couldn’t confirm the Seller Central session.")
+  return last.loggedInToStore
+}
+
+export async function prepareReports(senderTab?: chrome.tabs.Tab): Promise<ReportsPrepareResult> {
+  const { tabId } = await ensureSellerCentralTab(senderTab)
+  await waitForTabComplete(tabId)
+  const loggedInToStore = await probeSellerCentralSession(tabId)
+  if (loggedInToStore) return { ok: true, loggedInToStore: true, sellerCentralTabId: tabId }
+  if (senderTab?.id === tabId) return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId }
+
+  const opened = await chrome.tabs.sendMessage(tabId, { type: "OPEN_PALETTE", mode: "report-login" }) as { ok?: boolean; error?: string }
+  if (!opened?.ok) throw new Error(opened?.error ?? "Couldn’t open the command palette on Seller Central.")
+  return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId, openedPromptOnSellerCentral: true }
+}
+
+async function openStoreUrl(storeUrl: string, senderTab?: chrome.tabs.Tab): Promise<void> {
+  const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
+  const tab = pickSellerCentralTab(tabs, senderTab?.windowId)
+  if (tab?.id !== undefined) {
+    await chrome.tabs.update(tab.id, { active: true, url: storeUrl })
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+    return
+  }
+  await chrome.tabs.create({
+    active: true,
+    url: storeUrl,
+    ...(senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }),
+  })
 }
 
 async function getActiveJob(): Promise<ActiveJob | undefined> {
@@ -335,6 +554,13 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
         const { vault } = await getUnlockedVault()
         const store = vault.stores.find(({ id }) => id === message.storeId)
         if (!store) throw new Error("The selected store was not found.")
+        const currentStoreId = await getCurrentStoreId()
+        const currentStore = currentStoreId ? vault.stores.find(({ id }) => id === currentStoreId) : undefined
+        if (currentStore && currentStore.credentialId === store.credentialId) {
+          await openStoreUrl(store.storeUrl, sender.tab)
+          await setCurrentStoreId(store.id)
+          return { ok: true }
+        }
         let tabId: number | undefined
         try {
           const tab = await chrome.tabs.create({ active: true, url: "about:blank" })
@@ -350,6 +576,10 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
           throw error
         }
       })
+    }
+    case "ACCOUNTS_FOCUS_CURRENT_STORE": {
+      if (!(await getCurrentStoreId())) throw new Error("No store is currently selected.")
+      return focusOrOpenSellerCentralTab(sender.tab)
     }
     case "ACCOUNTS_FOCUS_SWITCH": {
       const job = await getActiveJob()
@@ -456,7 +686,23 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     const handled = idsListener(message, sender, sendResponse)
     if (handled) return true
-    if (!message || typeof message !== "object" || !("type" in message) || !String((message as { type: unknown }).type).startsWith("ACCOUNT")) return undefined
+    if (!message || typeof message !== "object" || !("type" in message)) return undefined
+    const type = String((message as { type: unknown }).type)
+    if (type === "GET_SETTINGS") {
+      void loadSettings().then(
+        (settings) => sendResponse({ ok: true, settings }),
+        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load settings." }),
+      )
+      return true
+    }
+    if (type === "REPORTS_PREPARE") {
+      void prepareReports(sender.tab).then(
+        sendResponse,
+        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t open Seller Central." }),
+      )
+      return true
+    }
+    if (!type.startsWith("ACCOUNT")) return undefined
     void handleAccountsMessage(message as Record<string, unknown>, sender).then(sendResponse, (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Account operation failed." }))
     return true
   })

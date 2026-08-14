@@ -1,6 +1,6 @@
 # Command Palette Chrome Extension
 
-A Manifest V3 Chrome extension that opens a [shadcn/ui](https://ui.shadcn.com/docs) command palette on ordinary webpages with `Command+/` on macOS or `Ctrl+/` on Windows and Linux. Its actions open Amazon Seller Central support cases, inbound shipments, and inventory SKU searches from messy pasted text, and switch between encrypted Seller Central accounts.
+A Manifest V3 Chrome extension that opens a [shadcn/ui](https://ui.shadcn.com/docs) command palette on ordinary webpages with `Command+/` on macOS or `Ctrl+/` on Windows and Linux. Its actions open Amazon Seller Central support cases, inbound shipments, inventory SKU searches, and Time Out resources, and switch between encrypted Seller Central accounts.
 
 ## Develop
 
@@ -27,7 +27,8 @@ npm run build
 4. Choose this project's `dist/` directory.
 5. Open or reload an ordinary HTTP or HTTPS webpage and press `Command+/` or `Ctrl+/`.
 
-After rebuilding, use the extension card's reload button and refresh the page being tested.
+- After rebuilding, use the extension card's reload button and refresh the page being tested.
+- The toolbar icon opens a compact settings popup. Toggle commands on or off, and use **Edit form values** under Time Out to change the prefilled Google Form fields.
 
 ## Behavior
 
@@ -43,8 +44,9 @@ After rebuilding, use the extension card's reload button and refresh the page be
 - Choosing **Open Shipment IDs** provides the same multiline workflow for standalone `FBA` plus nine-character shipment IDs, including IDs embedded in Seller Central links.
 - Shipment IDs are normalized to uppercase and deduplicated before opening background tabs at `https://sellercentral.amazon.com/fba/inbound-shipment/summary/{shipmentId}/contents`.
 - Choosing **Search SKU/s** provides the same multiline workflow for merchant SKUs pasted one per line, or separated by commas or tabs. Values longer than 40 characters are ignored. Each SKU opens a background inventory search at `https://sellercentral.amazon.com/myinventory/inventory?…&searchTerm={sku}`.
-- Choosing **Generate Reports** downloads an `.xlsx` named `{Current Store} - {dd-mmm-yyyy}.xlsx`, using the last store switched to from Accounts or Unknown. The workbook has empty Daily Tasks, Unfulfillable, Stranded, Suppressed, and Shipping Queue worksheets.
-- **Accounts** opens a searchable list of configured Seller Central stores. The palette shows the last store switched to from Accounts, or Unknown if none has been switched yet. Selecting a different store opens an active login tab, signs out, signs in with its saved credential and locally generated TOTP, and opens the store URL. A running switch can be focused or cancelled from the palette and expires after 15 minutes if it becomes orphaned.
+- Choosing **Time Out** opens its Google Sheet in the background, then opens the prefilled Google Form as the active tab with its Date set to the current local calendar date. Prefill values come from the Time Out form settings page. If either tab cannot be created, the extension attempts to close any tab created by that request and reports the error.
+- Choosing **Generate Reports** first focuses an open Seller Central tab, or opens `https://sellercentral.amazon.com/` if none is open. If that tab is not signed in to a store, the palette stays open with an alert and an **Open Accounts** action. After a store session is confirmed, it downloads an `.xlsx` named `{Current Store} - {dd-mmm-yyyy}.xlsx`, using the last store switched to from Accounts or Unknown. The workbook has empty Daily Tasks, Unfulfillable, Stranded, Suppressed, and Shipping Queue worksheets.
+- **Accounts** opens a searchable list of configured Seller Central stores. The palette shows the last store switched to from Accounts, or Unknown if none has been switched yet. Selecting the current store again focuses an open Seller Central tab, or opens `https://sellercentral.amazon.com/` if none is open. Selecting a different store that uses the same saved credential opens that store URL in an existing Seller Central tab, or a new tab if none is open, without signing out. Selecting a store on a different credential, or when no current store is recorded, opens an active login tab, signs out, signs in with its saved credential and locally generated TOTP, and opens the store URL. A running switch can be focused or cancelled from the palette and expires after 15 minutes if it becomes orphaned.
 - **Manage Accounts** opens a full options page. Create a master password first, add shared credentials, then add stores such as **JMG Outdoors** that reference those credentials.
 - Account data is encrypted locally with AES-256-GCM. The master password is processed with PBKDF2-HMAC-SHA256 (600,000 iterations), is never stored, and unlocks the vault only for the current browser session.
 - CAPTCHA challenges pause for manual completion. The extension then resumes automatically. Only one account switch can run at a time.

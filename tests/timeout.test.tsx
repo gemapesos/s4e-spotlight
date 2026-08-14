@@ -1,0 +1,94 @@
+import { render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+import {
+  DEFAULT_ENABLED_FEATURES,
+  DEFAULT_TIME_OUT_FORM_VALUES,
+  SETTINGS_STORAGE_KEY,
+} from "../src/lib/settings"
+import { TimeoutApp } from "../src/timeout/TimeoutApp"
+
+function mockChrome(stored?: unknown) {
+  const store: Record<string, unknown> = stored === undefined ? {} : { [SETTINGS_STORAGE_KEY]: stored }
+  vi.stubGlobal("chrome", {
+    storage: {
+      local: {
+        get: vi.fn(async (key: string) => ({ [key]: store[key] })),
+        set: vi.fn(async (items: Record<string, unknown>) => {
+          Object.assign(store, items)
+        }),
+      },
+    },
+  })
+  return store
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  document.body.replaceChildren()
+})
+
+describe("Time Out form settings", () => {
+  it("saves edited prefill values", async () => {
+    const user = userEvent.setup()
+    mockChrome()
+    render(<TimeoutApp />)
+
+    const hours = await screen.findByLabelText("Total hours worked")
+    expect(hours).toHaveValue("4")
+    await user.clear(hours)
+    await user.type(hours, "8")
+
+    await vi.waitFor(
+      () => {
+        expect(chrome.storage.local.set).toHaveBeenCalledWith({
+          [SETTINGS_STORAGE_KEY]: {
+            features: DEFAULT_ENABLED_FEATURES,
+            timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, hoursWorked: "8" },
+          },
+        })
+      },
+      { timeout: 1500 },
+    )
+  })
+
+  it("saves a Short Daily Update", async () => {
+    const user = userEvent.setup()
+    mockChrome()
+    render(<TimeoutApp />)
+
+    const update = await screen.findByLabelText("Short Daily Update")
+    await user.type(update, "Wrapped the queue")
+
+    await vi.waitFor(
+      () => {
+        expect(chrome.storage.local.set).toHaveBeenCalledWith({
+          [SETTINGS_STORAGE_KEY]: {
+            features: DEFAULT_ENABLED_FEATURES,
+            timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, shortDailyUpdate: "Wrapped the queue" },
+          },
+        })
+      },
+      { timeout: 1500 },
+    )
+  })
+
+  it("saves Follow-up needed", async () => {
+    const user = userEvent.setup()
+    mockChrome()
+    render(<TimeoutApp />)
+
+    await user.click(await screen.findByLabelText("Follow-up needed?"))
+    await user.click(await screen.findByRole("option", { name: "Yes" }))
+
+    await vi.waitFor(() => {
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({
+        [SETTINGS_STORAGE_KEY]: {
+          features: DEFAULT_ENABLED_FEATURES,
+          timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, followUpNeeded: "Yes" },
+        },
+      })
+    })
+  })
+})

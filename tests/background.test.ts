@@ -4,6 +4,7 @@ import {
   buildCaseUrl,
   buildShipmentUrl,
   buildSkuUrl,
+  buildTimeOutFormUrl,
   createOpenIdsMessageListener,
   normalizeCaseIds,
   normalizeShipmentIds,
@@ -11,7 +12,10 @@ import {
   openCaseTabs,
   openShipmentTabs,
   openSkuTabs,
+  openTimeOutTabs,
+  TIME_OUT_SHEET_URL,
 } from "../src/background"
+import { DEFAULT_TIME_OUT_FORM_VALUES } from "../src/lib/settings"
 
 const senderTab = {
   id: 42,
@@ -271,5 +275,144 @@ describe("background SKU handling", () => {
   it("enforces the fifty-ID limit in the background", async () => {
     const ids = Array.from({ length: 51 }, (_, index) => `SKU-${index}`)
     await expect(openSkuTabs(ids, senderTab, vi.fn())).rejects.toThrow(/no more than 50/i)
+  })
+})
+
+describe("background Time Out handling", () => {
+  it("builds a prefilled form URL using the supplied local calendar date", () => {
+    const url = new URL(buildTimeOutFormUrl(new Date(2026, 0, 2)))
+
+    expect(url.searchParams.get("entry.1251728025")).toBe("2026-01-02")
+    expect(url.searchParams.get("entry.1152525498")).toBe("Dhylan Mapesos")
+    expect(url.searchParams.get("entry.625851554")).toBe("S4E")
+    expect(url.searchParams.get("entry.30165443")).toBe("Lou")
+    expect(url.searchParams.get("entry.412660572")).toBe("4")
+    expect(url.searchParams.get("entry.894305442")).toBe("Yes")
+    expect(url.searchParams.get("entry.453721608")).toBe("No")
+    expect(url.searchParams.get("entry.570672286")).toBe("No")
+    expect(url.searchParams.get("entry.1418374063")).toBe("No")
+    expect(url.searchParams.get("entry.1631702449")).toBe("No")
+    expect(url.searchParams.get("entry.433948939")).toBe("No")
+    expect(url.searchParams.has("entry.789311136")).toBe(false)
+    expect(url.searchParams.has("entry.1775030400")).toBe(false)
+    expect(url.searchParams.has("entry.2008215653")).toBe(false)
+    expect(url.searchParams.has("entry.1391961076")).toBe(false)
+  })
+
+  it("uses stored Time Out prefills when opening tabs", async () => {
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 401 } as chrome.tabs.Tab)
+      .mockResolvedValueOnce({ id: 402 } as chrome.tabs.Tab)
+    const date = new Date(2026, 7, 4)
+    const values = {
+      ...DEFAULT_TIME_OUT_FORM_VALUES,
+      staffName: "Lou Rodriguez",
+      business: "S4E",
+      supervisor: "Karen Locker",
+      hoursWorked: "8",
+      scheduledAccountsCompleted: "Partial",
+      blockersOrRedFlags: "Yes",
+      shortDailyUpdate: "Wrapped the queue",
+      clientAccountName: "JMG Outdoors",
+      issueType: "Access issue",
+      waitingOnWhom: "Amazon",
+      followUpNeeded: "Yes",
+      escalatedToSupervisor: "Yes",
+      supervisorReviewNeeded: "Yes",
+      karenReviewNeeded: "Yes",
+    }
+
+    await expect(openTimeOutTabs(senderTab, createTab, undefined, date, async () => values)).resolves.toEqual({ openedCount: 2 })
+
+    expect(createTab).toHaveBeenNthCalledWith(2, {
+      active: true,
+      openerTabId: 42,
+      url: buildTimeOutFormUrl(date, values),
+      windowId: 7,
+    })
+    const url = new URL(buildTimeOutFormUrl(date, values))
+    expect(url.searchParams.get("entry.1152525498")).toBe("Lou Rodriguez")
+    expect(url.searchParams.get("entry.30165443")).toBe("Karen Locker")
+    expect(url.searchParams.get("entry.412660572")).toBe("8")
+    expect(url.searchParams.get("entry.894305442")).toBe("Partial")
+    expect(url.searchParams.get("entry.453721608")).toBe("Yes")
+    expect(url.searchParams.get("entry.789311136")).toBe("Wrapped the queue")
+    expect(url.searchParams.get("entry.1775030400")).toBe("JMG Outdoors")
+    expect(url.searchParams.get("entry.2008215653")).toBe("Access issue")
+    expect(url.searchParams.get("entry.1391961076")).toBe("Amazon")
+    expect(url.searchParams.get("entry.570672286")).toBe("Yes")
+    expect(url.searchParams.get("entry.1418374063")).toBe("Yes")
+    expect(url.searchParams.get("entry.1631702449")).toBe("Yes")
+    expect(url.searchParams.get("entry.433948939")).toBe("Yes")
+  })
+
+  it("opens the sheet in the background and then focuses the prefilled form", async () => {
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 401 } as chrome.tabs.Tab)
+      .mockResolvedValueOnce({ id: 402 } as chrome.tabs.Tab)
+    const date = new Date(2026, 7, 4)
+
+    await expect(openTimeOutTabs(senderTab, createTab, undefined, date)).resolves.toEqual({ openedCount: 2 })
+
+    expect(createTab).toHaveBeenNthCalledWith(1, {
+      active: false,
+      openerTabId: 42,
+      url: TIME_OUT_SHEET_URL,
+      windowId: 7,
+    })
+    expect(createTab).toHaveBeenNthCalledWith(2, {
+      active: true,
+      openerTabId: 42,
+      url: buildTimeOutFormUrl(date),
+      windowId: 7,
+    })
+  })
+
+  it("rolls back the sheet if the form cannot be opened", async () => {
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 401 } as chrome.tabs.Tab)
+      .mockRejectedValueOnce(new Error("form tab failed"))
+    const removeTabs = vi.fn().mockResolvedValue(undefined)
+
+    await expect(openTimeOutTabs(senderTab, createTab, removeTabs)).rejects.toMatchObject({
+      openedIds: [],
+      rolledBackIds: ["Google Sheet"],
+    })
+    expect(removeTabs).toHaveBeenCalledWith([401])
+  })
+
+  it("reports a sheet that could not be closed during rollback", async () => {
+    const createTab = vi.fn()
+      .mockResolvedValueOnce({ id: 401 } as chrome.tabs.Tab)
+      .mockRejectedValueOnce(new Error("form tab failed"))
+    const removeTabs = vi.fn().mockRejectedValue(new Error("close failed"))
+
+    await expect(openTimeOutTabs(senderTab, createTab, removeTabs)).rejects.toMatchObject({
+      openedIds: ["Google Sheet"],
+      rolledBackIds: [],
+    })
+  })
+
+  it("routes Time Out messages and returns a structured response", async () => {
+    const openCases = vi.fn().mockResolvedValue({ openedCount: 0 })
+    const openShipments = vi.fn().mockResolvedValue({ openedCount: 0 })
+    const openSkus = vi.fn().mockResolvedValue({ openedCount: 0 })
+    const openTimeOut = vi.fn().mockResolvedValue({ openedCount: 2 })
+    const sendResponse = vi.fn()
+    const listener = createOpenIdsMessageListener(openCases, openShipments, openSkus, openTimeOut)
+
+    expect(listener(
+      { type: "OPEN_TIME_OUT" },
+      { tab: senderTab } as chrome.runtime.MessageSender,
+      sendResponse,
+    )).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 2 })
+    })
+    expect(openTimeOut).toHaveBeenCalledWith(senderTab)
+    expect(openCases).not.toHaveBeenCalled()
+    expect(openShipments).not.toHaveBeenCalled()
+    expect(openSkus).not.toHaveBeenCalled()
   })
 })

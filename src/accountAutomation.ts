@@ -1,3 +1,5 @@
+import { hasAuthenticatedSellerUi, visible } from "./lib/sellerCentralSession"
+
 const STATUS_ID = "s4e-account-switch-status"
 const documentStartedAt = Date.now()
 const attempts = new Map<string, number>()
@@ -5,6 +7,9 @@ let inFlight: { stage: string; startedAt: number } | null = null
 let leavingLogout = false
 const RETRY_DELAY_MS = 5_000
 const MAX_ATTEMPTS = 2
+const CAPTCHA_TEXT_SCAN_INTERVAL_MS = 3_000
+let lastCaptchaTextScanAt = 0
+let lastCaptchaTextScanResult = false
 
 type AutomationResponse = { ok: boolean; error?: string; value?: string; waitMs?: number; job?: { id: string; stage: string } | null }
 
@@ -29,10 +34,6 @@ function setWorkflowStatus(text: string, tone: "normal" | "error" = "normal"): v
   element.setAttribute("role", tone === "error" ? "alert" : "status")
   element.style.background = tone === "error" ? "#991b1b" : "#1f2937"
   element.textContent = text
-}
-
-function visible(element: Element | null): element is HTMLElement {
-  return element instanceof HTMLElement && element.offsetParent !== null
 }
 
 function input(selectors: string[]): HTMLInputElement | null {
@@ -112,30 +113,24 @@ function markStageSubmitted(stage: string): void {
 }
 
 function hasCaptcha(): boolean {
-  return Boolean(document.querySelector('iframe[src*="captcha" i], input[name*="captcha" i], #captchacharacters')) || /enter the characters you see|solve this puzzle|captcha/iu.test(document.body?.innerText ?? "")
+  if (document.querySelector('iframe[src*="captcha" i], input[name*="captcha" i], #captchacharacters')) {
+    return true
+  }
+  const now = Date.now()
+  if (now - lastCaptchaTextScanAt < CAPTCHA_TEXT_SCAN_INTERVAL_MS) {
+    return lastCaptchaTextScanResult
+  }
+  lastCaptchaTextScanAt = now
+  lastCaptchaTextScanResult = /enter the characters you see|solve this puzzle|captcha/iu.test(
+    document.body?.innerText ?? "",
+  )
+  return lastCaptchaTextScanResult
 }
 
 function hasAuthError(): boolean {
   const alert = Array.from(document.querySelectorAll('[role="alert"], .a-alert-error, #auth-error-message-box'))
     .find((element) => element.id !== STATUS_ID && visible(element) && (element.textContent?.trim().length ?? 0) > 0)
   return Boolean(alert)
-}
-
-function hasAuthenticatedSellerUi(root: ParentNode = document): boolean {
-  const modernShell = [
-    "#sc-navtab-home",
-    "#sc-top-nav-root",
-    '[data-testid="global-nav"]',
-  ].some((selector) => visible(root.querySelector(selector)))
-  if (modernShell) return true
-
-  const classicShellMarkers = [
-    "#sc-search-field",
-    'a.logo-container[href="/home"]',
-    'a[aria-label="Messages"][href^="/messaging/"]',
-  ].filter((selector) => visible(root.querySelector(selector)))
-
-  return classicShellMarkers.length >= 2
 }
 
 /** Logged-in enough to open the saved store URL (shell UI or merchant/marketplace picker). */

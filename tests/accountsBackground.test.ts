@@ -1,7 +1,7 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage, validateVault } from "../src/background"
+import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, STORE_INDEX_KEY, type AccountVault } from "../src/lib/accounts"
 
 function storageArea(values: Record<string, unknown>) {
@@ -22,6 +22,8 @@ describe("Accounts background workflow", () => {
   const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
   const update = vi.fn(async () => ({}))
   const remove = vi.fn(async () => undefined)
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const focusWindow = vi.fn(async () => ({}))
   const debuggerAttach = vi.fn(async () => undefined)
   const debuggerSendCommand = vi.fn(async () => undefined)
   const debuggerDetach = vi.fn(async () => undefined)
@@ -30,6 +32,7 @@ describe("Accounts background workflow", () => {
     for (const key of Object.keys(local)) delete local[key]
     for (const key of Object.keys(session)) delete session[key]
     create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 }); update.mockClear(); remove.mockClear()
+    query.mockReset(); query.mockResolvedValue([]); focusWindow.mockReset(); focusWindow.mockResolvedValue({})
     debuggerAttach.mockReset(); debuggerSendCommand.mockReset(); debuggerDetach.mockReset()
     debuggerAttach.mockResolvedValue(undefined)
     debuggerSendCommand.mockResolvedValue(undefined)
@@ -37,7 +40,8 @@ describe("Accounts background workflow", () => {
     vi.stubGlobal("crypto", webcrypto)
     vi.stubGlobal("chrome", {
       storage: { local: storageArea(local), session: storageArea(session) },
-      tabs: { create, update, remove },
+      tabs: { create, update, remove, query },
+      windows: { update: focusWindow },
       runtime: { openOptionsPage: vi.fn(async () => undefined) },
       debugger: { attach: debuggerAttach, sendCommand: debuggerSendCommand, detach: debuggerDetach },
     })
@@ -288,5 +292,156 @@ describe("Accounts background workflow", () => {
 
     await handleAccountsMessage({ type: "ACCOUNTS_RESET" }, {})
     expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toBeNull()
+  })
+
+  it("prefers the current window then the most recently accessed Seller Central tab", () => {
+    const otherWindow = { id: 1, windowId: 2, lastAccessed: 999 } as chrome.tabs.Tab
+    const olderSame = { id: 2, windowId: 4, lastAccessed: 10 } as chrome.tabs.Tab
+    const newerSame = { id: 3, windowId: 4, lastAccessed: 50 } as chrome.tabs.Tab
+    expect(pickSellerCentralTab([otherWindow, olderSame, newerSame], 4)?.id).toBe(3)
+    expect(pickSellerCentralTab([], 4)).toBeUndefined()
+  })
+
+  it("rejects focusing Seller Central when no store is selected", async () => {
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" }, {})).rejects.toThrow(/no store is currently selected/i)
+    expect(query).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it("focuses an existing Seller Central tab when a store is current", async () => {
+    local[CURRENT_STORE_KEY] = "store"
+    query.mockResolvedValue([
+      { id: 11, windowId: 2, lastAccessed: 200 } as chrome.tabs.Tab,
+      { id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab,
+    ])
+    const sender = { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab }
+
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" }, sender)).resolves.toEqual({ ok: true, focused: true })
+    expect(query).toHaveBeenCalledWith({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
+    expect(update).toHaveBeenCalledWith(22, { active: true })
+    expect(focusWindow).toHaveBeenCalledWith(4, { focused: true })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it("opens Seller Central when no matching tab exists", async () => {
+    local[CURRENT_STORE_KEY] = "store"
+    query.mockResolvedValue([])
+    const sender = { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab }
+
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" }, sender)).resolves.toEqual({ ok: true, opened: true })
+    expect(create).toHaveBeenCalledWith({ active: true, url: SELLER_CENTRAL_HOME_URL, windowId: 4 })
+    expect(update).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
+  })
+
+  it("skips logout when switching to another store on the same credential and navigates an open tab", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [
+        { id: "loving-home", name: "Loving Home USA", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=loving-home" },
+        { id: "shipping", name: "365 Shipping", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=365-shipping" },
+      ],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+    local[CURRENT_STORE_KEY] = "loving-home"
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    const sender = { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab }
+
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, sender)).resolves.toEqual({ ok: true })
+
+    expect(create).not.toHaveBeenCalled()
+    expect(update).toHaveBeenCalledWith(22, { active: true, url: vault.stores[1].storeUrl })
+    expect(focusWindow).toHaveBeenCalledWith(4, { focused: true })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+    expect(local[CURRENT_STORE_KEY]).toBe("shipping")
+  })
+
+  it("opens the store URL when skipping login and no Seller Central tab exists", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [
+        { id: "loving-home", name: "Loving Home USA", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=loving-home" },
+        { id: "shipping", name: "365 Shipping", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=365-shipping" },
+      ],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+    local[CURRENT_STORE_KEY] = "loving-home"
+    query.mockResolvedValue([])
+    const sender = { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab }
+
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, sender)).resolves.toEqual({ ok: true })
+
+    expect(create).toHaveBeenCalledWith({ active: true, url: vault.stores[1].storeUrl, windowId: 4 })
+    expect(update).not.toHaveBeenCalled()
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+    expect(local[CURRENT_STORE_KEY]).toBe("shipping")
+  })
+
+  it("still logs out when switching to a store on a different credential", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [
+        { id: "credential-a", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/A?secret=JBSWY3DPEHPK3PXP" },
+        { id: "credential-b", domain: "other@example.test", password: "other-password", otpAuthUri: "otpauth://totp/B?secret=JBSWY3DPEHPK3PXP" },
+      ],
+      stores: [
+        { id: "loving-home", name: "Loving Home USA", credentialId: "credential-a", storeUrl: "https://sellercentral.amazon.com/home?store=loving-home" },
+        { id: "north", name: "North Shop", credentialId: "credential-b", storeUrl: "https://sellercentral.amazon.com/home?store=north" },
+      ],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+    local[CURRENT_STORE_KEY] = "loving-home"
+
+    await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "north" }, {})
+
+    expect(create).toHaveBeenCalledWith({ active: true, url: "about:blank" })
+    expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "north", stage: "logout" })
+    expect(local[CURRENT_STORE_KEY]).toBe("loving-home")
+  })
+
+  it("still logs out when no current store is recorded", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [
+        { id: "loving-home", name: "Loving Home USA", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=loving-home" },
+        { id: "shipping", name: "365 Shipping", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=365-shipping" },
+      ],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+
+    await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, {})
+
+    expect(create).toHaveBeenCalledWith({ active: true, url: "about:blank" })
+    expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "shipping", stage: "logout" })
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+  })
+
+  it("does not skip login while another switch job is running", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [
+        { id: "loving-home", name: "Loving Home USA", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=loving-home" },
+        { id: "shipping", name: "365 Shipping", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=365-shipping" },
+      ],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+    local[CURRENT_STORE_KEY] = "loving-home"
+    session[ACTIVE_JOB_STORAGE_KEY] = { id: "job-1", tabId: 91, storeId: "loving-home", stage: "logout", startedAt: Date.now() }
+
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, {})).rejects.toThrow(/already running/i)
+    expect(create).not.toHaveBeenCalled()
+    expect(local[CURRENT_STORE_KEY]).toBe("loving-home")
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: "job-1" })
   })
 })

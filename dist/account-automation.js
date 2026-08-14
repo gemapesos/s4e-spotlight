@@ -1,3 +1,39 @@
+function visible(element) {
+	return element instanceof HTMLElement && element.offsetParent !== null;
+}
+function hasAuthenticatedSellerUi(root = document) {
+	const modernShell = [
+		"#sc-navtab-home",
+		"#sc-top-nav-root",
+		"[data-testid=\"global-nav\"]"
+	].some((selector) => visible(root.querySelector(selector)));
+	if (modernShell) return true;
+	const classicShellMarkers = [
+		"#sc-search-field",
+		"a.logo-container[href=\"/home\"]",
+		"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
+	].filter((selector) => visible(root.querySelector(selector)));
+	return classicShellMarkers.length >= 2;
+}
+function sellerCentralSessionStatus(pathname = location.pathname, root = document) {
+	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
+		return {
+			loggedInToStore: false,
+			settled: true
+		};
+	}
+	if (hasAuthenticatedSellerUi(root)) {
+		return {
+			loggedInToStore: true,
+			settled: true
+		};
+	}
+	return {
+		loggedInToStore: false,
+		settled: false
+	};
+}
+
 const STATUS_ID = "s4e-account-switch-status";
 const documentStartedAt = Date.now();
 const attempts = new Map();
@@ -5,6 +41,9 @@ let inFlight = null;
 let leavingLogout = false;
 const RETRY_DELAY_MS = 5e3;
 const MAX_ATTEMPTS = 2;
+const CAPTCHA_TEXT_SCAN_INTERVAL_MS = 3e3;
+let lastCaptchaTextScanAt = 0;
+let lastCaptchaTextScanResult = false;
 async function send(message) {
 	return chrome.runtime.sendMessage(message);
 }
@@ -31,9 +70,6 @@ function setWorkflowStatus(text, tone = "normal") {
 	element.setAttribute("role", tone === "error" ? "alert" : "status");
 	element.style.background = tone === "error" ? "#991b1b" : "#1f2937";
 	element.textContent = text;
-}
-function visible(element) {
-	return element instanceof HTMLElement && element.offsetParent !== null;
 }
 function input(selectors) {
 	for (const selector of selectors) {
@@ -94,25 +130,20 @@ function markStageSubmitted(stage) {
 	window.setTimeout(() => void run(), RETRY_DELAY_MS);
 }
 function hasCaptcha() {
-	return Boolean(document.querySelector("iframe[src*=\"captcha\" i], input[name*=\"captcha\" i], #captchacharacters")) || /enter the characters you see|solve this puzzle|captcha/iu.test(document.body?.innerText ?? "");
+	if (document.querySelector("iframe[src*=\"captcha\" i], input[name*=\"captcha\" i], #captchacharacters")) {
+		return true;
+	}
+	const now = Date.now();
+	if (now - lastCaptchaTextScanAt < CAPTCHA_TEXT_SCAN_INTERVAL_MS) {
+		return lastCaptchaTextScanResult;
+	}
+	lastCaptchaTextScanAt = now;
+	lastCaptchaTextScanResult = /enter the characters you see|solve this puzzle|captcha/iu.test(document.body?.innerText ?? "");
+	return lastCaptchaTextScanResult;
 }
 function hasAuthError() {
 	const alert = Array.from(document.querySelectorAll("[role=\"alert\"], .a-alert-error, #auth-error-message-box")).find((element) => element.id !== STATUS_ID && visible(element) && (element.textContent?.trim().length ?? 0) > 0);
 	return Boolean(alert);
-}
-function hasAuthenticatedSellerUi(root = document) {
-	const modernShell = [
-		"#sc-navtab-home",
-		"#sc-top-nav-root",
-		"[data-testid=\"global-nav\"]"
-	].some((selector) => visible(root.querySelector(selector)));
-	if (modernShell) return true;
-	const classicShellMarkers = [
-		"#sc-search-field",
-		"a.logo-container[href=\"/home\"]",
-		"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
-	].filter((selector) => visible(root.querySelector(selector)));
-	return classicShellMarkers.length >= 2;
 }
 /** Logged-in enough to open the saved store URL (shell UI or merchant/marketplace picker). */
 function isReadyForStoreNavigation() {

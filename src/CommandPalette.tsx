@@ -1,6 +1,6 @@
 import * as React from "react"
 import type { LucideIcon } from "lucide-react"
-import { Building2, ChevronLeft, FileSpreadsheet, FolderOpen, Package, Settings, Truck } from "lucide-react"
+import { Building2, ChevronLeft, Clock, FileSpreadsheet, FolderOpen, Package, Settings, Truck } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -14,14 +14,22 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import { Input } from "@/components/ui/input"
+import {
+  InputGroup,
+  InputGroupTextarea,
+} from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
 import { extractCaseIds } from "@/lib/caseIds"
 import { commandFilter } from "@/lib/searchScore"
+import {
+  DEFAULT_ENABLED_FEATURES,
+  isFeatureEnabled,
+  type EnabledFeatures,
+} from "@/lib/settings"
 import { extractShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds } from "@/lib/skuIds"
 
-type PaletteMode = "commands" | "case-ids" | "shipment-ids" | "sku-ids" | "confirm-ids" | "accounts" | "unlock"
+export type PaletteMode = "commands" | "case-ids" | "shipment-ids" | "sku-ids" | "confirm-ids" | "accounts" | "unlock" | "report-login"
 type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids"
 type FadeMaskState = "none" | "top" | "bottom" | "both"
 
@@ -76,6 +84,7 @@ export const commandGroups: ReadonlyArray<{
       { id: "open-case-ids", label: "Open Case ID/s", icon: FolderOpen, keywords: ["case", "cases", "ticket", "support"] },
       { id: "open-shipment-ids", label: "Open Shipment IDs", icon: Truck, keywords: ["shipment", "fba", "inbound", "transfer"] },
       { id: "search-skus", label: "Search SKU/s", icon: Package, keywords: ["sku", "skus", "asin", "msku", "listing", "product"] },
+      { id: "time-out", label: "Time Out", icon: Clock, keywords: ["timeout", "time", "sheet", "form", "break"] },
     ],
   },
   {
@@ -88,38 +97,55 @@ export const commandGroups: ReadonlyArray<{
   },
 ] as const
 
+export interface ReportsPrepareResult {
+  loggedInToStore: boolean
+  openedPromptOnSellerCentral?: boolean
+}
+
 export interface CommandPaletteProps {
   container: ShadowRoot | HTMLElement
   open: boolean
+  initialMode?: PaletteMode
   onOpenCaseIds: (caseIds: string[]) => Promise<void> | void
   onOpenShipmentIds: (shipmentIds: string[]) => Promise<void> | void
   onOpenSkuIds?: (skuIds: string[]) => Promise<void> | void
   onGetAccountsStatus?: () => Promise<AccountsStatus>
   onUnlockAccounts?: (masterPassword: string) => Promise<void>
   onStartAccountSwitch?: (storeId: string) => Promise<void>
+  onFocusCurrentStore?: () => Promise<void>
   onFocusAccountSwitch?: () => Promise<void>
   onCancelAccountSwitch?: () => Promise<void>
   onManageAccounts?: () => Promise<void>
-  onGenerateReports?: () => Promise<void> | void
+  onPrepareReports?: () => Promise<ReportsPrepareResult>
+  onGenerateReports?: (currentStoreName?: string) => Promise<void> | void
+  onOpenTimeOut?: () => Promise<void> | void
   onOpenChange: (open: boolean) => void
+  enabledFeatures?: EnabledFeatures
 }
 
 export function CommandPalette({
   container,
   open,
+  initialMode,
   onOpenCaseIds,
   onOpenShipmentIds,
   onOpenSkuIds = async () => undefined,
   onGetAccountsStatus = async () => ({ initialized: false, unlocked: false, stores: [] }),
   onUnlockAccounts = async () => undefined,
   onStartAccountSwitch = async () => undefined,
+  onFocusCurrentStore = async () => undefined,
   onFocusAccountSwitch = async () => undefined,
   onCancelAccountSwitch = async () => undefined,
   onManageAccounts = async () => undefined,
+  onPrepareReports = async () => ({ loggedInToStore: true }),
   onGenerateReports = async () => undefined,
+  onOpenTimeOut = async () => undefined,
   onOpenChange,
+  enabledFeatures = DEFAULT_ENABLED_FEATURES,
 }: CommandPaletteProps) {
-  const [mode, setMode] = React.useState<PaletteMode>("commands")
+  const [mode, setMode] = React.useState<PaletteMode>(
+    open && initialMode && initialMode !== "commands" ? initialMode : "commands",
+  )
   const [identifierMode, setIdentifierMode] = React.useState<IdentifierMode>("case-ids")
   const [commandSearch, setCommandSearch] = React.useState("")
   const [accountSearch, setAccountSearch] = React.useState("")
@@ -131,6 +157,8 @@ export function CommandPalette({
   const [stores, setStores] = React.useState<AccountStoreSummary[]>([])
   const [activeSwitch, setActiveSwitch] = React.useState<ActiveSwitchSummary | undefined>()
   const [currentStore, setCurrentStore] = React.useState<AccountStoreSummary | null>(null)
+  const [accountsLoaded, setAccountsLoaded] = React.useState(false)
+  const [accountsUnlocked, setAccountsUnlocked] = React.useState(false)
   const [selectedStore, setSelectedStore] = React.useState<AccountStoreSummary | null>(null)
   const [masterPassword, setMasterPassword] = React.useState("")
   const [fadeMask, setFadeMask] = React.useState<FadeMaskState>("none")
@@ -174,20 +202,34 @@ export function CommandPalette({
   }), [onOpenCaseIds, onOpenShipmentIds, onOpenSkuIds])
   const inputMode = inputModes[identifierMode]
 
+  const visibleGroups = React.useMemo(
+    () =>
+      commandGroups
+        .map((group) => ({
+          ...group,
+          commands: group.commands.filter((command) => isFeatureEnabled(enabledFeatures, command.id)),
+        }))
+        .filter((group) => group.commands.length > 0),
+    [enabledFeatures],
+  )
   const currentIds = React.useMemo(() => inputMode.extractIds(identifierInput), [identifierInput, inputMode])
   const detectedCaseIds = React.useMemo(() => extractCaseIds(commandSearch), [commandSearch])
   const detectedShipmentIds = React.useMemo(() => extractShipmentIds(commandSearch), [commandSearch])
   const skuFallbackQuery = commandSearch.trim()
   const showSkuFallback = React.useMemo(() => {
+    if (!isFeatureEnabled(enabledFeatures, "search-skus")) return false
     if (detectedCaseIds.length > 0 || detectedShipmentIds.length > 0) return false
     if (skuFallbackQuery.length < 1 || skuFallbackQuery.length > 40 || /\s/u.test(skuFallbackQuery)) return false
-    return !commandGroups.some((group) =>
+    return !visibleGroups.some((group) =>
       group.commands.some((command) => commandFilter(command.label, skuFallbackQuery, command.keywords) > 0),
     )
-  }, [detectedCaseIds.length, detectedShipmentIds.length, skuFallbackQuery])
+  }, [detectedCaseIds.length, detectedShipmentIds.length, enabledFeatures, skuFallbackQuery, visibleGroups])
 
   React.useEffect(() => {
-    if (open) return
+    if (open) {
+      if (initialMode === "report-login") setMode("report-login")
+      return
+    }
     setMode("commands")
     setCommandSearch("")
     setAccountSearch("")
@@ -198,7 +240,7 @@ export function CommandPalette({
     setStatusMessage(null)
     setSelectedStore(null)
     setMasterPassword("")
-  }, [open])
+  }, [initialMode, open])
 
   React.useEffect(() => {
     if (isIdentifierInputMode(mode)) identifierInputRef.current?.focus()
@@ -258,6 +300,8 @@ export function CommandPalette({
       setStores(status.stores)
       setActiveSwitch(status.activeSwitch)
       setCurrentStore(status.currentStore ?? null)
+      setAccountsLoaded(true)
+      setAccountsUnlocked(status.unlocked)
       setAccountSearch("")
       setMode("accounts")
     } catch (caught) {
@@ -268,19 +312,15 @@ export function CommandPalette({
   }, [onGetAccountsStatus])
 
   const chooseStore = React.useCallback(async (store: AccountStoreSummary) => {
-    if (currentStore?.id === store.id) return
     setError(null)
     setSubmitting(true)
     try {
-      const status = await onGetAccountsStatus()
-      setStores(status.stores)
-      setActiveSwitch(status.activeSwitch)
-      setCurrentStore(status.currentStore ?? null)
-      if (status.currentStore?.id === store.id) {
-        setSubmitting(false)
+      if (currentStore?.id === store.id) {
+        await onFocusCurrentStore()
+        close()
         return
       }
-      if (!status.unlocked) {
+      if (!accountsUnlocked) {
         setSelectedStore(store)
         setMode("unlock")
         setSubmitting(false)
@@ -292,7 +332,7 @@ export function CommandPalette({
       setError(caught instanceof Error ? caught.message : "Couldn’t start the account switch.")
       setSubmitting(false)
     }
-  }, [close, currentStore?.id, onGetAccountsStatus, onStartAccountSwitch])
+  }, [accountsUnlocked, close, currentStore, onFocusCurrentStore, onStartAccountSwitch])
 
   const unlockAndStart = React.useCallback(async () => {
     if (!selectedStore || submitting) return
@@ -318,16 +358,42 @@ export function CommandPalette({
 
   const generateReports = React.useCallback(async () => {
     setError(null)
-    setStatusMessage("Generating report…")
+    setStatusMessage("Opening Seller Central…")
     setSubmitting(true)
     try {
-      await onGenerateReports()
+      const prepared = await onPrepareReports()
+      if (!prepared.loggedInToStore) {
+        setSubmitting(false)
+        setStatusMessage(null)
+        if (prepared.openedPromptOnSellerCentral) {
+          close()
+          return
+        }
+        setMode("report-login")
+        return
+      }
+      setStatusMessage("Generating report…")
+      await onGenerateReports(accountsLoaded ? (currentStore?.name ?? "") : undefined)
       close()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Couldn’t generate the report. Please try again.")
       setSubmitting(false)
+      setStatusMessage(null)
     }
-  }, [close, onGenerateReports])
+  }, [accountsLoaded, close, currentStore, onGenerateReports, onPrepareReports])
+
+  const openTimeOut = React.useCallback(async () => {
+    setError(null)
+    setStatusMessage("Opening Time Out…")
+    setSubmitting(true)
+    try {
+      await onOpenTimeOut()
+      close()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Couldn’t open Time Out. Please try again.")
+      setSubmitting(false)
+    }
+  }, [close, onOpenTimeOut])
 
   const selectCommand = React.useCallback((commandId: string) => {
     if (commandId === "open-case-ids") {
@@ -349,8 +415,12 @@ export function CommandPalette({
       void generateReports()
       return
     }
+    if (commandId === "time-out") {
+      void openTimeOut()
+      return
+    }
     if (commandId === "accounts") void openAccounts()
-  }, [generateReports, openAccounts])
+  }, [generateReports, openAccounts, openTimeOut])
 
   const handleSwitchAction = React.useCallback(async (action: "focus" | "cancel") => {
     setError(null)
@@ -382,6 +452,7 @@ export function CommandPalette({
       return setMode("commands")
     }
     if (mode === "confirm-ids") return setMode(identifierMode)
+    if (mode === "report-login") return setMode("commands")
     if (mode === "unlock") {
       if (masterPassword) return setMasterPassword("")
       return setMode("accounts")
@@ -390,30 +461,32 @@ export function CommandPalette({
     setMode("commands")
   }, [accountSearch, commandSearch, identifierInput, identifierMode, masterPassword, mode, onOpenChange, submitting])
 
-  const title = mode === "commands" ? "Command Palette" : mode === "accounts" ? "Accounts" : mode === "unlock" ? "Unlock Accounts" : mode === "confirm-ids" ? "Confirm Bulk Open" : inputMode.title
-  const description = mode === "commands" ? "Search for a command to run." : mode === "accounts" ? "Search stores or manage account switching." : mode === "unlock" ? `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.` : inputMode.description
+  const title = mode === "commands" ? "Command Palette" : mode === "accounts" ? "Accounts" : mode === "unlock" ? "Unlock Accounts" : mode === "confirm-ids" ? "Confirm Bulk Open" : mode === "report-login" ? "Generate Reports" : inputMode.title
+  const description = mode === "commands" ? "Search for a command to run." : mode === "accounts" ? "Search stores or manage account switching." : mode === "unlock" ? `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.` : mode === "report-login" ? "Sign in to a Seller Central store to generate reports." : inputMode.description
 
   const backButton = (label = "Back", action: () => void = returnToCommands) => (
-    <Button
-      className="active:not-aria-[haspopup]:translate-y-0"
-      disabled={submitting}
-      onClick={action}
-      onPointerDown={(event) => {
-        if (event.button !== 0) return
-        event.preventDefault()
-        action()
-      }}
-      size="sm"
-      type="button"
-      variant="ghost"
-    >
-      <ChevronLeft aria-hidden="true" />
-      {label}
-    </Button>
+    <div className="p-1 pb-0">
+      <Button
+        className="active:not-aria-[haspopup]:translate-y-0"
+        disabled={submitting}
+        onClick={action}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return
+          event.preventDefault()
+          action()
+        }}
+        size="sm"
+        type="button"
+        variant="ghost"
+      >
+        <ChevronLeft aria-hidden="true" />
+        {label}
+      </Button>
+    </div>
   )
 
   const errorAlert = (id?: string) => error ? (
-    <Alert className="mx-2 mb-2" id={id} variant="destructive">
+    <Alert className="mx-1 mb-1" id={id} variant="destructive">
       <AlertDescription>{error}</AlertDescription>
     </Alert>
   ) : null
@@ -431,7 +504,7 @@ export function CommandPalette({
       >
         {mode === "commands" ? <>
           <CommandInput autoFocus aria-label="Search commands" disabled={submitting} onValueChange={(value) => { setCommandSearch(value); setError(null) }} placeholder="Type a command or search..." value={commandSearch} />
-          {submitting && statusMessage ? <p aria-live="polite" className="px-3 py-2 text-sm text-muted-foreground">{statusMessage}</p> : null}
+          {submitting && statusMessage ? <p aria-live="polite" className="px-2 py-1.5 text-sm text-muted-foreground">{statusMessage}</p> : null}
           <CommandList aria-label="Commands">
             {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || showSkuFallback ? null : (
               <CommandEmpty>No results found.</CommandEmpty>
@@ -448,7 +521,7 @@ export function CommandPalette({
                       value={detectedIdentifierLabel("case", detectedCaseIds)}
                     >
                       <FolderOpen aria-hidden="true" />
-                      <span>{detectedIdentifierLabel("case", detectedCaseIds)}</span>
+                      <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("case", detectedCaseIds)}</span>
                     </CommandItem>
                   ) : null}
                   {detectedShipmentIds.length > 0 ? (
@@ -460,7 +533,7 @@ export function CommandPalette({
                       value={detectedIdentifierLabel("shipment", detectedShipmentIds)}
                     >
                       <Truck aria-hidden="true" />
-                      <span>{detectedIdentifierLabel("shipment", detectedShipmentIds)}</span>
+                      <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("shipment", detectedShipmentIds)}</span>
                     </CommandItem>
                   ) : null}
                 </CommandGroup>
@@ -477,11 +550,11 @@ export function CommandPalette({
                   value={`Search '${skuFallbackQuery}' as SKU`}
                 >
                   <Package aria-hidden="true" />
-                  <span>Search '{skuFallbackQuery}' as SKU</span>
+                  <span className="min-w-0 flex-1 truncate">Search '{skuFallbackQuery}' as SKU</span>
                 </CommandItem>
               </CommandGroup>
             ) : null}
-            {commandGroups.map((group, index) => (
+            {visibleGroups.map((group, index) => (
               <React.Fragment key={group.heading}>
                 {index ? <CommandSeparator /> : null}
                 <CommandGroup heading={group.heading}>
@@ -496,7 +569,7 @@ export function CommandPalette({
                         onSelect={() => selectCommand(command.id)}
                       >
                         <Icon aria-hidden="true" />
-                        <span>{command.label}</span>
+                        <span className="min-w-0 flex-1 truncate">{command.label}</span>
                       </CommandItem>
                     )
                   })}
@@ -506,9 +579,9 @@ export function CommandPalette({
           </CommandList>
           {errorAlert()}
         </> : mode === "accounts" ? <>
-          <div className="p-1 pb-0">{backButton()}</div>
+          {backButton()}
           {activeSwitch ? (
-            <Alert className="mx-2 my-1" role="status">
+            <Alert className="mx-1 my-1" role="status">
               <AlertTitle>Switching to {activeSwitch.storeName}</AlertTitle>
               <AlertDescription>Stage: {activeSwitch.stage}</AlertDescription>
               <div className="mt-2 flex gap-2">
@@ -519,7 +592,7 @@ export function CommandPalette({
           ) : null}
           <p
             aria-label={`Current store: ${currentStore?.name ?? "Unknown"}`}
-            className="px-3 py-1.5 text-sm text-muted-foreground"
+            className="px-2 py-1.5 text-xs font-medium text-muted-foreground"
             role="status"
           >
             Current store: {currentStore?.name ?? "Unknown"}
@@ -537,85 +610,104 @@ export function CommandPalette({
                   value={store.name}
                 >
                   <Building2 aria-hidden="true" />
-                  <span>{store.name}</span>
+                  <span className="min-w-0 flex-1 truncate">{store.name}</span>
                 </CommandItem>
               ))}
-              {stores.length === 0 ? <div className="px-3 py-5 text-center text-sm text-muted-foreground">No stores configured.</div> : null}
+              {stores.length === 0 ? <div className="py-6 text-center text-sm text-muted-foreground">No stores configured.</div> : null}
             </CommandGroup>
             <CommandSeparator />
             <CommandGroup heading="Configuration">
               <CommandItem value="Manage Accounts" disabled={submitting} onSelect={() => void manageAccounts()}>
                 <Settings aria-hidden="true" />
-                <span>Manage Accounts</span>
+                <span className="min-w-0 flex-1 truncate">Manage Accounts</span>
               </CommandItem>
             </CommandGroup>
           </CommandList>
           {errorAlert()}
-        </> : mode === "unlock" ? <div className="p-1">
+        </> : mode === "unlock" ? <>
           {backButton("Accounts", () => { setMode("accounts"); setError(null) })}
-          <form autoComplete="off" className="space-y-2 px-2 pb-2" onSubmit={(event) => event.preventDefault()}>
+          <form autoComplete="off" className="grid gap-4 px-2 pb-2" onSubmit={(event) => event.preventDefault()}>
             <p className="text-sm text-foreground">Unlock to switch to {selectedStore?.name}.</p>
-            <Label htmlFor="s4e-spotlight-vault-unlock">Master password</Label>
-            <Input
-              autoFocus
-              aria-describedby={error ? "unlock-error" : undefined}
-              aria-invalid={Boolean(error)}
-              autoComplete="new-password"
-              data-1p-ignore="true"
-              data-lpignore="true"
-              data-bwignore="true"
-              data-form-type="other"
-              disabled={submitting}
-              id="s4e-spotlight-vault-unlock"
-              name="s4e-spotlight-vault-unlock"
-              type="password"
-              value={masterPassword}
-              onChange={(event) => { setMasterPassword(event.target.value); setError(null) }}
-              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void unlockAndStart() } }}
-            />
+            <div className="grid gap-2">
+              <Label htmlFor="s4e-spotlight-vault-unlock">Master password</Label>
+              <Input
+                autoFocus
+                aria-describedby={error ? "unlock-error" : undefined}
+                aria-invalid={Boolean(error)}
+                autoComplete="new-password"
+                data-1p-ignore="true"
+                data-lpignore="true"
+                data-bwignore="true"
+                data-form-type="other"
+                disabled={submitting}
+                id="s4e-spotlight-vault-unlock"
+                name="s4e-spotlight-vault-unlock"
+                type="password"
+                value={masterPassword}
+                onChange={(event) => { setMasterPassword(event.target.value); setError(null) }}
+                onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void unlockAndStart() } }}
+              />
+            </div>
             <Button className="w-full" disabled={submitting} onClick={() => void unlockAndStart()} type="button">
               {submitting ? "Unlocking…" : "Unlock and switch"}
             </Button>
           </form>
           {errorAlert("unlock-error")}
-        </div> : mode === "confirm-ids" ? <div className="p-1">
+        </> : mode === "confirm-ids" ? <>
           {backButton("Back", () => { setMode(identifierMode); setError(null) })}
-          <Alert className="mx-1 mb-2" role="status">
+          <Alert className="mx-1 mb-1" role="status">
             <AlertTitle>Open {pendingIds.length} {inputMode.noun} tabs in the background?</AlertTitle>
             <AlertDescription>This may briefly use significant browser resources.</AlertDescription>
           </Alert>
-          <div className="flex gap-2 px-1 pb-2">
+          <div className="flex gap-2 px-1 pb-1">
             <Button className="flex-1" disabled={submitting} onClick={() => setMode(identifierMode)} type="button" variant="outline">Cancel</Button>
             <Button autoFocus className="flex-1" disabled={submitting} onClick={() => void runIdentifiers(pendingIds)} type="button">
               {submitting ? "Opening…" : `Open ${pendingIds.length} tabs`}
             </Button>
           </div>
           {errorAlert()}
-        </div> : <div className="p-1">
+        </> : mode === "report-login" ? <>
           {backButton()}
-          <Textarea
-            ref={identifierInputRef}
-            aria-describedby={error ? "identifier-input-error" : "identifier-input-count"}
-            aria-invalid={Boolean(error)}
-            aria-label={inputMode.ariaLabel}
-            className="identifier-input no-scrollbar min-h-32 resize-none"
-            data-fade-mask={fadeMask}
-            disabled={submitting}
-            placeholder={inputMode.placeholder}
-            value={identifierInput}
-            onChange={(event) => { setIdentifierInput(event.target.value); setError(null) }}
-            onScroll={updateFadeMask}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter") return
-              if (event.shiftKey || event.nativeEvent.isComposing) {
-                event.stopPropagation()
-                return
-              }
-              event.preventDefault()
-              event.stopPropagation()
-              submitIdentifiers()
-            }}
-          />
+          <Alert className="mx-1 mb-1">
+            <AlertTitle>Sign in to a Seller Central store</AlertTitle>
+            <AlertDescription>Generate Reports needs an open Seller Central store. Sign in with Accounts, then try again.</AlertDescription>
+          </Alert>
+          <div className="flex gap-2 px-1 pb-1">
+            <Button className="flex-1" disabled={submitting} onClick={returnToCommands} type="button" variant="outline">Cancel</Button>
+            <Button autoFocus className="flex-1" disabled={submitting} onClick={() => void openAccounts()} type="button">
+              {submitting ? "Loading…" : "Open Accounts"}
+            </Button>
+          </div>
+          {errorAlert()}
+        </> : <>
+          {backButton()}
+          <div className="p-1 pb-0">
+            <InputGroup className="h-auto rounded-lg! border-input/30 bg-input/30 shadow-none!">
+              <InputGroupTextarea
+                ref={identifierInputRef}
+                aria-describedby={error ? "identifier-input-error" : "identifier-input-count"}
+                aria-invalid={Boolean(error)}
+                aria-label={inputMode.ariaLabel}
+                className="identifier-input no-scrollbar min-h-32"
+                data-fade-mask={fadeMask}
+                disabled={submitting}
+                placeholder={inputMode.placeholder}
+                value={identifierInput}
+                onChange={(event) => { setIdentifierInput(event.target.value); setError(null) }}
+                onScroll={updateFadeMask}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return
+                  if (event.shiftKey || event.nativeEvent.isComposing) {
+                    event.stopPropagation()
+                    return
+                  }
+                  event.preventDefault()
+                  event.stopPropagation()
+                  submitIdentifiers()
+                }}
+              />
+            </InputGroup>
+          </div>
           <div className="flex items-center justify-between gap-2 px-2 py-1">
             <p id="identifier-input-count" aria-live="polite" className="m-0 text-xs text-muted-foreground">
               {currentIds.length} unique {inputMode.unit}{currentIds.length === 1 ? "" : "s"}
@@ -625,7 +717,7 @@ export function CommandPalette({
             </Button>
           </div>
           {errorAlert("identifier-input-error")}
-        </div>}
+        </>}
       </CommandDialog>
     </div>
   )

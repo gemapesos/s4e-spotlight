@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { CommandPalette } from "../src/CommandPalette"
+import { CommandPalette, type CommandPaletteProps } from "../src/CommandPalette"
+import { DEFAULT_ENABLED_FEATURES, type EnabledFeatures } from "../src/lib/settings"
 
 function renderPalette(
   open = true,
@@ -12,35 +13,31 @@ function renderPalette(
     .mockResolvedValue(),
   onOpenSkuIds = vi.fn<(skuIds: string[]) => Promise<void>>().mockResolvedValue(),
   onGenerateReports = vi.fn<() => Promise<void>>().mockResolvedValue(),
+  onOpenTimeOut = vi.fn<() => Promise<void>>().mockResolvedValue(),
+  enabledFeatures?: EnabledFeatures,
+  extras: Partial<CommandPaletteProps> = {},
 ) {
   const container = document.createElement("div")
   document.body.append(container)
   const onOpenChange = vi.fn()
 
-  const view = render(
-    <CommandPalette
-      container={container}
-      open={open}
-      onOpenCaseIds={onOpenCaseIds}
-      onOpenShipmentIds={onOpenShipmentIds}
-      onOpenSkuIds={onOpenSkuIds}
-      onGenerateReports={onGenerateReports}
-      onOpenChange={onOpenChange}
-    />,
-  )
+  const props = {
+    container,
+    enabledFeatures,
+    open,
+    onOpenCaseIds,
+    onOpenShipmentIds,
+    onOpenSkuIds,
+    onGenerateReports,
+    onOpenTimeOut,
+    onOpenChange,
+    ...extras,
+  }
+
+  const view = render(<CommandPalette {...props} />)
 
   const rerenderPalette = (nextOpen: boolean) => {
-    view.rerender(
-      <CommandPalette
-        container={container}
-        open={nextOpen}
-        onOpenCaseIds={onOpenCaseIds}
-        onOpenShipmentIds={onOpenShipmentIds}
-        onOpenSkuIds={onOpenSkuIds}
-        onGenerateReports={onGenerateReports}
-        onOpenChange={onOpenChange}
-      />,
-    )
+    view.rerender(<CommandPalette {...props} open={nextOpen} />)
   }
 
   return {
@@ -50,6 +47,7 @@ function renderPalette(
     onOpenChange,
     onOpenShipmentIds,
     onOpenSkuIds,
+    onOpenTimeOut,
     rerenderPalette,
   }
 }
@@ -85,10 +83,49 @@ describe("CommandPalette", () => {
     expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Generate Reports/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Search SKU\/s/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Time Out/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Calendar/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Search Emoji/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Calculator/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("option", { name: /Profile|Billing|Settings/ })).not.toBeInTheDocument()
+  })
+
+  it("hides disabled commands and empty groups", () => {
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { ...DEFAULT_ENABLED_FEATURES, "generate-reports": false, accounts: false, "time-out": false },
+    )
+
+    expect(screen.queryByRole("option", { name: /Generate Reports/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole("option", { name: /Accounts/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole("option", { name: /Time Out/ })).not.toBeInTheDocument()
+    expect(screen.queryByText("Reports", { selector: "[cmdk-group-heading]" })).not.toBeInTheDocument()
+    expect(screen.queryByText("Configuration", { selector: "[cmdk-group-heading]" })).not.toBeInTheDocument()
+    expect(screen.getByRole("option", { name: /Open Case ID\/s/ })).toBeVisible()
+  })
+
+  it("hides the SKU fallback when Search SKU/s is disabled", async () => {
+    const user = userEvent.setup()
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { ...DEFAULT_ENABLED_FEATURES, "search-skus": false },
+    )
+    const input = screen.getByRole("combobox", { name: "Search commands" })
+
+    await user.type(input, "WIDGET-1")
+
+    expect(screen.queryByRole("option", { name: /Search 'WIDGET-1' as SKU/ })).not.toBeInTheDocument()
+    expect(screen.getByText("No results found.")).toBeVisible()
   })
 
   it("filters commands and shows the empty state", async () => {
@@ -103,6 +140,17 @@ describe("CommandPalette", () => {
     await user.clear(input)
     await user.type(input, "missing command")
     expect(screen.getByText("No results found.")).toBeVisible()
+  })
+
+  it("finds Time Out using its resource keywords", async () => {
+    const user = userEvent.setup()
+    renderPalette()
+    const input = screen.getByRole("combobox", { name: "Search commands" })
+
+    await user.type(input, "sheet")
+
+    expect(screen.getByRole("option", { name: /Time Out/ })).toBeVisible()
+    expect(screen.queryByRole("option", { name: /Open Case ID/ })).not.toBeInTheDocument()
   })
 
   it("matches shipment commands by typo, synonym, and acronym", async () => {
@@ -494,21 +542,99 @@ describe("CommandPalette", () => {
     expect(onOpenChange).not.toHaveBeenCalled()
   })
 
+  it("cycles selection from the first command to the last and back", async () => {
+    const user = userEvent.setup()
+    renderPalette()
+    const first = screen.getByRole("option", { name: /Open Case ID\/s/ })
+    const last = screen.getByRole("option", { name: /^Accounts$/ })
+
+    expect(first).toHaveAttribute("aria-selected", "true")
+
+    await user.keyboard("{ArrowUp}")
+    expect(last).toHaveAttribute("aria-selected", "true")
+    expect(first).toHaveAttribute("aria-selected", "false")
+
+    await user.keyboard("{ArrowDown}")
+    expect(first).toHaveAttribute("aria-selected", "true")
+    expect(last).toHaveAttribute("aria-selected", "false")
+  })
+
+  it("cycles selection from the last command to the first", async () => {
+    const user = userEvent.setup()
+    renderPalette()
+
+    await user.keyboard("{End}")
+    expect(screen.getByRole("option", { name: /^Accounts$/ })).toHaveAttribute("aria-selected", "true")
+
+    await user.keyboard("{ArrowDown}")
+    expect(screen.getByRole("option", { name: /Open Case ID\/s/ })).toHaveAttribute("aria-selected", "true")
+  })
+
+  it("keeps the command list scrollable without a visible scrollbar", () => {
+    renderPalette()
+    const list = screen.getByRole("listbox", { name: "Suggestions" })
+
+    expect(list).toHaveClass("no-scrollbar")
+    expect(list).toHaveClass("overflow-y-auto")
+    expect(list).toHaveClass("min-h-0")
+  })
+
   it("generates a report and closes the palette", async () => {
     const user = userEvent.setup()
     const onGenerateReports = vi.fn<() => Promise<void>>().mockResolvedValue()
+    const onPrepareReports = vi.fn().mockResolvedValue({ loggedInToStore: true })
     const { onOpenChange } = renderPalette(
       true,
       undefined,
       undefined,
       undefined,
       onGenerateReports,
+      undefined,
+      undefined,
+      { onPrepareReports },
     )
 
     await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
 
     await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledOnce())
+    expect(onPrepareReports).toHaveBeenCalledOnce()
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("opens Time Out and closes the palette", async () => {
+    const user = userEvent.setup()
+    const onOpenTimeOut = vi.fn<() => Promise<void>>().mockResolvedValue()
+    const { onOpenChange } = renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onOpenTimeOut,
+    )
+
+    await user.click(screen.getByRole("option", { name: /Time Out/ }))
+
+    await vi.waitFor(() => expect(onOpenTimeOut).toHaveBeenCalledOnce())
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("keeps the palette open when Time Out fails", async () => {
+    const user = userEvent.setup()
+    const onOpenTimeOut = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("tab creation failed"))
+    const { onOpenChange } = renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onOpenTimeOut,
+    )
+
+    await user.click(screen.getByRole("option", { name: /Time Out/ }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("tab creation failed")
+    expect(onOpenChange).not.toHaveBeenCalled()
   })
 
   it("keeps the palette open when report generation fails", async () => {
@@ -528,6 +654,127 @@ describe("CommandPalette", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn’t build the report.")
     expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it("asks to sign in when Seller Central has no store session", async () => {
+    const user = userEvent.setup()
+    const onPrepareReports = vi.fn().mockResolvedValue({ loggedInToStore: false })
+    const onGenerateReports = vi.fn()
+    const { onOpenChange } = renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      onGenerateReports,
+      undefined,
+      undefined,
+      { onPrepareReports },
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+
+    expect(await screen.findByRole("dialog", { name: "Generate Reports" })).toBeVisible()
+    expect(screen.getByRole("alert")).toHaveTextContent("Sign in to a Seller Central store")
+    expect(onGenerateReports).not.toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it("opens Accounts from the report sign-in prompt", async () => {
+    const user = userEvent.setup()
+    const onPrepareReports = vi.fn().mockResolvedValue({ loggedInToStore: false })
+    const onGetAccountsStatus = vi.fn().mockResolvedValue({
+      initialized: true,
+      unlocked: true,
+      stores: [{ id: "store-1", name: "JMG Outdoors" }],
+      currentStore: null,
+    })
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onPrepareReports, onGetAccountsStatus },
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await user.click(await screen.findByRole("button", { name: "Open Accounts" }))
+
+    expect(await screen.findByRole("dialog", { name: "Accounts" })).toBeVisible()
+    expect(screen.getByRole("option", { name: "JMG Outdoors" })).toBeVisible()
+  })
+
+  it("returns to commands from the report sign-in prompt", async () => {
+    const user = userEvent.setup()
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: false }) },
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await screen.findByRole("button", { name: "Open Accounts" })
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+
+    expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Generate Reports/ })).toBeVisible()
+  })
+
+  it("uses Escape to leave the report sign-in prompt", async () => {
+    const user = userEvent.setup()
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: false }) },
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await screen.findByRole("button", { name: "Open Accounts" })
+    await user.keyboard("{Escape}")
+
+    expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Generate Reports/ })).toBeVisible()
+  })
+
+  it("closes the launching palette when the sign-in prompt opens on Seller Central", async () => {
+    const user = userEvent.setup()
+    const onGenerateReports = vi.fn()
+    const { onOpenChange } = renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      onGenerateReports,
+      undefined,
+      undefined,
+      { onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: false, openedPromptOnSellerCentral: true }) },
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+
+    await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(onGenerateReports).not.toHaveBeenCalled()
+  })
+
+  it("opens directly on the report sign-in prompt", () => {
+    renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      initialMode: "report-login",
+    })
+
+    expect(screen.getByRole("dialog", { name: "Generate Reports" })).toBeVisible()
+    expect(screen.getByRole("alert")).toHaveTextContent("Generate Reports needs an open Seller Central store")
   })
 
   it("closes an empty command palette on Escape and closes on backdrop click", async () => {

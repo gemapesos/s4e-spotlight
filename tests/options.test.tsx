@@ -13,7 +13,7 @@ const vault = {
 async function renderOptions(sendMessage: ReturnType<typeof vi.fn>) {
   vi.stubGlobal("chrome", { runtime: { sendMessage } })
   const view = render(<OptionsApp />)
-  await vi.waitFor(() => expect(screen.getByRole("heading", { name: "Credentials" })).toBeVisible())
+  await vi.waitFor(() => expect(screen.getByText("Credentials")).toBeVisible())
   return view
 }
 
@@ -57,7 +57,7 @@ describe("accounts options page", () => {
     })
     await renderOptions(sendMessage)
     const password = screen.getByLabelText("Password for operator@example.test") as HTMLInputElement
-    const reveal = password.nextElementSibling as HTMLButtonElement
+    const reveal = screen.getAllByRole("button", { name: "Reveal" })[0]
     fireEvent.click(reveal)
     expect(password.type).toBe("text")
     fireEvent.blur(password)
