@@ -38,7 +38,6 @@ export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_log
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
 export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/"
 export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*"
-export const UNFULFILLABLE_INVENTORY_URL = "https://sellercentral.amazon.com/myinventory/unfulfillable/index.html"
 
 export type OpenIdsResponse =
   | { ok: true; openedCount: number }
@@ -362,16 +361,6 @@ export async function waitForTabComplete(tabId: number, timeoutMs = TAB_LOAD_TIM
   await waitForTabCompleteMatching(tabId, (url) => Boolean(url && url !== "about:blank"), timeoutMs)
 }
 
-export function isUnfulfillableInventoryUrl(url?: string): boolean {
-  if (!url) return false
-  try {
-    const parsed = new URL(url)
-    return parsed.origin === "https://sellercentral.amazon.com" && parsed.pathname.startsWith("/myinventory/unfulfillable/")
-  } catch {
-    return false
-  }
-}
-
 export async function waitForTabCompleteMatching(
   tabId: number,
   urlMatches: (url?: string) => boolean,
@@ -397,17 +386,6 @@ export async function waitForTabCompleteMatching(
 
     chrome.tabs.onUpdated.addListener(onUpdated)
   })
-}
-
-export async function navigateToUnfulfillableInventory(tabId: number): Promise<void> {
-  const current = await chrome.tabs.get(tabId)
-  if (isUnfulfillableInventoryUrl(current.url)) {
-    await waitForTabCompleteMatching(tabId, isUnfulfillableInventoryUrl)
-    return
-  }
-
-  await chrome.tabs.update(tabId, { url: UNFULFILLABLE_INVENTORY_URL })
-  await waitForTabCompleteMatching(tabId, isUnfulfillableInventoryUrl)
 }
 
 async function sendUnfulfillableFetch(tabId: number): Promise<{ ok: true; listings: unknown[] }> {
@@ -436,7 +414,7 @@ async function sendUnfulfillableFetch(tabId: number): Promise<{ ok: true; listin
 
 export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
   const { tabId } = await ensureSellerCentralTab(senderTab)
-  await navigateToUnfulfillableInventory(tabId)
+  await waitForTabComplete(tabId)
   return sendUnfulfillableFetch(tabId)
 }
 

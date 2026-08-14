@@ -9,7 +9,6 @@ export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_log
 export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0";
 export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/";
 export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*";
-export const UNFULFILLABLE_INVENTORY_URL = "https://sellercentral.amazon.com/myinventory/unfulfillable/index.html";
 const MAX_BULK_IDS = 50;
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1e3;
 export class TabBatchError extends Error {
@@ -287,15 +286,6 @@ export async function focusOrOpenSellerCentralTab(senderTab) {
 export async function waitForTabComplete(tabId, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
 	await waitForTabCompleteMatching(tabId, (url) => Boolean(url && url !== "about:blank"), timeoutMs);
 }
-export function isUnfulfillableInventoryUrl(url) {
-	if (!url) return false;
-	try {
-		const parsed = new URL(url);
-		return parsed.origin === "https://sellercentral.amazon.com" && parsed.pathname.startsWith("/myinventory/unfulfillable/");
-	} catch {
-		return false;
-	}
-}
 export async function waitForTabCompleteMatching(tabId, urlMatches, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
 	const current = await chrome.tabs.get(tabId);
 	if (current.status === "complete" && urlMatches(current.url)) return;
@@ -314,15 +304,6 @@ export async function waitForTabCompleteMatching(tabId, urlMatches, timeoutMs = 
 		}
 		chrome.tabs.onUpdated.addListener(onUpdated);
 	});
-}
-export async function navigateToUnfulfillableInventory(tabId) {
-	const current = await chrome.tabs.get(tabId);
-	if (isUnfulfillableInventoryUrl(current.url)) {
-		await waitForTabCompleteMatching(tabId, isUnfulfillableInventoryUrl);
-		return;
-	}
-	await chrome.tabs.update(tabId, { url: UNFULFILLABLE_INVENTORY_URL });
-	await waitForTabCompleteMatching(tabId, isUnfulfillableInventoryUrl);
 }
 async function sendUnfulfillableFetch(tabId) {
 	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
@@ -348,7 +329,7 @@ async function sendUnfulfillableFetch(tabId) {
 }
 export async function fetchUnfulfillableReport(senderTab) {
 	const { tabId } = await ensureSellerCentralTab(senderTab);
-	await navigateToUnfulfillableInventory(tabId);
+	await waitForTabComplete(tabId);
 	return sendUnfulfillableFetch(tabId);
 }
 export async function probeSellerCentralSession(tabId) {

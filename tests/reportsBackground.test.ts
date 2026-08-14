@@ -5,7 +5,6 @@ import {
   prepareReports,
   SELLER_CENTRAL_HOME_URL,
   SELLER_CENTRAL_TAB_URL_PATTERN,
-  UNFULFILLABLE_INVENTORY_URL,
 } from "../src/background"
 
 describe("Generate Reports Seller Central preflight", () => {
@@ -157,33 +156,31 @@ describe("Generate Reports unfulfillable fetch", () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
-  it("navigates to unfulfillable inventory and returns listings", async () => {
+  it("fetches unfulfillable listings from the current Seller Central tab", async () => {
     const listings = [{ coreListingFields: { sku: "ABC-123" } }]
     query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
-    get
-      .mockResolvedValueOnce({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
-      .mockResolvedValueOnce({ id: 22, status: "loading", url: UNFULFILLABLE_INVENTORY_URL } as chrome.tabs.Tab)
-    addUpdatedListener.mockImplementation((listener: (tabId: number, changeInfo: { status?: string; url?: string }, tab: chrome.tabs.Tab) => void) => {
-      listener(22, { status: "complete" }, { id: 22, url: UNFULFILLABLE_INVENTORY_URL } as chrome.tabs.Tab)
-    })
+    get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
     sendMessage.mockResolvedValue({ ok: true, listings })
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
     await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings })
     expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(update).toHaveBeenCalledWith(22, { url: UNFULFILLABLE_INVENTORY_URL })
+    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
   })
 
-  it("does not reload when the tab is already on the unfulfillable page", async () => {
+  it("waits for the Seller Central tab to finish loading before fetching", async () => {
     query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
-    get.mockResolvedValue({ id: 22, status: "complete", url: `${UNFULFILLABLE_INVENTORY_URL}?ref_=myi_ul_vl_unfulfillable` } as chrome.tabs.Tab)
+    get.mockResolvedValue({ id: 22, status: "loading", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    addUpdatedListener.mockImplementation((listener: (tabId: number, changeInfo: { status?: string; url?: string }, tab: chrome.tabs.Tab) => void) => {
+      listener(22, { status: "complete" }, { id: 22, url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    })
     sendMessage.mockResolvedValue({ ok: true, listings: [] })
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
     await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings: [] })
     expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(update).not.toHaveBeenCalledWith(22, { url: UNFULFILLABLE_INVENTORY_URL })
+    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
   })
 })
