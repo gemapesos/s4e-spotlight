@@ -83,7 +83,7 @@ describe("report workbook", () => {
     ])
   })
 
-  it("fills Unfulfillable rows and stacks Daily Tasks sections", () => {
+  it("fills Unfulfillable and Stranded rows and stacks Daily Tasks sections", () => {
     const bytes = buildReportWorkbook(reportWorkbookSheets(
       [
         {
@@ -106,6 +106,31 @@ describe("report workbook", () => {
           feedbackDate: "2026-08-03T19:22:21.216Z",
           suppressed: false,
           partiallySuppressed: false,
+        },
+      ],
+      [
+        {
+          SKU: "2026-07-24-B0F2KGX1K3-15700",
+          ASIN: "B0F2KGX1K3",
+          FNSKU: "X0057P952X",
+          ProductName: "HEYDUDE Wally Funk Jersey Jacquard - Black/Multi",
+          Condition: "New",
+          Status: "Incomplete",
+          Price: "0.0",
+          PriceUnit: "USD",
+          Available: "1",
+          TotalQuantity: "1",
+          Reserved: "0",
+          Inbound: "0",
+          Unfulfillable: "0",
+          DateAutoRemoval: "1787911200000",
+          AutoRemovalType: "RETURN",
+          DateStranded: "1786498521898",
+          StrandedReason: "ERR_NO_PRICE",
+          StrandedReasonCode: "ERR_NO_PRICE",
+          StrandedReasonLabel: "Missing price",
+          FulfilledBy: "Amazon",
+          SupportedActions: "EditListing#RemovalOrder#RefreshSIRC#PostponeAutoRemoval",
         },
       ],
     ))
@@ -137,7 +162,20 @@ describe("report workbook", () => {
     expect(unfulfillable).not.toContain('<c r="F2" t="inlineStr">')
     expect(unfulfillable).not.toContain('<c r="H2" t="inlineStr">')
 
-    for (const index of [2, 3, 4]) {
+    const stranded = new TextDecoder().decode(files.get("xl/worksheets/sheet3.xml"))
+    expect(stranded).toContain("<row r=\"1\">")
+    expect(stranded).toContain("SKU")
+    expect(stranded).toContain("Date stranded")
+    expect(stranded).toContain("Stranded reason")
+    expect(stranded).toContain("2026-07-24-B0F2KGX1K3-15700")
+    expect(stranded).toContain("Missing price")
+    expect(stranded).toContain("08/11/2026")
+    expect(stranded).toContain("Return to seller")
+    expect(stranded).toContain('<c r="H2"><v>0</v></c>')
+    expect(stranded).toContain('<c r="J2"><v>1</v></c>')
+    expect(stranded).not.toContain('<c r="H2" t="inlineStr">')
+
+    for (const index of [3, 4]) {
       const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
       expect(sheet).toContain("<sheetData/>")
       expect(sheet).not.toContain("<row")

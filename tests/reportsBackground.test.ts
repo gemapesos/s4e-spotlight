@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   fetchFeedbackReport,
+  fetchStrandedReport,
   fetchUnfulfillableReport,
   prepareReports,
+  relayReportProgress,
   SELLER_CENTRAL_HOME_URL,
   SELLER_CENTRAL_TAB_URL_PATTERN,
 } from "../src/background"
@@ -231,5 +233,119 @@ describe("Generate Reports feedback fetch", () => {
     expect(update).toHaveBeenCalledWith(22, { active: true })
     expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_FEEDBACK" })
+  })
+})
+
+describe("Generate Reports stranded fetch", () => {
+  const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; listings?: unknown[]; error?: string }> => ({ ok: true, listings: [] }))
+  const focusWindow = vi.fn(async () => ({}))
+  const addUpdatedListener = vi.fn()
+  const removeUpdatedListener = vi.fn()
+
+  beforeEach(() => {
+    create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 })
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([])
+    get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, listings: [] })
+    focusWindow.mockReset(); focusWindow.mockResolvedValue({})
+    addUpdatedListener.mockReset()
+    removeUpdatedListener.mockReset()
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create,
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: addUpdatedListener, removeListener: removeUpdatedListener },
+      },
+      windows: { update: focusWindow },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("fetches stranded listings from the current Seller Central tab", async () => {
+    const listings = [{ SKU: "2026-07-24-B0F2KGX1K3-15700", StrandedReasonCode: "ERR_NO_PRICE" }]
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockResolvedValue({ ok: true, listings })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(fetchStrandedReport(sender)).resolves.toEqual({ ok: true, listings })
+    expect(update).toHaveBeenCalledWith(22, { active: true })
+    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_STRANDED" })
+  })
+})
+
+describe("Generate Reports parallel fetches", () => {
+  const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; listings?: unknown[]; feedbacks?: unknown[] }> => ({
+    ok: true,
+    listings: [],
+    feedbacks: [],
+  }))
+  const focusWindow = vi.fn(async () => ({}))
+
+  beforeEach(() => {
+    create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 })
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([])
+    get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, listings: [], feedbacks: [] })
+    focusWindow.mockReset(); focusWindow.mockResolvedValue({})
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create,
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
+      },
+      windows: { update: focusWindow },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("opens only one Seller Central tab when three fetches race", async () => {
+    let created = false
+    query.mockImplementation(async () => (
+      created ? [{ id: 91, windowId: 4, lastAccessed: 1 } as chrome.tabs.Tab] : []
+    ))
+    create.mockImplementation(async () => {
+      created = true
+      return { id: 91, windowId: 4 }
+    })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await Promise.all([
+      fetchUnfulfillableReport(sender),
+      fetchFeedbackReport(sender),
+      fetchStrandedReport(sender),
+    ])
+
+    expect(create).toHaveBeenCalledOnce()
+  })
+
+  it("forwards report progress to the palette tab that started the fetch", async () => {
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await fetchUnfulfillableReport(sender)
+    sendMessage.mockClear()
+    await relayReportProgress({ type: "REPORTS_PROGRESS", source: "unfulfillable", status: "active" })
+    expect(sendMessage).toHaveBeenCalledWith(7, { type: "REPORTS_PROGRESS", source: "unfulfillable", status: "active" })
   })
 })

@@ -330,6 +330,42 @@ describe("fetchUnfulfillableListings", () => {
     expect(secondBody.variables.pagination).toEqual({ pageSize: UNFULFILLABLE_PAGE_SIZE, cursor: "page-2" })
   })
 
+  it("reports listing count and removal-batch progress", async () => {
+    const onProgress = vi.fn()
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2, "page-2")))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 2, null)))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root, onProgress })
+    expect(onProgress).toHaveBeenCalledWith({
+      source: "unfulfillable",
+      status: "active",
+      loaded: 0,
+      phase: "listings",
+    })
+    expect(onProgress).toHaveBeenCalledWith({
+      source: "unfulfillable",
+      status: "active",
+      loaded: 1,
+      total: 2,
+      phase: "listings",
+    })
+    expect(onProgress).toHaveBeenCalledWith({
+      source: "unfulfillable",
+      status: "active",
+      loaded: 2,
+      total: 2,
+      phase: "listings",
+    })
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({
+      source: "unfulfillable",
+      status: "complete",
+    }))
+  })
+
   it("retries without cursor when the schema rejects that field", async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "Validation error of type FieldUndefined: Field 'cursor' in type 'ListingsV2' is undefined @ 'listingsV2/cursor'" }] }))

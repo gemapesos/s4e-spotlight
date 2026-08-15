@@ -20,6 +20,12 @@ import {
 } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import { extractCaseIds } from "@/lib/caseIds"
+import {
+  applyReportProgressEvent,
+  INITIAL_REPORT_PROGRESS,
+  type ReportProgressEvent,
+  type ReportProgressState,
+} from "@/lib/reportProgress"
 import { commandFilter } from "@/lib/searchScore"
 import {
   DEFAULT_ENABLED_FEATURES,
@@ -28,8 +34,9 @@ import {
 } from "@/lib/settings"
 import { extractShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds } from "@/lib/skuIds"
+import { ReportProgressPanel } from "@/ReportProgressPanel"
 
-export type PaletteMode = "commands" | "case-ids" | "shipment-ids" | "sku-ids" | "confirm-ids" | "accounts" | "unlock" | "report-login"
+export type PaletteMode = "commands" | "case-ids" | "shipment-ids" | "sku-ids" | "confirm-ids" | "accounts" | "unlock" | "report-login" | "generating-reports"
 type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids"
 type FadeMaskState = "none" | "top" | "bottom" | "both"
 
@@ -117,7 +124,10 @@ export interface CommandPaletteProps {
   onCancelAccountSwitch?: () => Promise<void>
   onManageAccounts?: () => Promise<void>
   onPrepareReports?: () => Promise<ReportsPrepareResult>
-  onGenerateReports?: (currentStoreName?: string) => Promise<void> | void
+  onGenerateReports?: (
+    currentStoreName?: string,
+    onProgress?: (event: ReportProgressEvent) => void,
+  ) => Promise<void> | void
   onOpenTimeOut?: () => Promise<void> | void
   onOpenChange: (open: boolean) => void
   enabledFeatures?: EnabledFeatures
@@ -154,6 +164,7 @@ export function CommandPalette({
   const [error, setError] = React.useState<string | null>(null)
   const [submitting, setSubmitting] = React.useState(false)
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
+  const [reportProgress, setReportProgress] = React.useState<ReportProgressState>(INITIAL_REPORT_PROGRESS)
   const [stores, setStores] = React.useState<AccountStoreSummary[]>([])
   const [activeSwitch, setActiveSwitch] = React.useState<ActiveSwitchSummary | undefined>()
   const [currentStore, setCurrentStore] = React.useState<AccountStoreSummary | null>(null)
@@ -238,6 +249,7 @@ export function CommandPalette({
     setError(null)
     setSubmitting(false)
     setStatusMessage(null)
+    setReportProgress(INITIAL_REPORT_PROGRESS)
     setSelectedStore(null)
     setMasterPassword("")
   }, [initialMode, open])
@@ -358,13 +370,13 @@ export function CommandPalette({
 
   const generateReports = React.useCallback(async () => {
     setError(null)
-    setStatusMessage("Opening Seller Central…")
+    setReportProgress({ ...INITIAL_REPORT_PROGRESS, prepare: "active" })
+    setMode("generating-reports")
     setSubmitting(true)
     try {
       const prepared = await onPrepareReports()
       if (!prepared.loggedInToStore) {
         setSubmitting(false)
-        setStatusMessage(null)
         if (prepared.openedPromptOnSellerCentral) {
           close()
           return
@@ -372,13 +384,23 @@ export function CommandPalette({
         setMode("report-login")
         return
       }
-      setStatusMessage("Generating report…")
-      await onGenerateReports(accountsLoaded ? (currentStore?.name ?? "") : undefined)
+      setReportProgress((current) => ({
+        ...current,
+        prepare: "complete",
+        sources: {
+          unfulfillable: { status: "active" },
+          feedback: { status: "active" },
+          stranded: { status: "active" },
+        },
+      }))
+      await onGenerateReports(
+        accountsLoaded ? (currentStore?.name ?? "") : undefined,
+        (event) => setReportProgress((current) => applyReportProgressEvent(current, event)),
+      )
       close()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Couldn’t generate the report. Please try again.")
       setSubmitting(false)
-      setStatusMessage(null)
     }
   }, [accountsLoaded, close, currentStore, onGenerateReports, onPrepareReports])
 
@@ -433,7 +455,11 @@ export function CommandPalette({
     } finally { setSubmitting(false) }
   }, [onCancelAccountSwitch, onFocusAccountSwitch])
 
-  const returnToCommands = React.useCallback(() => { setMode("commands"); setError(null) }, [])
+  const returnToCommands = React.useCallback(() => {
+    setMode("commands")
+    setError(null)
+    setReportProgress(INITIAL_REPORT_PROGRESS)
+  }, [])
 
   const handleOpenChange = React.useCallback((nextOpen: boolean) => {
     onOpenChange(nextOpen)
@@ -452,7 +478,7 @@ export function CommandPalette({
       return setMode("commands")
     }
     if (mode === "confirm-ids") return setMode(identifierMode)
-    if (mode === "report-login") return setMode("commands")
+    if (mode === "report-login" || mode === "generating-reports") return setMode("commands")
     if (mode === "unlock") {
       if (masterPassword) return setMasterPassword("")
       return setMode("accounts")
@@ -461,8 +487,8 @@ export function CommandPalette({
     setMode("commands")
   }, [accountSearch, commandSearch, identifierInput, identifierMode, masterPassword, mode, onOpenChange, submitting])
 
-  const title = mode === "commands" ? "Command Palette" : mode === "accounts" ? "Accounts" : mode === "unlock" ? "Unlock Accounts" : mode === "confirm-ids" ? "Confirm Bulk Open" : mode === "report-login" ? "Generate Reports" : inputMode.title
-  const description = mode === "commands" ? "Search for a command to run." : mode === "accounts" ? "Search stores or manage account switching." : mode === "unlock" ? `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.` : mode === "report-login" ? "Sign in to a Seller Central store to generate reports." : inputMode.description
+  const title = mode === "commands" ? "Command Palette" : mode === "accounts" ? "Accounts" : mode === "unlock" ? "Unlock Accounts" : mode === "confirm-ids" ? "Confirm Bulk Open" : mode === "report-login" || mode === "generating-reports" ? "Generate Reports" : inputMode.title
+  const description = mode === "commands" ? "Search for a command to run." : mode === "accounts" ? "Search stores or manage account switching." : mode === "unlock" ? `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.` : mode === "report-login" ? "Sign in to a Seller Central store to generate reports." : mode === "generating-reports" ? "Generating the Seller Central report." : inputMode.description
 
   const backButton = (label = "Back", action: () => void = returnToCommands) => (
     <div className="p-1 pb-0">
@@ -665,6 +691,10 @@ export function CommandPalette({
               {submitting ? "Opening…" : `Open ${pendingIds.length} tabs`}
             </Button>
           </div>
+          {errorAlert()}
+        </> : mode === "generating-reports" ? <>
+          {error ? backButton() : null}
+          <ReportProgressPanel failed={Boolean(error)} progress={reportProgress} submitting={submitting} />
           {errorAlert()}
         </> : mode === "report-login" ? <>
           {backButton()}

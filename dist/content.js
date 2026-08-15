@@ -186,61 +186,14 @@ async function fetchAntiCsrfTokenFromInventory(fetchImpl) {
 		credentials: "include",
 		headers: { accept: "text/html" }
 	});
-	if (!response.ok) {
-		// #region agent log
-		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Debug-Session-Id": "74ba58"
-			},
-			body: JSON.stringify({
-				sessionId: "74ba58",
-				runId: "post-fix",
-				hypothesisId: "F",
-				location: "src/lib/unfulfillable.ts:fetchAntiCsrfTokenFromInventory",
-				message: "inventory html token fetch failed",
-				data: {
-					status: response.status,
-					path: typeof location !== "undefined" ? location.pathname : ""
-				},
-				timestamp: Date.now()
-			})
-		}).catch(() => {});
-		// #endregion
-		return undefined;
-	}
+	if (!response.ok) return undefined;
 	let html = "";
 	try {
 		html = await response.text();
 	} catch {
 		return undefined;
 	}
-	const token = readAntiCsrfTokenFromHtml(html);
-	// #region agent log
-	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"X-Debug-Session-Id": "74ba58"
-		},
-		body: JSON.stringify({
-			sessionId: "74ba58",
-			runId: "post-fix",
-			hypothesisId: "F",
-			location: "src/lib/unfulfillable.ts:fetchAntiCsrfTokenFromInventory",
-			message: "inventory html token fetch",
-			data: {
-				status: response.status,
-				htmlLength: html.length,
-				hasToken: Boolean(token),
-				path: typeof location !== "undefined" ? location.pathname : ""
-			},
-			timestamp: Date.now()
-		})
-	}).catch(() => {});
-	// #endregion
-	return token;
+	return readAntiCsrfTokenFromHtml(html);
 }
 function formatListingStatus(status) {
 	if (!status) return "";
@@ -488,12 +441,28 @@ async function postInventoriesBatch(fetchImpl, token, pairs) {
 	}
 	return parseRecoveryInventories(payload);
 }
-async function fetchRemovalLineItems(fetchImpl, token, listings) {
+async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
 	const pairs = listings.map(listingSkuPair).filter((pair) => pair !== undefined);
 	if (pairs.length === 0) return [];
 	const lineItems = [];
+	let processed = 0;
+	onProgress?.({
+		source: "unfulfillable",
+		status: "active",
+		loaded: 0,
+		total: pairs.length,
+		phase: "removal"
+	});
 	for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
 		lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch));
+		processed += batch.length;
+		onProgress?.({
+			source: "unfulfillable",
+			status: "active",
+			loaded: processed,
+			total: pairs.length,
+			phase: "removal"
+		});
 	}
 	return lineItems;
 }
@@ -501,30 +470,16 @@ async function fetchUnfulfillableListings(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
 	const root = options.root ?? document;
 	const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "");
+	const onProgress = options.onProgress;
 	let token = readAntiCsrfToken(root, cookie);
-	// #region agent log
-	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"X-Debug-Session-Id": "74ba58"
-		},
-		body: JSON.stringify({
-			sessionId: "74ba58",
-			runId: "pre-fix",
-			hypothesisId: "D",
-			location: "src/lib/unfulfillable.ts:fetchUnfulfillableListings",
-			message: "csrf token lookup",
-			data: {
-				hasToken: Boolean(token),
-				path: typeof location !== "undefined" ? location.pathname : ""
-			},
-			timestamp: Date.now()
-		})
-	}).catch(() => {});
-	// #endregion
 	if (!token) token = await fetchAntiCsrfTokenFromInventory(fetchImpl);
 	if (!token) throw new Error("Couldn’t read the Seller Central security token.");
+	onProgress?.({
+		source: "unfulfillable",
+		status: "active",
+		loaded: 0,
+		phase: "listings"
+	});
 	let query = GET_LISTINGS_V2_QUERY;
 	let cursor;
 	let includePagination = true;
@@ -557,19 +512,35 @@ async function fetchUnfulfillableListings(options = {}) {
 			}
 		}
 		listings.push(...result.listings);
+		onProgress?.({
+			source: "unfulfillable",
+			status: "active",
+			loaded: listings.length,
+			total: result.count,
+			phase: "listings"
+		});
 		if (listings.length >= result.count || result.listings.length === 0) break;
 		if (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor) break;
 		if (seenCursors.has(result.cursor)) break;
 		seenCursors.add(result.cursor);
 		cursor = result.cursor;
 	}
-	const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings);
-	return mergeRemovalStatus(listings, lineItems);
+	const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress);
+	const merged = mergeRemovalStatus(listings, lineItems);
+	onProgress?.({
+		source: "unfulfillable",
+		status: "complete",
+		loaded: merged.length,
+		total: merged.length,
+		phase: lineItems.length > 0 ? "removal" : "listings"
+	});
+	return merged;
 }
 
 const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks";
 const FEEDBACK_PAGE_SIZE = 20;
 const FEEDBACK_MAX_PAGES = 40;
+const FEEDBACK_PAGE_CONCURRENCY = 5;
 const FEEDBACK_FROM_RATING = 1;
 const FEEDBACK_TO_RATING = 3;
 const FEEDBACK_SHEET_HEADERS = [
@@ -750,34 +721,6 @@ async function getFeedbacksPage(fetchImpl, pageNumber) {
 			"x-requested-with": "XMLHttpRequest"
 		}
 	});
-	// #region agent log
-	void response.clone().text().then((body) => {
-		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Debug-Session-Id": "74ba58"
-			},
-			body: JSON.stringify({
-				sessionId: "74ba58",
-				runId: "pre-fix",
-				hypothesisId: "A",
-				location: "src/lib/feedback.ts:getFeedbacksPage",
-				message: "feedbacks HTTP response",
-				data: {
-					pageNumber,
-					pageSize: FEEDBACK_PAGE_SIZE,
-					status: response.status,
-					ok: response.ok,
-					url: feedbacksUrl(pageNumber),
-					bodyPreview: body.slice(0, 240),
-					path: typeof location !== "undefined" ? location.pathname : ""
-				},
-				timestamp: Date.now()
-			})
-		}).catch(() => {});
-	}).catch(() => {});
-	// #endregion
 	if (!response.ok) throw new Error(`Couldn’t load seller feedback (${response.status}).`);
 	let payload;
 	try {
@@ -787,16 +730,265 @@ async function getFeedbacksPage(fetchImpl, pageNumber) {
 	}
 	return parseFeedbacksPage(payload);
 }
+function isLastFeedbackPage(page) {
+	return page.lastPage === true || page.feedbacks.length === 0 || page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE;
+}
 async function fetchNeutralNegativeFeedbacks(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
+	const onProgress = options.onProgress;
 	const feedbacks = [];
-	for (let pageNumber = 0; pageNumber < FEEDBACK_MAX_PAGES; pageNumber += 1) {
-		const page = await getFeedbacksPage(fetchImpl, pageNumber);
-		feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)));
-		if (page.lastPage === true || page.feedbacks.length === 0) break;
-		if (page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE) break;
+	onProgress?.({
+		source: "feedback",
+		status: "active",
+		loaded: 0
+	});
+	for (let start = 0; start < FEEDBACK_MAX_PAGES; start += FEEDBACK_PAGE_CONCURRENCY) {
+		const batchSize = Math.min(FEEDBACK_PAGE_CONCURRENCY, FEEDBACK_MAX_PAGES - start);
+		const results = await Promise.allSettled(Array.from({ length: batchSize }, (_, offset) => getFeedbacksPage(fetchImpl, start + offset)));
+		let foundLast = false;
+		for (let offset = 0; offset < results.length; offset += 1) {
+			const result = results[offset];
+			if (result.status === "rejected") throw result.reason;
+			const page = result.value;
+			feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)));
+			const lastPage = isLastFeedbackPage(page);
+			const loaded = start + offset + 1;
+			onProgress?.({
+				source: "feedback",
+				status: lastPage ? "complete" : "active",
+				loaded,
+				total: lastPage ? loaded : undefined
+			});
+			if (lastPage) {
+				foundLast = true;
+				break;
+			}
+		}
+		if (foundLast) break;
 	}
 	return feedbacks;
+}
+
+const STRANDED_INVENTORY_URL = "https://sellercentral.amazon.com/inventoryplanning/stranded-inventory";
+const STRANDED_DATE_TIME_ZONE = "America/New_York";
+const STRANDED_SHEET_HEADERS = [
+	"SKU",
+	"Condition",
+	"Product Name",
+	"ASIN",
+	"FNSKU",
+	"Status",
+	"Status secondary",
+	"Price",
+	"Currency",
+	"Available",
+	"Total",
+	"Reserved",
+	"Inbound",
+	"Unfulfillable",
+	"Auto removal date",
+	"Auto removal type",
+	"Date stranded",
+	"Stranded reason",
+	"Stranded reason code",
+	"Error message",
+	"Fulfilled by",
+	"Program",
+	"Actions"
+];
+const AUTO_REMOVAL_TYPE_LABELS = { RETURN: "Return to seller" };
+function strandedCell(value) {
+	if (value == null) return "";
+	return String(value);
+}
+function strandedNumericCell(value) {
+	if (value == null || value === "") return "";
+	const amount = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(amount) ? amount : "";
+}
+function strandedQuantity(value) {
+	const amount = strandedNumericCell(value);
+	return amount === "" ? 0 : amount;
+}
+function strandedStringField(value) {
+	if (typeof value !== "string") return undefined;
+	return value;
+}
+function formatStrandedDate(value) {
+	if (!value) return "";
+	const ms = Number(value);
+	if (!Number.isFinite(ms)) return value;
+	const date = new Date(ms);
+	if (Number.isNaN(date.getTime())) return value;
+	return new Intl.DateTimeFormat("en-US", {
+		timeZone: STRANDED_DATE_TIME_ZONE,
+		month: "2-digit",
+		day: "2-digit",
+		year: "numeric"
+	}).format(date);
+}
+function autoRemovalTypeLabel(value) {
+	if (!value) return "";
+	return AUTO_REMOVAL_TYPE_LABELS[value] ?? value;
+}
+function formatSupportedActions(value) {
+	if (!value) return "";
+	return value.split("#").map((action) => action.trim()).filter(Boolean).join(", ");
+}
+function parseStrandedHeaderCount(html) {
+	const match = html.match(/id=["']mt-header-count-value["'][^>]*>([^<]*)/i);
+	if (!match) return undefined;
+	const count = Number(match[1].replace(/,/g, "").trim());
+	return Number.isFinite(count) ? count : undefined;
+}
+function parseFilterLabelMap(root) {
+	const labels = new Map();
+	for (const node of root.querySelectorAll("[data-stranded-filter-changed]")) {
+		const raw = node.getAttribute("data-stranded-filter-changed");
+		if (!raw) continue;
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed.filterGroupId !== "stranded_reason") continue;
+			const id = typeof parsed.filterId === "string" ? parsed.filterId.trim() : "";
+			if (!id || id === "All") continue;
+			const label = typeof parsed.filterReadableValue === "string" ? parsed.filterReadableValue.trim() : "";
+			if (label) labels.set(id, label);
+		} catch {}
+	}
+	return labels;
+}
+function asStrandedListing(value, labels) {
+	if (!value || typeof value !== "object") return undefined;
+	const record = value;
+	const listing = {};
+	const sku = strandedStringField(record.SKU);
+	const asin = strandedStringField(record.ASIN);
+	const fnsku = strandedStringField(record.FNSKU);
+	const productName = strandedStringField(record.ProductName);
+	const condition = strandedStringField(record.Condition);
+	const status = strandedStringField(record.Status);
+	const statusSecondary = strandedStringField(record.StatusSecondary);
+	const price = strandedStringField(record.Price);
+	const priceUnit = strandedStringField(record.PriceUnit);
+	const available = strandedStringField(record.Available);
+	const totalQuantity = strandedStringField(record.TotalQuantity);
+	const reserved = strandedStringField(record.Reserved);
+	const inbound = strandedStringField(record.Inbound);
+	const unfulfillable = strandedStringField(record.Unfulfillable);
+	const dateAutoRemoval = strandedStringField(record.DateAutoRemoval);
+	const autoRemovalType = strandedStringField(record.AutoRemovalType);
+	const dateStranded = strandedStringField(record.DateStranded);
+	const strandedReason = strandedStringField(record.StrandedReason);
+	const strandedReasonCode = strandedStringField(record.StrandedReasonCode);
+	const errorMessage = strandedStringField(record.ErrorMessage);
+	const fulfilledBy = strandedStringField(record.FulfilledBy);
+	const program = strandedStringField(record.Program);
+	const supportedActions = strandedStringField(record.SupportedActions);
+	if (sku !== undefined) listing.SKU = sku;
+	if (asin !== undefined) listing.ASIN = asin;
+	if (fnsku !== undefined) listing.FNSKU = fnsku;
+	if (productName !== undefined) listing.ProductName = productName;
+	if (condition !== undefined) listing.Condition = condition;
+	if (status !== undefined) listing.Status = status;
+	if (statusSecondary !== undefined) listing.StatusSecondary = statusSecondary;
+	if (price !== undefined) listing.Price = price;
+	if (priceUnit !== undefined) listing.PriceUnit = priceUnit;
+	if (available !== undefined) listing.Available = available;
+	if (totalQuantity !== undefined) listing.TotalQuantity = totalQuantity;
+	if (reserved !== undefined) listing.Reserved = reserved;
+	if (inbound !== undefined) listing.Inbound = inbound;
+	if (unfulfillable !== undefined) listing.Unfulfillable = unfulfillable;
+	if (dateAutoRemoval !== undefined) listing.DateAutoRemoval = dateAutoRemoval;
+	if (autoRemovalType !== undefined) listing.AutoRemovalType = autoRemovalType;
+	if (dateStranded !== undefined) listing.DateStranded = dateStranded;
+	if (strandedReason !== undefined) listing.StrandedReason = strandedReason;
+	if (strandedReasonCode !== undefined) listing.StrandedReasonCode = strandedReasonCode;
+	if (errorMessage !== undefined) listing.ErrorMessage = errorMessage;
+	if (fulfilledBy !== undefined) listing.FulfilledBy = fulfilledBy;
+	if (program !== undefined) listing.Program = program;
+	if (supportedActions !== undefined) listing.SupportedActions = supportedActions;
+	const reasonCode = (listing.StrandedReasonCode || listing.StrandedReason || "").trim();
+	const reasonLabel = reasonCode && labels.get(reasonCode) || listing.ErrorMessage?.trim() || reasonCode;
+	if (reasonLabel) listing.StrandedReasonLabel = reasonLabel;
+	return listing;
+}
+function parseStrandedInventoryHtml(html) {
+	const root = new DOMParser().parseFromString(html, "text/html");
+	const labels = parseFilterLabelMap(root);
+	const listings = [];
+	for (const row of root.querySelectorAll("tr[data-row-data]")) {
+		const raw = row.getAttribute("data-row-data");
+		if (!raw) continue;
+		try {
+			const listing = asStrandedListing(JSON.parse(raw), labels);
+			if (listing) listings.push(listing);
+		} catch {}
+	}
+	const count = parseStrandedHeaderCount(html);
+	if (count === undefined && listings.length === 0) {
+		throw new Error("Couldn’t load stranded inventory.");
+	}
+	if (count !== undefined && count > listings.length) {
+		throw new Error(`Couldn’t load all stranded inventory (${listings.length} of ${count} listings).`);
+	}
+	return listings;
+}
+function strandedSheetRow(listing) {
+	return [
+		strandedCell(listing.SKU),
+		strandedCell(listing.Condition),
+		strandedCell(listing.ProductName),
+		strandedCell(listing.ASIN),
+		strandedCell(listing.FNSKU),
+		strandedCell(listing.Status),
+		strandedCell(listing.StatusSecondary),
+		strandedNumericCell(listing.Price),
+		strandedCell(listing.PriceUnit),
+		strandedQuantity(listing.Available),
+		strandedQuantity(listing.TotalQuantity),
+		strandedQuantity(listing.Reserved),
+		strandedQuantity(listing.Inbound),
+		strandedQuantity(listing.Unfulfillable),
+		formatStrandedDate(listing.DateAutoRemoval),
+		autoRemovalTypeLabel(listing.AutoRemovalType),
+		formatStrandedDate(listing.DateStranded),
+		strandedCell(listing.StrandedReasonLabel || listing.ErrorMessage || listing.StrandedReasonCode || listing.StrandedReason),
+		strandedCell(listing.StrandedReasonCode || listing.StrandedReason),
+		strandedCell(listing.ErrorMessage),
+		strandedCell(listing.FulfilledBy),
+		strandedCell(listing.Program),
+		formatSupportedActions(listing.SupportedActions)
+	];
+}
+function strandedSheetRows(listings) {
+	return [[...STRANDED_SHEET_HEADERS], ...listings.map(strandedSheetRow)];
+}
+async function fetchStrandedListings(options = {}) {
+	const fetchImpl = options.fetch ?? globalThis.fetch;
+	options.onProgress?.({
+		source: "stranded",
+		status: "active"
+	});
+	const response = await fetchImpl(STRANDED_INVENTORY_URL, {
+		method: "GET",
+		credentials: "include",
+		headers: { accept: "text/html" }
+	});
+	if (!response.ok) throw new Error(`Couldn’t load stranded inventory (${response.status}).`);
+	let html;
+	try {
+		html = await response.text();
+	} catch {
+		throw new Error("Couldn’t load stranded inventory.");
+	}
+	const listings = parseStrandedInventoryHtml(html);
+	options.onProgress?.({
+		source: "stranded",
+		status: "complete",
+		loaded: listings.length,
+		total: listings.length
+	});
+	return listings;
 }
 
 const PALETTE_APP_FILE = "palette-app.js";
@@ -827,6 +1019,13 @@ function onKeyDown(event) {
 		window.addEventListener("keydown", onKeyDown, true);
 	});
 }
+function emitReportProgress(event) {
+	if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return;
+	void chrome.runtime.sendMessage({
+		type: "REPORTS_PROGRESS",
+		...event
+	}).then(() => undefined, () => undefined);
+}
 function handleContentMessage(message, _sender, sendResponse, load = loadPalette) {
 	if (!message || typeof message !== "object" || !("type" in message)) return undefined;
 	const record = message;
@@ -848,29 +1047,7 @@ function handleContentMessage(message, _sender, sendResponse, load = loadPalette
 		return true;
 	}
 	if (record.type === "REPORTS_FETCH_UNFULFILLABLE") {
-		// #region agent log
-		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Debug-Session-Id": "74ba58"
-			},
-			body: JSON.stringify({
-				sessionId: "74ba58",
-				runId: "pre-fix",
-				hypothesisId: "D",
-				location: "src/content.tsx:REPORTS_FETCH_UNFULFILLABLE",
-				message: "unfulfillable fetch start",
-				data: {
-					path: typeof location !== "undefined" ? location.pathname : "",
-					hasCsrfMeta: Boolean(document.querySelector("meta[name=\"anti-csrftoken-a2z\"]")),
-					hasCsrfCookie: /(?:^|;\s*)anti-csrftoken-a2z=/.test(document.cookie)
-				},
-				timestamp: Date.now()
-			})
-		}).catch(() => {});
-		// #endregion
-		void fetchUnfulfillableListings().then((listings) => sendResponse({
+		void fetchUnfulfillableListings({ onProgress: emitReportProgress }).then((listings) => sendResponse({
 			ok: true,
 			listings
 		}), (error) => sendResponse({
@@ -880,34 +1057,22 @@ function handleContentMessage(message, _sender, sendResponse, load = loadPalette
 		return true;
 	}
 	if (record.type === "REPORTS_FETCH_FEEDBACK") {
-		// #region agent log
-		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Debug-Session-Id": "74ba58"
-			},
-			body: JSON.stringify({
-				sessionId: "74ba58",
-				runId: "pre-fix",
-				hypothesisId: "B",
-				location: "src/content.tsx:REPORTS_FETCH_FEEDBACK",
-				message: "feedback fetch start",
-				data: {
-					path: typeof location !== "undefined" ? location.pathname : "",
-					hasCsrfMeta: Boolean(document.querySelector("meta[name=\"anti-csrftoken-a2z\"]")),
-					hasCsrfCookie: /(?:^|;\s*)anti-csrftoken-a2z=/.test(document.cookie)
-				},
-				timestamp: Date.now()
-			})
-		}).catch(() => {});
-		// #endregion
-		void fetchNeutralNegativeFeedbacks().then((feedbacks) => sendResponse({
+		void fetchNeutralNegativeFeedbacks({ onProgress: emitReportProgress }).then((feedbacks) => sendResponse({
 			ok: true,
 			feedbacks
 		}), (error) => sendResponse({
 			ok: false,
 			error: error instanceof Error ? error.message : "Couldn’t load seller feedback."
+		}));
+		return true;
+	}
+	if (record.type === "REPORTS_FETCH_STRANDED") {
+		void fetchStrandedListings({ onProgress: emitReportProgress }).then((listings) => sendResponse({
+			ok: true,
+			listings
+		}), (error) => sendResponse({
+			ok: false,
+			error: error instanceof Error ? error.message : "Couldn’t load stranded inventory."
 		}));
 		return true;
 	}

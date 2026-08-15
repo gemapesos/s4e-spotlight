@@ -150,6 +150,19 @@
   }
 }
 
+@keyframes s4e-progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+[data-slot="progress"][data-indeterminate] [data-slot="progress-indicator"] {
+  animation: s4e-progress-indeterminate 1.4s ease-in-out infinite;
+}
+
 .no-scrollbar {
   scrollbar-width: none;
 }

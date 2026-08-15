@@ -180,6 +180,7 @@ describe("content-script mount", () => {
     const sendMessage = vi.fn(async (message: { type?: string }) => {
       if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }
       if (message.type === "REPORTS_FETCH_FEEDBACK") return { ok: true, feedbacks: [] }
+      if (message.type === "REPORTS_FETCH_STRANDED") return { ok: true, listings: [] }
       return {
         ok: true,
         initialized: true,
@@ -204,6 +205,7 @@ describe("content-script mount", () => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
       expect(createObjectURL).toHaveBeenCalledOnce()
 
@@ -211,8 +213,45 @@ describe("content-script mount", () => {
       await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors")
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
+    } finally {
+      click.mockRestore()
+    }
+  })
+
+  it("starts unfulfillable, feedback, and stranded fetches in parallel", async () => {
+    const resolvers: Record<string, (value: unknown) => void> = {}
+    const sendMessage = vi.fn((message: { type?: string }) => new Promise((resolve) => {
+      resolvers[message.type ?? ""] = resolve
+    }))
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    const createObjectURL = vi.fn().mockReturnValue("blob:report")
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined)
+    const onProgress = vi.fn()
+
+    try {
+      const pending = generateReports(new Date(2026, 7, 14), document, "JMG Outdoors", onProgress)
+      await vi.waitFor(() => {
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
+      })
+      expect(resolvers.REPORTS_FETCH_UNFULFILLABLE).toBeTypeOf("function")
+      expect(resolvers.REPORTS_FETCH_FEEDBACK).toBeTypeOf("function")
+      expect(resolvers.REPORTS_FETCH_STRANDED).toBeTypeOf("function")
+      expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "active" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "active" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "active" })
+      resolvers.REPORTS_FETCH_UNFULFILLABLE?.({ ok: true, listings: [] })
+      resolvers.REPORTS_FETCH_FEEDBACK?.({ ok: true, feedbacks: [] })
+      resolvers.REPORTS_FETCH_STRANDED?.({ ok: true, listings: [] })
+      await pending
+      expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
     } finally {
       click.mockRestore()
     }
@@ -222,6 +261,7 @@ describe("content-script mount", () => {
     const sendMessage = vi.fn(async (message: { type?: string }) => {
       if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }
       if (message.type === "REPORTS_FETCH_FEEDBACK") return { ok: true, feedbacks: [] }
+      if (message.type === "REPORTS_FETCH_STRANDED") return { ok: true, listings: [] }
       return {
         ok: true,
         initialized: true,
@@ -247,6 +287,7 @@ describe("content-script mount", () => {
       await generateReports(new Date(2026, 7, 14))
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")
     } finally {
       click.mockRestore()

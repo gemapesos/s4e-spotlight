@@ -1,6 +1,9 @@
+import type { ReportProgressEvent } from "./reportProgress"
+
 export const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks"
 export const FEEDBACK_PAGE_SIZE = 20
 export const FEEDBACK_MAX_PAGES = 40
+export const FEEDBACK_PAGE_CONCURRENCY = 5
 export const FEEDBACK_FROM_RATING = 1
 export const FEEDBACK_TO_RATING = 3
 
@@ -69,6 +72,7 @@ export interface FeedbacksPage {
 
 export interface FetchSellerFeedbacksOptions {
   fetch?: typeof globalThis.fetch
+  onProgress?: (event: ReportProgressEvent) => void
 }
 
 export function isNeutralOrNegativeRating(rating: number | null | undefined): rating is number {
@@ -250,17 +254,46 @@ async function getFeedbacksPage(
   return parseFeedbacksPage(payload)
 }
 
+function isLastFeedbackPage(page: FeedbacksPage): boolean {
+  return page.lastPage === true
+    || page.feedbacks.length === 0
+    || (page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE)
+}
+
 export async function fetchNeutralNegativeFeedbacks(
   options: FetchSellerFeedbacksOptions = {},
 ): Promise<SellerFeedback[]> {
   const fetchImpl = options.fetch ?? globalThis.fetch
+  const onProgress = options.onProgress
   const feedbacks: SellerFeedback[] = []
 
-  for (let pageNumber = 0; pageNumber < FEEDBACK_MAX_PAGES; pageNumber += 1) {
-    const page = await getFeedbacksPage(fetchImpl, pageNumber)
-    feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)))
-    if (page.lastPage === true || page.feedbacks.length === 0) break
-    if (page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE) break
+  onProgress?.({ source: "feedback", status: "active", loaded: 0 })
+  for (let start = 0; start < FEEDBACK_MAX_PAGES; start += FEEDBACK_PAGE_CONCURRENCY) {
+    const batchSize = Math.min(FEEDBACK_PAGE_CONCURRENCY, FEEDBACK_MAX_PAGES - start)
+    const results = await Promise.allSettled(
+      Array.from({ length: batchSize }, (_, offset) => getFeedbacksPage(fetchImpl, start + offset)),
+    )
+
+    let foundLast = false
+    for (let offset = 0; offset < results.length; offset += 1) {
+      const result = results[offset]
+      if (result.status === "rejected") throw result.reason
+      const page = result.value
+      feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)))
+      const lastPage = isLastFeedbackPage(page)
+      const loaded = start + offset + 1
+      onProgress?.({
+        source: "feedback",
+        status: lastPage ? "complete" : "active",
+        loaded,
+        total: lastPage ? loaded : undefined,
+      })
+      if (lastPage) {
+        foundLast = true
+        break
+      }
+    }
+    if (foundLast) break
   }
 
   return feedbacks

@@ -14,6 +14,12 @@ import {
 } from "./lib/settings"
 import type { SellerFeedback } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
+import {
+  isReportProgressMessage,
+  type ReportProgressEvent,
+  type ReportSource,
+} from "./lib/reportProgress"
+import type { StrandedListing } from "./lib/stranded"
 import type { UnfulfillableListing } from "./lib/unfulfillable"
 
 const HOST_ID = "command-palette-extension-root"
@@ -250,18 +256,68 @@ export async function fetchFeedbacksFromBackground(): Promise<SellerFeedback[]> 
   return Array.isArray(response.feedbacks) ? response.feedbacks : []
 }
 
+export async function fetchStrandedListingsFromBackground(): Promise<StrandedListing[]> {
+  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_STRANDED" }) as {
+    ok?: boolean
+    listings?: StrandedListing[]
+    error?: string
+  }
+  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  return Array.isArray(response.listings) ? response.listings : []
+}
+
+const reportProgressListeners = new Set<(event: ReportProgressEvent) => void>()
+
+export function subscribeReportProgress(listener: (event: ReportProgressEvent) => void): () => void {
+  reportProgressListeners.add(listener)
+  return () => { reportProgressListeners.delete(listener) }
+}
+
+function dispatchReportProgress(event: ReportProgressEvent): void {
+  for (const listener of reportProgressListeners) listener(event)
+}
+
+function trackReportSource<T>(
+  source: ReportSource,
+  promise: Promise<T>,
+  onProgress?: (event: ReportProgressEvent) => void,
+): Promise<T> {
+  return promise.then(
+    (value) => {
+      onProgress?.({ source, status: "complete" })
+      return value
+    },
+    (error: unknown) => {
+      onProgress?.({ source, status: "error" })
+      throw error
+    },
+  )
+}
+
 export async function generateReports(
   now = new Date(),
   targetDocument: Document = document,
   currentStoreName?: string,
+  onProgress?: (event: ReportProgressEvent) => void,
 ): Promise<void> {
-  const storeName =
-    currentStoreName !== undefined
-      ? currentStoreName
-      : (await getAccountsStatus()).currentStore?.name ?? ""
-  const listings = await fetchUnfulfillableListingsFromBackground()
-  const feedbacks = await fetchFeedbacksFromBackground()
-  downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks)), reportFileName(storeName, now), targetDocument)
+  const unsubscribe = onProgress ? subscribeReportProgress(onProgress) : () => undefined
+  try {
+    const storeName =
+      currentStoreName !== undefined
+        ? currentStoreName
+        : (await getAccountsStatus()).currentStore?.name ?? ""
+    onProgress?.({ source: "unfulfillable", status: "active" })
+    onProgress?.({ source: "feedback", status: "active" })
+    onProgress?.({ source: "stranded", status: "active" })
+    const [listings, feedbacks, strandedListings] = await Promise.all([
+      trackReportSource("unfulfillable", fetchUnfulfillableListingsFromBackground(), onProgress),
+      trackReportSource("feedback", fetchFeedbacksFromBackground(), onProgress),
+      trackReportSource("stranded", fetchStrandedListingsFromBackground(), onProgress),
+    ])
+    downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings)), reportFileName(storeName, now), targetDocument)
+  } finally {
+    unsubscribe()
+  }
 }
 
 export function mountCommandPalette({
@@ -323,7 +379,7 @@ export function mountCommandPalette({
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
           onPrepareReports={prepareReports}
-          onGenerateReports={(storeName) => generateReports(new Date(), targetDocument, storeName)}
+          onGenerateReports={(storeName, onProgress) => generateReports(new Date(), targetDocument, storeName, onProgress)}
           onOpenTimeOut={openTimeOut}
           onOpenChange={setOpen}
         />
@@ -377,6 +433,12 @@ export function mountCommandPalette({
 
   targetDocument.defaultView?.addEventListener("keydown", onKeyDown, true)
 
+  const onRuntimeMessage = (message: unknown) => {
+    if (!isReportProgressMessage(message)) return
+    dispatchReportProgress(message)
+  }
+  if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.addListener(onRuntimeMessage)
+
   return {
     host,
     shadowRoot,
@@ -386,6 +448,7 @@ export function mountCommandPalette({
       unlockDocumentScroll?.()
       unlockDocumentScroll = null
       targetDocument.defaultView?.removeEventListener("keydown", onKeyDown, true)
+      if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.removeListener(onRuntimeMessage)
       ;(targetDocument.defaultView as PasteGuardWindow | null)?.[
         PASTE_GUARD_KEY
       ]?.destroy()

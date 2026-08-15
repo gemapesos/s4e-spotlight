@@ -1,3 +1,5 @@
+import type { ReportProgressEvent } from "./reportProgress"
+
 export const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql"
 export const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories"
 export const INVENTORY_MANAGE_URL = "https://sellercentral.amazon.com/myinventory/inventory"
@@ -190,6 +192,7 @@ export interface FetchUnfulfillableListingsOptions {
   fetch?: typeof globalThis.fetch
   root?: ParentNode
   cookie?: string
+  onProgress?: (event: ReportProgressEvent) => void
 }
 
 export function readAntiCsrfToken(root: ParentNode = document, cookie = typeof document !== "undefined" ? document.cookie : ""): string | undefined {
@@ -511,13 +514,18 @@ async function fetchRemovalLineItems(
   fetchImpl: typeof globalThis.fetch,
   token: string | undefined,
   listings: readonly UnfulfillableListing[],
+  onProgress?: (event: ReportProgressEvent) => void,
 ): Promise<RecoveryLineItem[]> {
   const pairs = listings.map(listingSkuPair).filter((pair): pair is { merchantSku: string; fulfillmentNetworkSku: string } => pair !== undefined)
   if (pairs.length === 0) return []
 
   const lineItems: RecoveryLineItem[] = []
+  let processed = 0
+  onProgress?.({ source: "unfulfillable", status: "active", loaded: 0, total: pairs.length, phase: "removal" })
   for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
     lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch))
+    processed += batch.length
+    onProgress?.({ source: "unfulfillable", status: "active", loaded: processed, total: pairs.length, phase: "removal" })
   }
   return lineItems
 }
@@ -528,9 +536,12 @@ export async function fetchUnfulfillableListings(
   const fetchImpl = options.fetch ?? globalThis.fetch
   const root = options.root ?? document
   const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "")
+  const onProgress = options.onProgress
   let token = readAntiCsrfToken(root, cookie)
   if (!token) token = await fetchAntiCsrfTokenFromInventory(fetchImpl)
   if (!token) throw new Error("Couldn’t read the Seller Central security token.")
+
+  onProgress?.({ source: "unfulfillable", status: "active", loaded: 0, phase: "listings" })
 
   let query = GET_LISTINGS_V2_QUERY
   let cursor: string | undefined
@@ -566,6 +577,13 @@ export async function fetchUnfulfillableListings(
     }
 
     listings.push(...result.listings)
+    onProgress?.({
+      source: "unfulfillable",
+      status: "active",
+      loaded: listings.length,
+      total: result.count,
+      phase: "listings",
+    })
     if (listings.length >= result.count || result.listings.length === 0) break
     if (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor) break
     if (seenCursors.has(result.cursor)) break
@@ -573,6 +591,14 @@ export async function fetchUnfulfillableListings(
     cursor = result.cursor
   }
 
-  const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings)
-  return mergeRemovalStatus(listings, lineItems)
+  const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress)
+  const merged = mergeRemovalStatus(listings, lineItems)
+  onProgress?.({
+    source: "unfulfillable",
+    status: "complete",
+    loaded: merged.length,
+    total: merged.length,
+    phase: lineItems.length > 0 ? "removal" : "listings",
+  })
+  return merged
 }

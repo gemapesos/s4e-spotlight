@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
   FEEDBACKS_URL,
   FEEDBACK_FROM_RATING,
+  FEEDBACK_PAGE_CONCURRENCY,
   FEEDBACK_PAGE_SIZE,
   FEEDBACK_SHEET_HEADERS,
   FEEDBACK_TO_RATING,
@@ -75,6 +76,40 @@ function feedbacksPayload(feedbacks: SellerFeedback[], extras: { lastPage?: bool
     lastPage: extras.lastPage ?? true,
   }
 }
+
+function pageNumberFromUrl(input: unknown): number {
+  return Number(new URL(String(input)).searchParams.get("pageNumber"))
+}
+
+function requestedPageNumbers(fetchImpl: ReturnType<typeof vi.fn>): number[] {
+  return fetchImpl.mock.calls.map(([url]) => pageNumberFromUrl(url)).sort((a, b) => a - b)
+}
+
+function fetchByPage(
+  pages: Record<number, { payload: unknown; status?: number }>,
+  fallback?: { payload: unknown; status?: number },
+) {
+  return vi.fn(async (input: unknown) => {
+    const pageNumber = pageNumberFromUrl(input)
+    const handler = pages[pageNumber] ?? fallback
+    if (!handler) throw new Error(`Unexpected feedback page ${pageNumber}`)
+    return jsonResponse(handler.payload, handler.status ?? 200)
+  })
+}
+
+function continuingPage(feedback: SellerFeedback, pageNumber: number) {
+  return {
+    payload: feedbacksPayload([feedback], { lastPage: false, pageNumber }),
+  }
+}
+
+function lastPage(feedback: SellerFeedback, pageNumber: number) {
+  return {
+    payload: feedbacksPayload([feedback], { lastPage: true, pageNumber }),
+  }
+}
+
+const emptyLastPage = { payload: feedbacksPayload([], { lastPage: true }) }
 
 describe("feedback sentiment", () => {
   it("maps 1-2 to Negative and 3 to Neutral", () => {
@@ -161,15 +196,17 @@ describe("parseFeedbacksPage", () => {
 
 describe("fetchNeutralNegativeFeedbacks", () => {
   it("requests ratings 1-3 and paginates until lastPage", async () => {
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(feedbacksPayload([negativeFeedback], { lastPage: false, pageNumber: 0 })))
-      .mockResolvedValueOnce(jsonResponse(feedbacksPayload([suppressedNeutral], { lastPage: true, pageNumber: 1 })))
+    const fetchImpl = fetchByPage({
+      0: continuingPage(negativeFeedback, 0),
+      1: lastPage(suppressedNeutral, 1),
+    }, emptyLastPage)
 
     await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
       negativeFeedback,
       suppressedNeutral,
     ])
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(requestedPageNumbers(fetchImpl)).toEqual([0, 1, 2, 3, 4])
+    expect(FEEDBACK_PAGE_CONCURRENCY).toBe(5)
     expect(fetchImpl).toHaveBeenNthCalledWith(1, feedbacksUrl(0), expect.objectContaining({
       method: "GET",
       credentials: "include",
@@ -183,7 +220,20 @@ describe("fetchNeutralNegativeFeedbacks", () => {
     expect(fetchImpl.mock.calls[0][0]).toContain("toRating=3")
     expect(FEEDBACK_PAGE_SIZE).toBe(20)
     expect(fetchImpl.mock.calls[0][0]).toContain("pageSize=20")
-    expect(fetchImpl.mock.calls[1][0]).toBe(feedbacksUrl(1))
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toContain(feedbacksUrl(1))
+  })
+
+  it("reports page progress including the last page total", async () => {
+    const onProgress = vi.fn()
+    const fetchImpl = fetchByPage({
+      0: continuingPage(negativeFeedback, 0),
+      1: lastPage(suppressedNeutral, 1),
+    }, emptyLastPage)
+
+    await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, onProgress })
+    expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "active", loaded: 0 })
+    expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "active", loaded: 1, total: undefined })
+    expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete", loaded: 2, total: 2 })
   })
 
   it("drops 4-5 star feedback if the API returns them", async () => {
@@ -209,7 +259,61 @@ describe("fetchNeutralNegativeFeedbacks", () => {
     await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
       negativeFeedback,
     ])
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(requestedPageNumbers(fetchImpl)).toEqual([0, 1, 2, 3, 4])
+  })
+
+  it("does not start the next window after lastPage and ignores later-window overshoot", async () => {
+    const fetchImpl = fetchByPage({
+      0: continuingPage(negativeFeedback, 0),
+      1: continuingPage(suppressedNeutral, 1),
+      2: continuingPage(negativeFeedback, 2),
+      3: continuingPage(suppressedNeutral, 3),
+      4: continuingPage(negativeFeedback, 4),
+      5: lastPage(suppressedNeutral, 5),
+      6: { payload: {}, status: 500 },
+      7: { payload: {}, status: 500 },
+      8: { payload: {}, status: 500 },
+      9: { payload: {}, status: 500 },
+    })
+
+    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
+      negativeFeedback,
+      suppressedNeutral,
+      negativeFeedback,
+      suppressedNeutral,
+      negativeFeedback,
+      suppressedNeutral,
+    ])
+    expect(requestedPageNumbers(fetchImpl)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+  })
+
+  it("ignores a failed page after lastPage", async () => {
+    const fetchImpl = fetchByPage({
+      0: continuingPage(negativeFeedback, 0),
+      1: lastPage(suppressedNeutral, 1),
+      2: { payload: {}, status: 500 },
+      3: { payload: {}, status: 403 },
+      4: { payload: {}, status: 429 },
+    })
+
+    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
+      negativeFeedback,
+      suppressedNeutral,
+    ])
+  })
+
+  it("throws when a needed page fails", async () => {
+    const fetchImpl = fetchByPage({
+      0: continuingPage(negativeFeedback, 0),
+      1: { payload: {}, status: 403 },
+      2: lastPage(suppressedNeutral, 2),
+      3: lastPage(suppressedNeutral, 3),
+      4: lastPage(suppressedNeutral, 4),
+    })
+
+    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).rejects.toThrow(
+      "Couldn’t load seller feedback (403).",
+    )
   })
 
   it("throws when Seller Central returns a failed response", async () => {

@@ -1,6 +1,8 @@
 import { fetchNeutralNegativeFeedbacks } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
+import type { ReportProgressEvent } from "./lib/reportProgress"
 import { sellerCentralSessionStatus } from "./lib/sellerCentralSession"
+import { fetchStrandedListings } from "./lib/stranded"
 import { fetchUnfulfillableListings } from "./lib/unfulfillable"
 
 const PALETTE_APP_FILE = "palette-app.js"
@@ -50,6 +52,14 @@ function onKeyDown(event: KeyboardEvent): void {
     })
 }
 
+function emitReportProgress(event: ReportProgressEvent): void {
+  if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return
+  void chrome.runtime.sendMessage({ type: "REPORTS_PROGRESS", ...event }).then(
+    () => undefined,
+    () => undefined,
+  )
+}
+
 export function handleContentMessage(
   message: unknown,
   _sender: chrome.runtime.MessageSender,
@@ -78,7 +88,7 @@ export function handleContentMessage(
     return true
   }
   if (record.type === "REPORTS_FETCH_UNFULFILLABLE") {
-    void fetchUnfulfillableListings().then(
+    void fetchUnfulfillableListings({ onProgress: emitReportProgress }).then(
       (listings) => sendResponse({ ok: true, listings }),
       (error: unknown) => sendResponse({
         ok: false,
@@ -88,11 +98,21 @@ export function handleContentMessage(
     return true
   }
   if (record.type === "REPORTS_FETCH_FEEDBACK") {
-    void fetchNeutralNegativeFeedbacks().then(
+    void fetchNeutralNegativeFeedbacks({ onProgress: emitReportProgress }).then(
       (feedbacks) => sendResponse({ ok: true, feedbacks }),
       (error: unknown) => sendResponse({
         ok: false,
         error: error instanceof Error ? error.message : "Couldn’t load seller feedback.",
+      }),
+    )
+    return true
+  }
+  if (record.type === "REPORTS_FETCH_STRANDED") {
+    void fetchStrandedListings({ onProgress: emitReportProgress }).then(
+      (listings) => sendResponse({ ok: true, listings }),
+      (error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Couldn’t load stranded inventory.",
       }),
     )
     return true

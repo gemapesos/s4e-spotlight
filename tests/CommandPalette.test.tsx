@@ -601,6 +601,47 @@ describe("CommandPalette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 
+  it("replaces the command list with per-source report progress", async () => {
+    const user = userEvent.setup()
+    let onProgress: ((event: { source: string; status: string; loaded?: number; total?: number; phase?: string }) => void) | undefined
+    let resolveGenerate!: () => void
+    const onGenerateReports = vi.fn(
+      (_store?: string, progress?: (event: { source: string; status: string; loaded?: number; total?: number; phase?: string }) => void) => {
+        onProgress = progress
+        return new Promise<void>((resolve) => { resolveGenerate = resolve })
+      },
+    )
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      onGenerateReports,
+      undefined,
+      undefined,
+      { onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: true }) },
+    )
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+
+    expect(await screen.findByRole("dialog", { name: "Generate Reports" })).toBeVisible()
+    expect(screen.queryByRole("option", { name: /Time Out/ })).not.toBeInTheDocument()
+    expect(screen.getByText("Opening Seller Central")).toBeVisible()
+    expect(screen.getByText("Unfulfillable listings")).toBeVisible()
+    expect(screen.getByText("Seller feedback")).toBeVisible()
+    expect(screen.getByText("Stranded inventory")).toBeVisible()
+    expect(screen.getByLabelText("Unfulfillable listings")).toBeVisible()
+    expect(screen.getByLabelText("Seller feedback")).toBeVisible()
+    expect(screen.getByLabelText("Stranded inventory")).toBeVisible()
+
+    await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledOnce())
+    await act(async () => {
+      onProgress?.({ source: "unfulfillable", status: "active", loaded: 128, total: 300, phase: "listings" })
+    })
+    expect(screen.getByText("128 of 300 listings")).toBeVisible()
+    await act(async () => { resolveGenerate() })
+  })
+
   it("opens Time Out and closes the palette", async () => {
     const user = userEvent.setup()
     const onOpenTimeOut = vi.fn<() => Promise<void>>().mockResolvedValue()
@@ -654,6 +695,8 @@ describe("CommandPalette", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn’t build the report.")
     expect(onOpenChange).not.toHaveBeenCalled()
+    expect(screen.getByText("Unfulfillable listings")).toBeVisible()
+    expect(screen.queryByRole("option", { name: /Generate Reports/ })).not.toBeInTheDocument()
   })
 
   it("asks to sign in when Seller Central has no store session", async () => {
@@ -673,8 +716,8 @@ describe("CommandPalette", () => {
 
     await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
 
-    expect(await screen.findByRole("dialog", { name: "Generate Reports" })).toBeVisible()
-    expect(screen.getByRole("alert")).toHaveTextContent("Sign in to a Seller Central store")
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign in to a Seller Central store")
+    expect(screen.getByRole("dialog", { name: "Generate Reports" })).toBeVisible()
     expect(onGenerateReports).not.toHaveBeenCalled()
     expect(onOpenChange).not.toHaveBeenCalled()
   })

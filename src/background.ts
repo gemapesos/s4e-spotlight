@@ -246,6 +246,8 @@ interface ActiveJob {
 
 const AUTOMATION_CLICK_ACTIONS = new Set(["continue", "password-submit", "otp-submit"])
 let startSwitchLock: Promise<void> = Promise.resolve()
+let sellerCentralTabLock: Promise<void> = Promise.resolve()
+let reportProgressTabId: number | undefined
 
 type ApiResponse = { ok: true; [key: string]: unknown } | { ok: false; error: string }
 
@@ -336,6 +338,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 export async function ensureSellerCentralTab(senderTab?: chrome.tabs.Tab): Promise<{ tabId: number; focused?: true; opened?: true }> {
+  const previous = sellerCentralTabLock
+  let release!: () => void
+  sellerCentralTabLock = new Promise<void>((resolve) => { release = resolve })
+  await previous
+  try {
+    return await ensureSellerCentralTabNow(senderTab)
+  } finally {
+    release()
+  }
+}
+
+async function ensureSellerCentralTabNow(senderTab?: chrome.tabs.Tab): Promise<{ tabId: number; focused?: true; opened?: true }> {
   const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
   const tab = pickSellerCentralTab(tabs, senderTab?.windowId)
   if (tab?.id !== undefined) {
@@ -412,7 +426,22 @@ async function sendUnfulfillableFetch(tabId: number): Promise<{ ok: true; listin
   throw new Error(lastError ?? "Couldn’t load unfulfillable inventory.")
 }
 
+export function rememberReportProgressTab(tabId?: number): void {
+  if (typeof tabId === "number") reportProgressTabId = tabId
+}
+
+export async function relayReportProgress(message: unknown): Promise<{ ok: true }> {
+  if (reportProgressTabId === undefined) return { ok: true }
+  try {
+    await chrome.tabs.sendMessage(reportProgressTabId, message)
+  } catch {
+    /* palette tab may have closed */
+  }
+  return { ok: true }
+}
+
 export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
+  rememberReportProgressTab(senderTab?.id)
   const { tabId } = await ensureSellerCentralTab(senderTab)
   await waitForTabComplete(tabId)
   return sendUnfulfillableFetch(tabId)
@@ -443,9 +472,41 @@ async function sendFeedbackFetch(tabId: number): Promise<{ ok: true; feedbacks: 
 }
 
 export async function fetchFeedbackReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; feedbacks: unknown[] }> {
+  rememberReportProgressTab(senderTab?.id)
   const { tabId } = await ensureSellerCentralTab(senderTab)
   await waitForTabComplete(tabId)
   return sendFeedbackFetch(tabId)
+}
+
+async function sendStrandedFetch(tabId: number): Promise<{ ok: true; listings: unknown[] }> {
+  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
+  let lastError: string | undefined
+  while (Date.now() < deadline) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_STRANDED" }) as {
+        ok?: boolean
+        listings?: unknown
+        error?: string
+      }
+      if (response?.ok) {
+        return { ok: true, listings: Array.isArray(response.listings) ? response.listings : [] }
+      }
+      throw new Error(response?.error ?? "Couldn’t load stranded inventory.")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message)
+      lastError = message
+    }
+    await sleep(SESSION_PROBE_INTERVAL_MS)
+  }
+  throw new Error(lastError ?? "Couldn’t load stranded inventory.")
+}
+
+export async function fetchStrandedReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
+  rememberReportProgressTab(senderTab?.id)
+  const { tabId } = await ensureSellerCentralTab(senderTab)
+  await waitForTabComplete(tabId)
+  return sendStrandedFetch(tabId)
 }
 
 export async function probeSellerCentralSession(tabId: number): Promise<boolean> {
@@ -781,6 +842,20 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       void fetchFeedbackReport(sender.tab).then(
         sendResponse,
         (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load seller feedback." }),
+      )
+      return true
+    }
+    if (type === "REPORTS_FETCH_STRANDED") {
+      void fetchStrandedReport(sender.tab).then(
+        sendResponse,
+        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load stranded inventory." }),
+      )
+      return true
+    }
+    if (type === "REPORTS_PROGRESS") {
+      void relayReportProgress(message).then(
+        sendResponse,
+        () => sendResponse({ ok: true }),
       )
       return true
     }

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { handleContentMessage } from "../src/content"
+import { FEEDBACK_PAGE_CONCURRENCY } from "../src/lib/feedback"
 
 function makeVisible() {
   vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockReturnValue(document.body)
@@ -131,9 +132,48 @@ describe("content script report messages", () => {
         ok: true,
         feedbacks: [feedback],
       }))
-      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(fetchImpl).toHaveBeenCalledTimes(FEEDBACK_PAGE_CONCURRENCY)
       expect(fetchImpl).toHaveBeenCalledWith(
         expect.stringContaining("/fbmapi/v1/feedbacks"),
+        expect.objectContaining({ method: "GET", credentials: "include" }),
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("fetches stranded listings from Seller Central HTML", async () => {
+    const html = `<!doctype html><html><body>
+<div class="mt-header-count"><span id="mt-header-count-value">1</span> product(s)</div>
+<span data-stranded-filter-changed="{&quot;filterId&quot;:&quot;ERR_NO_PRICE&quot;,&quot;filterReadableValue&quot;:&quot;Missing price&quot;,&quot;filterGroupId&quot;:&quot;stranded_reason&quot;}"></span>
+<table><tbody><tr class="mt-row" data-row-data="{&quot;SKU&quot;:&quot;ABC-123&quot;,&quot;ASIN&quot;:&quot;B00TEST&quot;,&quot;FNSKU&quot;:&quot;X00TEST&quot;,&quot;ProductName&quot;:&quot;Test listing&quot;,&quot;Condition&quot;:&quot;New&quot;,&quot;Status&quot;:&quot;Incomplete&quot;,&quot;Price&quot;:&quot;0.0&quot;,&quot;PriceUnit&quot;:&quot;USD&quot;,&quot;Available&quot;:&quot;1&quot;,&quot;TotalQuantity&quot;:&quot;1&quot;,&quot;Reserved&quot;:&quot;0&quot;,&quot;Inbound&quot;:&quot;0&quot;,&quot;Unfulfillable&quot;:&quot;0&quot;,&quot;DateStranded&quot;:&quot;1786498521898&quot;,&quot;StrandedReason&quot;:&quot;ERR_NO_PRICE&quot;,&quot;StrandedReasonCode&quot;:&quot;ERR_NO_PRICE&quot;,&quot;FulfilledBy&quot;:&quot;Amazon&quot;,&quot;Program&quot;:&quot;&quot;,&quot;SupportedActions&quot;:&quot;EditListing#RemovalOrder&quot;}"></tr></tbody></table>
+</body></html>`
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => html,
+    }))
+    vi.stubGlobal("fetch", fetchImpl)
+    const sendResponse = vi.fn()
+
+    try {
+      expect(handleContentMessage(
+        { type: "REPORTS_FETCH_STRANDED" },
+        {} as chrome.runtime.MessageSender,
+        sendResponse,
+      )).toBe(true)
+
+      await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+        ok: true,
+        listings: [expect.objectContaining({
+          SKU: "ABC-123",
+          ASIN: "B00TEST",
+          StrandedReasonCode: "ERR_NO_PRICE",
+          StrandedReasonLabel: "Missing price",
+        })],
+      }))
+      expect(fetchImpl).toHaveBeenCalledWith(
+        "https://sellercentral.amazon.com/inventoryplanning/stranded-inventory",
         expect.objectContaining({ method: "GET", credentials: "include" }),
       )
     } finally {
