@@ -191,6 +191,17 @@ describe("Accounts background workflow", () => {
     expect(update).toHaveBeenCalledWith(91, { url: SIGN_IN_URL })
   })
 
+  it("does not treat Seller Central home as a logout intercept", async () => {
+    await createActiveJob()
+    update.mockClear()
+
+    await handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: "https://sellercentral.amazon.com/" } as chrome.tabs.Tab)
+    await handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: "https://sellercentral.amazon.com/home" } as chrome.tabs.Tab)
+
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "logout" })
+    expect(update).not.toHaveBeenCalled()
+  })
+
   it("lets the content script leave a logout re-auth page for canonical sign-in", async () => {
     const job = await createActiveJob()
     update.mockClear()

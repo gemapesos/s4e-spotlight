@@ -42,6 +42,25 @@ function onKeyDown(event: KeyboardEvent): void {
 
   event.preventDefault()
   event.stopImmediatePropagation()
+  // #region agent log
+  fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
+    body: JSON.stringify({
+      sessionId: "f8f494",
+      runId: "pre-fix",
+      hypothesisId: "E",
+      location: "content.tsx:onKeyDown",
+      message: "palette shortcut",
+      data: {
+        hostname: location.hostname,
+        pathname: location.pathname.slice(0, 120),
+        isSellerCentral: location.hostname === "sellercentral.amazon.com",
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {})
+  // #endregion
   window.removeEventListener("keydown", onKeyDown, true)
   void loadPalette()
     .then((palette) => {

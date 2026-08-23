@@ -242,12 +242,43 @@ function currentStoreFromIndex(stores, storeId) {
 export function pickSellerCentralTab(tabs, preferredWindowId) {
 	const withId = tabs.filter((tab) => tab.id !== undefined);
 	if (withId.length === 0) return undefined;
-	return [...withId].sort((a, b) => {
+	const picked = [...withId].sort((a, b) => {
 		const aPreferred = a.windowId === preferredWindowId ? 1 : 0;
 		const bPreferred = b.windowId === preferredWindowId ? 1 : 0;
 		if (aPreferred !== bPreferred) return bPreferred - aPreferred;
 		return (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
 	})[0];
+	// #region agent log
+	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Debug-Session-Id": "f8f494"
+		},
+		body: JSON.stringify({
+			sessionId: "f8f494",
+			runId: "pre-fix",
+			hypothesisId: "B",
+			location: "background.ts:pickSellerCentralTab",
+			message: "picked Seller Central tab",
+			data: {
+				preferredWindowId: preferredWindowId ?? null,
+				candidateCount: withId.length,
+				candidates: withId.map((tab) => ({
+					id: tab.id,
+					windowId: tab.windowId,
+					lastAccessed: tab.lastAccessed ?? null,
+					url: typeof tab.url === "string" ? tab.url.slice(0, 120) : null,
+					active: tab.active
+				})),
+				pickedId: picked?.id ?? null,
+				pickedUrl: typeof picked?.url === "string" ? picked.url.slice(0, 120) : null
+			},
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+	// #endregion
+	return picked;
 }
 const TAB_LOAD_TIMEOUT_MS = 3e4;
 const SESSION_PROBE_TIMEOUT_MS = 15e3;
@@ -434,9 +465,36 @@ export async function probeSellerCentralSession(tabId) {
 	return last.loggedInToStore;
 }
 export async function prepareReports(senderTab) {
+	const currentStoreId = await getCurrentStoreId();
 	const { tabId } = await ensureSellerCentralTab(senderTab);
 	await waitForTabComplete(tabId);
+	const tab = await chrome.tabs.get(tabId);
 	const loggedInToStore = await probeSellerCentralSession(tabId);
+	// #region agent log
+	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Debug-Session-Id": "f8f494"
+		},
+		body: JSON.stringify({
+			sessionId: "f8f494",
+			runId: "pre-fix",
+			hypothesisId: "B",
+			location: "background.ts:prepareReports",
+			message: "reports prepare result",
+			data: {
+				currentStoreId: currentStoreId ?? null,
+				senderTabId: senderTab?.id ?? null,
+				sellerCentralTabId: tabId,
+				tabUrl: typeof tab.url === "string" ? tab.url.slice(0, 160) : null,
+				loggedInToStore,
+				sameAsSender: senderTab?.id === tabId
+			},
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+	// #endregion
 	if (loggedInToStore) return {
 		ok: true,
 		loggedInToStore: true,
@@ -624,7 +682,34 @@ export async function handleAccountsMessage(message, sender) {
 				if (!store) throw new Error("The selected store was not found.");
 				const currentStoreId = await getCurrentStoreId();
 				const currentStore = currentStoreId ? vault.stores.find(({ id }) => id === currentStoreId) : undefined;
-				if (currentStore && currentStore.credentialId === store.credentialId) {
+				const sameCredential = Boolean(currentStore && currentStore.credentialId === store.credentialId);
+				// #region agent log
+				fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Debug-Session-Id": "f8f494"
+					},
+					body: JSON.stringify({
+						sessionId: "f8f494",
+						runId: "pre-fix",
+						hypothesisId: "D",
+						location: "background.ts:ACCOUNTS_START_SWITCH",
+						message: "account switch started",
+						data: {
+							targetStoreId: store.id,
+							targetStoreName: store.name,
+							currentStoreId: currentStoreId ?? null,
+							sameCredential,
+							path: sameCredential ? "navigate-only" : "logout-login",
+							senderTabId: sender.tab?.id ?? null,
+							senderUrl: typeof sender.tab?.url === "string" ? sender.tab.url.slice(0, 120) : null
+						},
+						timestamp: Date.now()
+					})
+				}).catch(() => {});
+				// #endregion
+				if (sameCredential) {
 					await openStoreUrl(store.storeUrl, sender.tab);
 					await setCurrentStoreId(store.id);
 					return { ok: true };
@@ -770,6 +855,42 @@ export async function handleAccountsMessage(message, sender) {
 		case "ACCOUNT_AUTOMATION_COMPLETE": {
 			const job = await assertWorkflowSender(sender, message.jobId);
 			const { store } = await getJobRecords(job);
+			// #region agent log
+			fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Debug-Session-Id": "f8f494"
+				},
+				body: JSON.stringify({
+					sessionId: "f8f494",
+					runId: "pre-fix",
+					hypothesisId: "A",
+					location: "background.ts:ACCOUNT_AUTOMATION_COMPLETE",
+					message: "automation complete accepted",
+					data: {
+						jobStage: job.stage,
+						storeId: store.id,
+						storeName: store.name,
+						senderPath: sender.url ? (() => {
+							try {
+								return new URL(sender.url).pathname;
+							} catch {
+								return null;
+							}
+						})() : null,
+						storeUrlHost: (() => {
+							try {
+								return new URL(store.storeUrl).hostname;
+							} catch {
+								return null;
+							}
+						})()
+					},
+					timestamp: Date.now()
+				})
+			}).catch(() => {});
+			// #endregion
 			job.stage = "authenticated";
 			await setActiveJob(job);
 			await chrome.tabs.update(job.tabId, { url: store.storeUrl });
@@ -803,6 +924,32 @@ export async function handleAccountTabUpdated(tabId, changeInfo, tab) {
 		return;
 	}
 	if (url.hostname !== "sellercentral.amazon.com") return;
+	const pathOk = url.pathname.startsWith("/ap/") || url.pathname.startsWith("/sign-out");
+	// #region agent log
+	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Debug-Session-Id": "f8f494"
+		},
+		body: JSON.stringify({
+			sessionId: "f8f494",
+			runId: "pre-fix",
+			hypothesisId: "C",
+			location: "background.ts:handleAccountTabUpdated",
+			message: "logout tab complete",
+			data: {
+				tabId,
+				stage: job.stage,
+				pathname: url.pathname,
+				pathOk,
+				willAdvance: pathOk
+			},
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+	// #endregion
+	if (!pathOk) return;
 	// Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
 	await advanceLogoutToSignIn(job);
 }

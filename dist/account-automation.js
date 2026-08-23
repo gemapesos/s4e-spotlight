@@ -1,37 +1,76 @@
+(function () {
+const MODERN_SHELL_SELECTORS = [
+	"#sc-navtab-home",
+	"#sc-top-nav-root",
+	"[data-testid=\"global-nav\"]",
+	"#sc-navbar-container",
+	"#ngstrim-nav-menu"
+];
+const CLASSIC_SHELL_SELECTORS = [
+	"#sc-search-field",
+	"a.logo-container[href=\"/home\"]",
+	"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
+];
 function visible(element) {
 	return element instanceof HTMLElement && element.offsetParent !== null;
 }
+function shellSelectorHits(root = document) {
+	return {
+		modernHits: MODERN_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector))),
+		classicHits: CLASSIC_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector)))
+	};
+}
 function hasAuthenticatedSellerUi(root = document) {
-	const modernShell = [
-		"#sc-navtab-home",
-		"#sc-top-nav-root",
-		"[data-testid=\"global-nav\"]"
-	].some((selector) => visible(root.querySelector(selector)));
-	if (modernShell) return true;
-	const classicShellMarkers = [
-		"#sc-search-field",
-		"a.logo-container[href=\"/home\"]",
-		"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
-	].filter((selector) => visible(root.querySelector(selector)));
-	return classicShellMarkers.length >= 2;
+	const { modernHits, classicHits } = shellSelectorHits(root);
+	if (modernHits.length > 0) return true;
+	return classicHits.length >= 2;
 }
 function sellerCentralSessionStatus(pathname = location.pathname, root = document) {
+	let result;
 	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
-		return {
+		result = {
 			loggedInToStore: false,
 			settled: true
 		};
-	}
-	if (hasAuthenticatedSellerUi(root)) {
-		return {
+	} else if (hasAuthenticatedSellerUi(root)) {
+		result = {
 			loggedInToStore: true,
 			settled: true
 		};
+	} else {
+		result = {
+			loggedInToStore: false,
+			settled: false
+		};
 	}
-	return {
-		loggedInToStore: false,
-		settled: false
-	};
+	// #region agent log
+	{
+		const hits = shellSelectorHits(root);
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "f8f494"
+			},
+			body: JSON.stringify({
+				sessionId: "f8f494",
+				runId: "pre-fix",
+				hypothesisId: "A",
+				location: "sellerCentralSession.ts:sellerCentralSessionStatus",
+				message: "session status evaluated",
+				data: {
+					hostname: typeof location !== "undefined" ? location.hostname : "",
+					pathname,
+					...result,
+					modernHits: hits.modernHits,
+					classicHits: hits.classicHits
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+	}
+	// #endregion
+	return result;
 }
 
 const STATUS_ID = "s4e-account-switch-status";
@@ -150,6 +189,10 @@ function isReadyForStoreNavigation() {
 	if (hasAuthenticatedSellerUi()) return true;
 	return location.pathname.startsWith("/account-switcher/");
 }
+function shouldCompleteAuthenticatedSession(stage) {
+	if (location.pathname.startsWith("/account-switcher/")) return true;
+	return stage !== "logout" && stage !== "signin";
+}
 async function requestSecret(jobId, kind) {
 	const response = await send({
 		type: "ACCOUNT_AUTOMATION_SECRET",
@@ -163,6 +206,17 @@ async function requestSecret(jobId, kind) {
 		return null;
 	}
 	return response.value ?? null;
+}
+async function leaveLogout(jobId) {
+	leavingLogout = true;
+	const left = await send({
+		type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT",
+		jobId
+	});
+	if (!left.ok) {
+		leavingLogout = false;
+		throw new Error(left.error ?? "Could not leave Amazon’s logout page.");
+	}
 }
 async function run() {
 	const response = await send({ type: "ACCOUNT_AUTOMATION_GET_JOB" });
@@ -208,17 +262,44 @@ async function run() {
 				"input[autocomplete=\"one-time-code\"]",
 				"input[inputmode=\"numeric\"]"
 			]));
+			const leaveReason = !leavingLogout && onLogoutIntercept ? "intercept" : !leavingLogout && document.readyState === "complete" ? "ready-complete" : document.readyState !== "complete" ? "wait-load" : "poll";
+			// #region agent log
+			{
+				const hits = shellSelectorHits();
+				fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Debug-Session-Id": "f8f494"
+					},
+					body: JSON.stringify({
+						sessionId: "f8f494",
+						runId: "pre-fix",
+						hypothesisId: "C",
+						location: "accountAutomation.ts:logout-branch",
+						message: "logout stage tick",
+						data: {
+							stage: job.stage,
+							leavingLogout,
+							leaveReason,
+							pathname: location.pathname,
+							readyState: document.readyState,
+							onLogoutIntercept,
+							authenticatedUi: hasAuthenticatedSellerUi(),
+							modernHits: hits.modernHits,
+							classicHits: hits.classicHits
+						},
+						timestamp: Date.now()
+					})
+				}).catch(() => {});
+			}
+			// #endregion
 			if (!leavingLogout && onLogoutIntercept) {
-				leavingLogout = true;
-				const left = await send({
-					type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT",
-					jobId: job.id
-				});
-				if (!left.ok) {
-					leavingLogout = false;
-					throw new Error(left.error ?? "Could not leave Amazon’s logout page.");
-				}
-				return;
+				await leaveLogout(job.id);
+			} else if (!leavingLogout && document.readyState === "complete") {
+				await leaveLogout(job.id);
+			} else if (document.readyState !== "complete") {
+				window.addEventListener("load", () => void run(), { once: true });
 			}
 			window.setTimeout(() => void run(), 1e3);
 			return;
@@ -278,14 +359,47 @@ async function run() {
 			markStageSubmitted("otp");
 			return;
 		}
-		if (isReadyForStoreNavigation()) {
-			setWorkflowStatus("Signed in. Opening the selected store…");
-			const completed = await send({
-				type: "ACCOUNT_AUTOMATION_COMPLETE",
-				jobId: job.id
-			});
-			if (!completed.ok) throw new Error(completed.error);
-			return;
+		{
+			const ready = isReadyForStoreNavigation();
+			const allowed = shouldCompleteAuthenticatedSession(job.stage);
+			// #region agent log
+			{
+				const hits = shellSelectorHits();
+				fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Debug-Session-Id": "f8f494"
+					},
+					body: JSON.stringify({
+						sessionId: "f8f494",
+						runId: "pre-fix",
+						hypothesisId: "A",
+						location: "accountAutomation.ts:complete-gate",
+						message: "complete gate evaluated",
+						data: {
+							stage: job.stage,
+							pathname: location.pathname,
+							ready,
+							allowed,
+							willComplete: ready && allowed,
+							modernHits: hits.modernHits,
+							classicHits: hits.classicHits
+						},
+						timestamp: Date.now()
+					})
+				}).catch(() => {});
+			}
+			// #endregion
+			if (ready && allowed) {
+				setWorkflowStatus("Signed in. Opening the selected store…");
+				const completed = await send({
+					type: "ACCOUNT_AUTOMATION_COMPLETE",
+					jobId: job.id
+				});
+				if (!completed.ok) throw new Error(completed.error);
+				return;
+			}
 		}
 		if (Date.now() - documentStartedAt > 9e4) throw new Error("Amazon’s login page did not match a supported step.");
 		setWorkflowStatus("Waiting for Amazon’s next login step…");
@@ -299,3 +413,5 @@ async function run() {
 	}
 }
 void run();
+
+})();

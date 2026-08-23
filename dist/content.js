@@ -1,43 +1,82 @@
+(function () {
 function isPaletteShortcut(event) {
 	const isSlash = event.code === "Slash" || event.key === "/";
 	const hasPrimaryModifier = event.metaKey || event.ctrlKey;
 	return isSlash && hasPrimaryModifier && !event.altKey && !event.shiftKey;
 }
 
+const MODERN_SHELL_SELECTORS = [
+	"#sc-navtab-home",
+	"#sc-top-nav-root",
+	"[data-testid=\"global-nav\"]",
+	"#sc-navbar-container",
+	"#ngstrim-nav-menu"
+];
+const CLASSIC_SHELL_SELECTORS = [
+	"#sc-search-field",
+	"a.logo-container[href=\"/home\"]",
+	"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
+];
 function visible(element) {
 	return element instanceof HTMLElement && element.offsetParent !== null;
 }
+function shellSelectorHits(root = document) {
+	return {
+		modernHits: MODERN_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector))),
+		classicHits: CLASSIC_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector)))
+	};
+}
 function hasAuthenticatedSellerUi(root = document) {
-	const modernShell = [
-		"#sc-navtab-home",
-		"#sc-top-nav-root",
-		"[data-testid=\"global-nav\"]"
-	].some((selector) => visible(root.querySelector(selector)));
-	if (modernShell) return true;
-	const classicShellMarkers = [
-		"#sc-search-field",
-		"a.logo-container[href=\"/home\"]",
-		"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
-	].filter((selector) => visible(root.querySelector(selector)));
-	return classicShellMarkers.length >= 2;
+	const { modernHits, classicHits } = shellSelectorHits(root);
+	if (modernHits.length > 0) return true;
+	return classicHits.length >= 2;
 }
 function sellerCentralSessionStatus(pathname = location.pathname, root = document) {
+	let result;
 	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
-		return {
+		result = {
 			loggedInToStore: false,
 			settled: true
 		};
-	}
-	if (hasAuthenticatedSellerUi(root)) {
-		return {
+	} else if (hasAuthenticatedSellerUi(root)) {
+		result = {
 			loggedInToStore: true,
 			settled: true
 		};
+	} else {
+		result = {
+			loggedInToStore: false,
+			settled: false
+		};
 	}
-	return {
-		loggedInToStore: false,
-		settled: false
-	};
+	// #region agent log
+	{
+		const hits = shellSelectorHits(root);
+		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Debug-Session-Id": "f8f494"
+			},
+			body: JSON.stringify({
+				sessionId: "f8f494",
+				runId: "pre-fix",
+				hypothesisId: "A",
+				location: "sellerCentralSession.ts:sellerCentralSessionStatus",
+				message: "session status evaluated",
+				data: {
+					hostname: typeof location !== "undefined" ? location.hostname : "",
+					pathname,
+					...result,
+					modernHits: hits.modernHits,
+					classicHits: hits.classicHits
+				},
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+	}
+	// #endregion
+	return result;
 }
 
 const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql";
@@ -1012,6 +1051,28 @@ function onKeyDown(event) {
 	if (!isPaletteShortcut(event)) return;
 	event.preventDefault();
 	event.stopImmediatePropagation();
+	// #region agent log
+	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Debug-Session-Id": "f8f494"
+		},
+		body: JSON.stringify({
+			sessionId: "f8f494",
+			runId: "pre-fix",
+			hypothesisId: "E",
+			location: "content.tsx:onKeyDown",
+			message: "palette shortcut",
+			data: {
+				hostname: location.hostname,
+				pathname: location.pathname.slice(0, 120),
+				isSellerCentral: location.hostname === "sellercentral.amazon.com"
+			},
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+	// #endregion
 	window.removeEventListener("keydown", onKeyDown, true);
 	void loadPalette().then((palette) => {
 		palette.setOpen(true);
@@ -1082,3 +1143,5 @@ if (typeof window !== "undefined" && window.top === window) {
 	window.addEventListener("keydown", onKeyDown, true);
 	if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.addListener(handleContentMessage);
 }
+
+})();

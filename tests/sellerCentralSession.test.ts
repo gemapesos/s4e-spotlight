@@ -60,4 +60,18 @@ describe("sellerCentralSessionStatus", () => {
     expect(hasAuthenticatedSellerUi()).toBe(false)
     expect(sellerCentralSessionStatus("/home")).toEqual({ loggedInToStore: false, settled: false })
   })
+
+  it("treats the 2026 ngstrim store shell as a signed-in store", () => {
+    document.body.innerHTML = '<div id="sc-navbar-container"><div id="ngstrim-nav-menu"></div></div>'
+    makeVisible()
+
+    expect(hasAuthenticatedSellerUi()).toBe(true)
+    expect(sellerCentralSessionStatus("/myinventory/inventory")).toEqual({ loggedInToStore: true, settled: true })
+  })
+
+  it("rejects sign-in pages even with the 2026 navbar container", () => {
+    document.body.innerHTML = '<div id="sc-navbar-container"></div>'
+
+    expect(sellerCentralSessionStatus("/ap/signin")).toEqual({ loggedInToStore: false, settled: true })
+  })
 })

@@ -1,4 +1,4 @@
-import { hasAuthenticatedSellerUi, visible } from "./lib/sellerCentralSession"
+import { hasAuthenticatedSellerUi, shellSelectorHits, visible } from "./lib/sellerCentralSession"
 
 const STATUS_ID = "s4e-account-switch-status"
 const documentStartedAt = Date.now()
@@ -139,6 +139,11 @@ function isReadyForStoreNavigation(): boolean {
   return location.pathname.startsWith("/account-switcher/")
 }
 
+function shouldCompleteAuthenticatedSession(stage: string): boolean {
+  if (location.pathname.startsWith("/account-switcher/")) return true
+  return stage !== "logout" && stage !== "signin"
+}
+
 async function requestSecret(jobId: string, kind: "email" | "password" | "otp"): Promise<string | null> {
   const response = await send({ type: "ACCOUNT_AUTOMATION_SECRET", jobId, kind })
   if (!response.ok) throw new Error(response.error)
@@ -148,6 +153,15 @@ async function requestSecret(jobId: string, kind: "email" | "password" | "otp"):
     return null
   }
   return response.value ?? null
+}
+
+async function leaveLogout(jobId: string): Promise<void> {
+  leavingLogout = true
+  const left = await send({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId })
+  if (!left.ok) {
+    leavingLogout = false
+    throw new Error(left.error ?? "Could not leave Amazon’s logout page.")
+  }
 }
 
 async function run(): Promise<void> {
@@ -181,14 +195,47 @@ async function run(): Promise<void> {
         Boolean(input(["#ap_email", 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]'])) ||
         Boolean(input(["#ap_password", 'input[name="password"]', 'input[type="password"]'])) ||
         Boolean(input(["#auth-mfa-otpcode", 'input[name="otpCode"]', 'input[autocomplete="one-time-code"]', 'input[inputmode="numeric"]']))
+      const leaveReason = !leavingLogout && onLogoutIntercept
+        ? "intercept"
+        : !leavingLogout && document.readyState === "complete"
+          ? "ready-complete"
+          : document.readyState !== "complete"
+            ? "wait-load"
+            : "poll"
+      // #region agent log
+      {
+        const hits = shellSelectorHits()
+        fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
+          body: JSON.stringify({
+            sessionId: "f8f494",
+            runId: "pre-fix",
+            hypothesisId: "C",
+            location: "accountAutomation.ts:logout-branch",
+            message: "logout stage tick",
+            data: {
+              stage: job.stage,
+              leavingLogout,
+              leaveReason,
+              pathname: location.pathname,
+              readyState: document.readyState,
+              onLogoutIntercept,
+              authenticatedUi: hasAuthenticatedSellerUi(),
+              modernHits: hits.modernHits,
+              classicHits: hits.classicHits,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {})
+      }
+      // #endregion
       if (!leavingLogout && onLogoutIntercept) {
-        leavingLogout = true
-        const left = await send({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id })
-        if (!left.ok) {
-          leavingLogout = false
-          throw new Error(left.error ?? "Could not leave Amazon’s logout page.")
-        }
-        return
+        await leaveLogout(job.id)
+      } else if (!leavingLogout && document.readyState === "complete") {
+        await leaveLogout(job.id)
+      } else if (document.readyState !== "complete") {
+        window.addEventListener("load", () => void run(), { once: true })
       }
       window.setTimeout(() => void run(), 1000)
       return
@@ -230,11 +277,41 @@ async function run(): Promise<void> {
       return
     }
 
-    if (isReadyForStoreNavigation()) {
-      setWorkflowStatus("Signed in. Opening the selected store…")
-      const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
-      if (!completed.ok) throw new Error(completed.error)
-      return
+    {
+      const ready = isReadyForStoreNavigation()
+      const allowed = shouldCompleteAuthenticatedSession(job.stage)
+      // #region agent log
+      {
+        const hits = shellSelectorHits()
+        fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
+          body: JSON.stringify({
+            sessionId: "f8f494",
+            runId: "pre-fix",
+            hypothesisId: "A",
+            location: "accountAutomation.ts:complete-gate",
+            message: "complete gate evaluated",
+            data: {
+              stage: job.stage,
+              pathname: location.pathname,
+              ready,
+              allowed,
+              willComplete: ready && allowed,
+              modernHits: hits.modernHits,
+              classicHits: hits.classicHits,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {})
+      }
+      // #endregion
+      if (ready && allowed) {
+        setWorkflowStatus("Signed in. Opening the selected store…")
+        const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
+        if (!completed.ok) throw new Error(completed.error)
+        return
+      }
     }
 
     if (Date.now() - documentStartedAt > 90_000) throw new Error("Amazon’s login page did not match a supported step.")

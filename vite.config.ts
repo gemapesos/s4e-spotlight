@@ -12,6 +12,10 @@ function stripModuleSyntax(source: string): string {
   return source.replace(/^export /gm, "").replace(/^import .+;\s*/gm, "")
 }
 
+function asClassicContentScript(source: string): string {
+  return `(function () {\n${source}\n})();\n`
+}
+
 function extensionScriptsPlugin(): Plugin {
   const backgroundPath = resolve(
     fileURLToPath(new URL(".", import.meta.url)),
@@ -95,8 +99,12 @@ function extensionScriptsPlugin(): Plugin {
       ])
       const passkeyGuardBundle = `${stripModuleSyntax(passkeyGuardCoreResult.code)}\n${stripModuleSyntax(passkeyGuardResult.code)}`
       const sellerCentralSessionBoot = stripModuleSyntax(sellerCentralSessionResult.code)
-      const accountAutomationBundle = `${sellerCentralSessionBoot}\n${stripModuleSyntax(accountAutomationResult.code)}`
-      const contentBoot = `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(unfulfillableResult.code)}\n${stripModuleSyntax(feedbackResult.code)}\n${stripModuleSyntax(strandedResult.code)}\n${stripModuleSyntax(contentResult.code)}`
+      const accountAutomationBundle = asClassicContentScript(
+        `${sellerCentralSessionBoot}\n${stripModuleSyntax(accountAutomationResult.code)}`,
+      )
+      const contentBoot = asClassicContentScript(
+        `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(unfulfillableResult.code)}\n${stripModuleSyntax(feedbackResult.code)}\n${stripModuleSyntax(strandedResult.code)}\n${stripModuleSyntax(contentResult.code)}`,
+      )
 
       this.emitFile({
         type: "asset",
@@ -119,6 +127,11 @@ function extensionScriptsPlugin(): Plugin {
         } catch (error) {
           this.error(`${fileName} must be valid classic JavaScript because Chrome loads it as a manifest content script: ${error instanceof Error ? error.message : String(error)}`)
         }
+      }
+      try {
+        new Script(`${contentBoot}\n${accountAutomationBundle}`, { filename: "content+account-automation.js" })
+      } catch (error) {
+        this.error(`content.js and account-automation.js must share a page without clashing: ${error instanceof Error ? error.message : String(error)}`)
       }
 
       this.emitFile({ type: "asset", fileName: "account-automation.js", source: accountAutomationBundle })

@@ -41,6 +41,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
   document.body.replaceChildren()
+  Object.defineProperty(document, "readyState", { configurable: true, get: () => "complete" })
 })
 
 describe("Seller Central account automation", () => {
@@ -156,11 +157,11 @@ describe("Seller Central account automation", () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1" })
   })
 
-  it("completes only when signed-in Seller Central UI is present", async () => {
+  it("completes only after login when signed-in Seller Central UI is present", async () => {
     document.body.innerHTML = '<nav id="sc-top-nav-root"><a href="/home">Home</a></nav>'
     makeVisible()
     const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
-      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: { id: "job-1", stage: "password" } }
       return { ok: true }
     })
     vi.stubGlobal("chrome", { runtime: { sendMessage } })
@@ -179,7 +180,7 @@ describe("Seller Central account automation", () => {
     `
     makeVisible()
     const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
-      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: { id: "job-1", stage: "password" } }
       return { ok: true }
     })
     vi.stubGlobal("chrome", { runtime: { sendMessage } })
@@ -203,6 +204,57 @@ describe("Seller Central account automation", () => {
 
     expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Signed in")
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: "job-1" }))
+  })
+
+  it("does not treat the current store shell as a finished login during sign-in", async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = '<div id="sc-navbar-container"><div id="ngstrim-nav-menu"></div></div>'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_COMPLETE" }))
+    expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Waiting for Amazon’s next login step")
+  })
+
+  it("leaves a completed logout homepage for canonical sign-in", async () => {
+    document.body.innerHTML = "<main>Seller Central</main>"
+    vi.spyOn(window, "setTimeout").mockImplementation(() => undefined as never)
+    const logoutJob = { id: "job-1", stage: "logout" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: logoutJob }
+      if (message.type === "ACCOUNT_AUTOMATION_LEAVE_LOGOUT") return { ok: true }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+
+    expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Signing out")
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: "job-1" }))
+  })
+
+  it("waits for a loading logout homepage before leaving", async () => {
+    Object.defineProperty(document, "readyState", { configurable: true, get: () => "interactive" })
+    document.body.innerHTML = "<main>Seller Central</main>"
+    vi.spyOn(window, "setTimeout").mockImplementation(() => undefined as never)
+    const logoutJob = { id: "job-1", stage: "logout" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: logoutJob }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+
+    expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Signing out")
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT" }))
   })
 
   it("does not authenticate from only one classic-shell marker", async () => {
