@@ -310,6 +310,45 @@ describe("content-script mount", () => {
     }
   })
 
+  it("still downloads the report when an individual source fails", async () => {
+    const sendMessage = vi.fn(async (message: { type?: string }) => {
+      if (message.type === "REPORTS_FETCH_UNFULFILLABLE") {
+        return { ok: false, error: "Couldn’t load unfulfillable inventory." }
+      }
+      if (message.type === "REPORTS_FETCH_FEEDBACK") {
+        return { ok: true, feedbacks: [{ feedbackId: "fb-1", orderId: "112-1", numericRating: 1 }] }
+      }
+      if (message.type === "REPORTS_FETCH_STRANDED") {
+        return { ok: true, listings: [{ SKU: "ABC-123" }] }
+      }
+      return { ok: true, currentStore: { name: "JMG Outdoors" } }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    const createObjectURL = vi.fn().mockReturnValue("blob:report")
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
+    const clicked: { download?: string } = {}
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.download = this.download
+    })
+    const onProgress = vi.fn()
+
+    try {
+      await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors", onProgress)
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "error" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
+      expect(createObjectURL).toHaveBeenCalledOnce()
+    } finally {
+      click.mockRestore()
+    }
+  })
+
   it("names the report Unknown when no current store is set", async () => {
     const sendMessage = vi.fn(async (message: { type?: string }) => {
       if (message.type === "REPORTS_FETCH_UNFULFILLABLE") return { ok: true, listings: [] }

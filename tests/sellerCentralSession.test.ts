@@ -50,7 +50,7 @@ describe("sellerCentralSessionStatus", () => {
   it("is unsettled while Seller Central is still loading", () => {
     document.body.innerHTML = "<main>Loading</main>"
 
-    expect(sellerCentralSessionStatus("/home")).toEqual({ loggedInToStore: false, settled: false })
+    expect(sellerCentralSessionStatus("/home", document, "loading")).toEqual({ loggedInToStore: false, settled: false })
   })
 
   it("does not treat a single classic-shell marker as authenticated", () => {
@@ -58,7 +58,20 @@ describe("sellerCentralSessionStatus", () => {
     makeVisible()
 
     expect(hasAuthenticatedSellerUi()).toBe(false)
-    expect(sellerCentralSessionStatus("/home")).toEqual({ loggedInToStore: false, settled: false })
+    expect(sellerCentralSessionStatus("/home", document, "loading")).toEqual({ loggedInToStore: false, settled: false })
+  })
+
+  it("settles as logged out once the document is complete without a store shell", () => {
+    document.body.innerHTML = "<main>Signed out</main>"
+
+    expect(sellerCentralSessionStatus("/", document, "complete")).toEqual({ loggedInToStore: false, settled: true })
+  })
+
+  it("settles as logged out when a login form is visible", () => {
+    document.body.innerHTML = '<input id="ap_email" type="email" value="">'
+    makeVisible()
+
+    expect(sellerCentralSessionStatus("/home", document, "loading")).toEqual({ loggedInToStore: false, settled: true })
   })
 
   it("treats the 2026 ngstrim store shell as a signed-in store", () => {

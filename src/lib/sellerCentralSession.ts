@@ -12,6 +12,20 @@ const CLASSIC_SHELL_SELECTORS = [
   'a[aria-label="Messages"][href^="/messaging/"]',
 ] as const
 
+const LOGIN_FORM_SELECTORS = [
+  "#ap_email",
+  'input[name="email"]',
+  'input[type="email"]',
+  'input[autocomplete="username"]',
+  "#ap_password",
+  'input[name="password"]',
+  'input[type="password"]',
+  "#auth-mfa-otpcode",
+  'input[name="otpCode"]',
+  'input[autocomplete="one-time-code"]',
+  'input[inputmode="numeric"]',
+] as const
+
 export function visible(element: Element | null): element is HTMLElement {
   return element instanceof HTMLElement && element.offsetParent !== null
 }
@@ -32,15 +46,25 @@ export function hasAuthenticatedSellerUi(root: ParentNode = document): boolean {
   return classicHits.length >= 2
 }
 
+export function hasSellerCentralLoginForm(root: ParentNode = document): boolean {
+  return LOGIN_FORM_SELECTORS.some((selector) => visible(root.querySelector(selector)))
+}
+
 export function sellerCentralSessionStatus(
   pathname = location.pathname,
   root: ParentNode = document,
+  readyState: DocumentReadyState = typeof document !== "undefined" ? document.readyState : "loading",
 ): { loggedInToStore: boolean; settled: boolean } {
   let result: { loggedInToStore: boolean; settled: boolean }
   if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
     result = { loggedInToStore: false, settled: true }
   } else if (hasAuthenticatedSellerUi(root)) {
     result = { loggedInToStore: true, settled: true }
+  } else if (hasSellerCentralLoginForm(root)) {
+    result = { loggedInToStore: false, settled: true }
+  } else if (readyState === "complete") {
+    // Fully loaded page with no store shell and no login form → logged out (avoid 15s probe wait).
+    result = { loggedInToStore: false, settled: true }
   } else {
     result = { loggedInToStore: false, settled: false }
   }

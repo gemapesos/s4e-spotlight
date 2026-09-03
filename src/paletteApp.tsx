@@ -309,6 +309,7 @@ function dispatchReportProgress(event: ReportProgressEvent): void {
 function trackReportSource<T>(
   source: ReportSource,
   promise: Promise<T>,
+  fallback: T,
   onProgress?: (event: ReportProgressEvent) => void,
 ): Promise<T> {
   return promise.then(
@@ -316,9 +317,9 @@ function trackReportSource<T>(
       onProgress?.({ source, status: "complete" })
       return value
     },
-    (error: unknown) => {
+    () => {
       onProgress?.({ source, status: "error" })
-      throw error
+      return fallback
     },
   )
 }
@@ -339,9 +340,9 @@ export async function generateReports(
     onProgress?.({ source: "feedback", status: "active" })
     onProgress?.({ source: "stranded", status: "active" })
     const [listings, feedbacks, strandedListings] = await Promise.all([
-      trackReportSource("unfulfillable", fetchUnfulfillableListingsFromBackground(), onProgress),
-      trackReportSource("feedback", fetchFeedbacksFromBackground(), onProgress),
-      trackReportSource("stranded", fetchStrandedListingsFromBackground(), onProgress),
+      trackReportSource("unfulfillable", fetchUnfulfillableListingsFromBackground(), [], onProgress),
+      trackReportSource("feedback", fetchFeedbacksFromBackground(), [], onProgress),
+      trackReportSource("stranded", fetchStrandedListingsFromBackground(), [], onProgress),
     ])
     downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings)), reportFileName(storeName, now), targetDocument)
   } finally {

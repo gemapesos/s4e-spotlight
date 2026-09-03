@@ -367,25 +367,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export async function ensureSellerCentralTab(senderTab?: chrome.tabs.Tab): Promise<{ tabId: number; focused?: true; opened?: true }> {
+export async function ensureSellerCentralTab(
+  senderTab?: chrome.tabs.Tab,
+  options: { focus?: boolean } = {},
+): Promise<{ tabId: number; focused?: true; opened?: true }> {
   const previous = sellerCentralTabLock
   let release!: () => void
   sellerCentralTabLock = new Promise<void>((resolve) => { release = resolve })
   await previous
   try {
-    return await ensureSellerCentralTabNow(senderTab)
+    return await ensureSellerCentralTabNow(senderTab, options)
   } finally {
     release()
   }
 }
 
-async function ensureSellerCentralTabNow(senderTab?: chrome.tabs.Tab): Promise<{ tabId: number; focused?: true; opened?: true }> {
+async function ensureSellerCentralTabNow(
+  senderTab?: chrome.tabs.Tab,
+  options: { focus?: boolean } = {},
+): Promise<{ tabId: number; focused?: true; opened?: true }> {
+  const focus = options.focus !== false
   const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
   const tab = pickSellerCentralTab(tabs, senderTab?.windowId)
   if (tab?.id !== undefined) {
-    await chrome.tabs.update(tab.id, { active: true })
-    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
-    return { tabId: tab.id, focused: true }
+    if (focus) {
+      await chrome.tabs.update(tab.id, { active: true })
+      if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+      return { tabId: tab.id, focused: true }
+    }
+    return { tabId: tab.id }
   }
   const created = await chrome.tabs.create({
     active: true,
@@ -472,7 +482,7 @@ export async function relayReportProgress(message: unknown): Promise<{ ok: true 
 
 export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
   rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab)
+  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
   await waitForTabComplete(tabId)
   return sendUnfulfillableFetch(tabId)
 }
@@ -503,7 +513,7 @@ async function sendFeedbackFetch(tabId: number): Promise<{ ok: true; feedbacks: 
 
 export async function fetchFeedbackReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; feedbacks: unknown[] }> {
   rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab)
+  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
   await waitForTabComplete(tabId)
   return sendFeedbackFetch(tabId)
 }
@@ -534,7 +544,7 @@ async function sendStrandedFetch(tabId: number): Promise<{ ok: true; listings: u
 
 export async function fetchStrandedReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
   rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab)
+  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
   await waitForTabComplete(tabId)
   return sendStrandedFetch(tabId)
 }
@@ -564,7 +574,7 @@ export async function probeSellerCentralSession(tabId: number): Promise<boolean>
 
 export async function prepareReports(senderTab?: chrome.tabs.Tab): Promise<ReportsPrepareResult> {
   const currentStoreId = await getCurrentStoreId()
-  const { tabId } = await ensureSellerCentralTab(senderTab)
+  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
   await waitForTabComplete(tabId)
   const tab = await chrome.tabs.get(tabId)
   const loggedInToStore = await probeSellerCentralSession(tabId)
@@ -592,6 +602,9 @@ export async function prepareReports(senderTab?: chrome.tabs.Tab): Promise<Repor
   // #endregion
   if (loggedInToStore) return { ok: true, loggedInToStore: true, sellerCentralTabId: tabId }
   if (senderTab?.id === tabId) return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId }
+
+  await chrome.tabs.update(tabId, { active: true })
+  if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
 
   const opened = await chrome.tabs.sendMessage(tabId, { type: "OPEN_PALETTE", mode: "report-login" }) as { ok?: boolean; error?: string }
   if (!opened?.ok) throw new Error(opened?.error ?? "Couldn’t open the command palette on Seller Central.")

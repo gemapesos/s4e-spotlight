@@ -103,7 +103,7 @@ async function createBackgroundTabs(ids, senderTab, buildUrl, createTab, removeT
 	if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`);
 	return createTabsInParallel(ids.map((id) => ({
 		id,
-		active: false,
+		active: ids.length === 1,
 		url: buildUrl(id)
 	})), senderTab, createTab, removeTabs);
 }
@@ -286,7 +286,7 @@ const SESSION_PROBE_INTERVAL_MS = 250;
 function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
-export async function ensureSellerCentralTab(senderTab) {
+export async function ensureSellerCentralTab(senderTab, options = {}) {
 	const previous = sellerCentralTabLock;
 	let release;
 	sellerCentralTabLock = new Promise((resolve) => {
@@ -294,21 +294,25 @@ export async function ensureSellerCentralTab(senderTab) {
 	});
 	await previous;
 	try {
-		return await ensureSellerCentralTabNow(senderTab);
+		return await ensureSellerCentralTabNow(senderTab, options);
 	} finally {
 		release();
 	}
 }
-async function ensureSellerCentralTabNow(senderTab) {
+async function ensureSellerCentralTabNow(senderTab, options = {}) {
+	const focus = options.focus !== false;
 	const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN });
 	const tab = pickSellerCentralTab(tabs, senderTab?.windowId);
 	if (tab?.id !== undefined) {
-		await chrome.tabs.update(tab.id, { active: true });
-		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
-		return {
-			tabId: tab.id,
-			focused: true
-		};
+		if (focus) {
+			await chrome.tabs.update(tab.id, { active: true });
+			if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+			return {
+				tabId: tab.id,
+				focused: true
+			};
+		}
+		return { tabId: tab.id };
 	}
 	const created = await chrome.tabs.create({
 		active: true,
@@ -385,7 +389,7 @@ export async function relayReportProgress(message) {
 }
 export async function fetchUnfulfillableReport(senderTab) {
 	rememberReportProgressTab(senderTab?.id);
-	const { tabId } = await ensureSellerCentralTab(senderTab);
+	const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false });
 	await waitForTabComplete(tabId);
 	return sendUnfulfillableFetch(tabId);
 }
@@ -413,7 +417,7 @@ async function sendFeedbackFetch(tabId) {
 }
 export async function fetchFeedbackReport(senderTab) {
 	rememberReportProgressTab(senderTab?.id);
-	const { tabId } = await ensureSellerCentralTab(senderTab);
+	const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false });
 	await waitForTabComplete(tabId);
 	return sendFeedbackFetch(tabId);
 }
@@ -441,7 +445,7 @@ async function sendStrandedFetch(tabId) {
 }
 export async function fetchStrandedReport(senderTab) {
 	rememberReportProgressTab(senderTab?.id);
-	const { tabId } = await ensureSellerCentralTab(senderTab);
+	const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false });
 	await waitForTabComplete(tabId);
 	return sendStrandedFetch(tabId);
 }
@@ -466,7 +470,7 @@ export async function probeSellerCentralSession(tabId) {
 }
 export async function prepareReports(senderTab) {
 	const currentStoreId = await getCurrentStoreId();
-	const { tabId } = await ensureSellerCentralTab(senderTab);
+	const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false });
 	await waitForTabComplete(tabId);
 	const tab = await chrome.tabs.get(tabId);
 	const loggedInToStore = await probeSellerCentralSession(tabId);
@@ -505,6 +509,8 @@ export async function prepareReports(senderTab) {
 		loggedInToStore: false,
 		sellerCentralTabId: tabId
 	};
+	await chrome.tabs.update(tabId, { active: true });
+	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
 	const opened = await chrome.tabs.sendMessage(tabId, {
 		type: "OPEN_PALETTE",
 		mode: "report-login"
@@ -526,13 +532,50 @@ async function openStoreUrl(storeUrl, senderTab) {
 			url: storeUrl
 		});
 		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+		void restorePageFocus(tab.id);
+		void closeDuplicateSellerCentralTabs(tab.id);
 		return;
 	}
-	await chrome.tabs.create({
+	const created = await chrome.tabs.create({
 		active: true,
 		url: storeUrl,
 		...senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }
 	});
+	if (created.id !== undefined) {
+		void restorePageFocus(created.id);
+		void closeDuplicateSellerCentralTabs(created.id);
+	}
+}
+async function closeDuplicateSellerCentralTabs(keepTabId) {
+	const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN });
+	const toClose = tabs.map((tab) => tab.id).filter((id) => id !== undefined && id !== keepTabId);
+	if (toClose.length === 0) return;
+	try {
+		await chrome.tabs.remove(toClose);
+	} catch {}
+}
+/** Show a background-created tab once it renders a real page, so focus lands in the page. */
+export async function activateLoadedTab(tabId) {
+	try {
+		await waitForTabComplete(tabId);
+	} catch {}
+	try {
+		const tab = await chrome.tabs.get(tabId);
+		await chrome.tabs.update(tabId, { active: true });
+		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+	} catch {}
+}
+/** Yank keyboard focus out of the omnibox after extension-driven navigations. */
+export async function restorePageFocus(tabId) {
+	try {
+		if (typeof chrome.tabs?.get !== "function" || typeof chrome.tabs?.onUpdated?.addListener !== "function") {
+			return;
+		}
+		await waitForTabComplete(tabId);
+		const tab = await chrome.tabs.get(tabId);
+		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+		await chrome.tabs.update(tabId, { active: true });
+	} catch {}
 }
 async function getActiveJob() {
 	const job = (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY];
@@ -715,28 +758,57 @@ export async function handleAccountsMessage(message, sender) {
 					return { ok: true };
 				}
 				let tabId;
+				let ownsTab = false;
 				try {
+					const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN });
+					const existing = pickSellerCentralTab(tabs, sender.tab?.windowId);
+					if (existing?.id !== undefined) {
+						tabId = existing.id;
+						ownsTab = false;
+						const job = {
+							id: crypto.randomUUID(),
+							tabId: existing.id,
+							storeId: store.id,
+							stage: "logout",
+							startedAt: Date.now(),
+							ownsTab: false
+						};
+						await setActiveJob(job);
+						await chrome.tabs.update(existing.id, { url: LOGOUT_URL });
+						void activateLoadedTab(existing.id);
+						return {
+							ok: true,
+							jobId: job.id
+						};
+					}
+					// Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it
+					// focused across the whole switch, so create it in the background and activate it
+					// once it is showing a real page.
 					const tab = await chrome.tabs.create({
-						active: true,
-						url: "about:blank"
+						active: false,
+						url: "about:blank",
+						...sender.tab?.windowId === undefined ? {} : { windowId: sender.tab.windowId }
 					});
 					if (tab.id === undefined) throw new Error("Chrome did not create the login tab.");
 					tabId = tab.id;
+					ownsTab = true;
 					const job = {
 						id: crypto.randomUUID(),
 						tabId: tab.id,
 						storeId: store.id,
 						stage: "logout",
-						startedAt: Date.now()
+						startedAt: Date.now(),
+						ownsTab: true
 					};
 					await setActiveJob(job);
 					await chrome.tabs.update(tab.id, { url: LOGOUT_URL });
+					void activateLoadedTab(tab.id);
 					return {
 						ok: true,
 						jobId: job.id
 					};
 				} catch (error) {
-					if (tabId !== undefined) try {
+					if (ownsTab && tabId !== undefined) try {
 						await chrome.tabs.remove(tabId);
 					} catch {}
 					await setActiveJob(undefined);
@@ -758,7 +830,7 @@ export async function handleAccountsMessage(message, sender) {
 			const job = await getActiveJob();
 			if (!job) return { ok: true };
 			await setActiveJob(undefined);
-			if (job.tabId >= 0) try {
+			if (job.ownsTab && job.tabId >= 0) try {
 				await chrome.tabs.remove(job.tabId);
 			} catch {}
 			return { ok: true };
@@ -893,9 +965,14 @@ export async function handleAccountsMessage(message, sender) {
 			// #endregion
 			job.stage = "authenticated";
 			await setActiveJob(job);
-			await chrome.tabs.update(job.tabId, { url: store.storeUrl });
+			await chrome.tabs.update(job.tabId, {
+				active: true,
+				url: store.storeUrl
+			});
 			await setCurrentStoreId(store.id);
 			await setActiveJob(undefined);
+			void restorePageFocus(job.tabId);
+			void closeDuplicateSellerCentralTabs(job.tabId);
 			return { ok: true };
 		}
 		case "ACCOUNT_AUTOMATION_ERROR": {

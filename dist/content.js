@@ -17,6 +17,19 @@ const CLASSIC_SHELL_SELECTORS = [
 	"a.logo-container[href=\"/home\"]",
 	"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
 ];
+const LOGIN_FORM_SELECTORS = [
+	"#ap_email",
+	"input[name=\"email\"]",
+	"input[type=\"email\"]",
+	"input[autocomplete=\"username\"]",
+	"#ap_password",
+	"input[name=\"password\"]",
+	"input[type=\"password\"]",
+	"#auth-mfa-otpcode",
+	"input[name=\"otpCode\"]",
+	"input[autocomplete=\"one-time-code\"]",
+	"input[inputmode=\"numeric\"]"
+];
 function visible(element) {
 	return element instanceof HTMLElement && element.offsetParent !== null;
 }
@@ -31,7 +44,10 @@ function hasAuthenticatedSellerUi(root = document) {
 	if (modernHits.length > 0) return true;
 	return classicHits.length >= 2;
 }
-function sellerCentralSessionStatus(pathname = location.pathname, root = document) {
+function hasSellerCentralLoginForm(root = document) {
+	return LOGIN_FORM_SELECTORS.some((selector) => visible(root.querySelector(selector)));
+}
+function sellerCentralSessionStatus(pathname = location.pathname, root = document, readyState = typeof document !== "undefined" ? document.readyState : "loading") {
 	let result;
 	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
 		result = {
@@ -41,6 +57,17 @@ function sellerCentralSessionStatus(pathname = location.pathname, root = documen
 	} else if (hasAuthenticatedSellerUi(root)) {
 		result = {
 			loggedInToStore: true,
+			settled: true
+		};
+	} else if (hasSellerCentralLoginForm(root)) {
+		result = {
+			loggedInToStore: false,
+			settled: true
+		};
+	} else if (readyState === "complete") {
+		// Fully loaded page with no store shell and no login form → logged out (avoid 15s probe wait).
+		result = {
+			loggedInToStore: false,
 			settled: true
 		};
 	} else {
@@ -1048,33 +1075,17 @@ async function loadPalette() {
 	return pending;
 }
 function onKeyDown(event) {
-	if (!isPaletteShortcut(event)) return;
+	handleContentKeyDown(event);
+}
+function handleContentKeyDown(event, load = loadPalette) {
+	if (!isPaletteShortcut(event)) {
+		if (event.metaKey || event.ctrlKey) void load();
+		return;
+	}
 	event.preventDefault();
 	event.stopImmediatePropagation();
-	// #region agent log
-	fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"X-Debug-Session-Id": "f8f494"
-		},
-		body: JSON.stringify({
-			sessionId: "f8f494",
-			runId: "pre-fix",
-			hypothesisId: "E",
-			location: "content.tsx:onKeyDown",
-			message: "palette shortcut",
-			data: {
-				hostname: location.hostname,
-				pathname: location.pathname.slice(0, 120),
-				isSellerCentral: location.hostname === "sellercentral.amazon.com"
-			},
-			timestamp: Date.now()
-		})
-	}).catch(() => {});
-	// #endregion
 	window.removeEventListener("keydown", onKeyDown, true);
-	void loadPalette().then((palette) => {
+	void load().then((palette) => {
 		palette.setOpen(true);
 	}).catch(() => {
 		window.addEventListener("keydown", onKeyDown, true);

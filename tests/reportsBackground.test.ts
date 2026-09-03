@@ -48,7 +48,7 @@ describe("Generate Reports Seller Central preflight", () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
-  it("focuses an existing Seller Central tab and reports a store session", async () => {
+  it("uses an existing Seller Central tab without focusing when a store session is active", async () => {
     query.mockResolvedValue([
       { id: 11, windowId: 2, lastAccessed: 200 } as chrome.tabs.Tab,
       { id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab,
@@ -62,8 +62,8 @@ describe("Generate Reports Seller Central preflight", () => {
       sellerCentralTabId: 22,
     })
     expect(query).toHaveBeenCalledWith({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
-    expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(focusWindow).toHaveBeenCalledWith(4, { focused: true })
+    expect(update).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_SESSION_STATUS" })
     expect(create).not.toHaveBeenCalled()
   })
@@ -109,7 +109,7 @@ describe("Generate Reports Seller Central preflight", () => {
 
   it("opens the palette on Seller Central when launched from another page without a store session", async () => {
     query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
-    get.mockResolvedValue({ id: 22, status: "complete", url: "https://sellercentral.amazon.com/ap/signin" } as chrome.tabs.Tab)
+    get.mockResolvedValue({ id: 22, windowId: 4, status: "complete", url: "https://sellercentral.amazon.com/ap/signin" } as chrome.tabs.Tab)
     sendMessage
       .mockResolvedValueOnce({ ok: true, loggedInToStore: false, settled: true })
       .mockResolvedValueOnce({ ok: true })
@@ -121,6 +121,8 @@ describe("Generate Reports Seller Central preflight", () => {
       sellerCentralTabId: 22,
       openedPromptOnSellerCentral: true,
     })
+    expect(update).toHaveBeenCalledWith(22, { active: true })
+    expect(focusWindow).toHaveBeenCalledWith(4, { focused: true })
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "OPEN_PALETTE", mode: "report-login" })
   })
 })
@@ -167,8 +169,7 @@ describe("Generate Reports unfulfillable fetch", () => {
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
     await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings })
-    expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
+    expect(update).not.toHaveBeenCalled()
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
   })
 
@@ -182,8 +183,7 @@ describe("Generate Reports unfulfillable fetch", () => {
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
     await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings: [] })
-    expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
+    expect(update).not.toHaveBeenCalled()
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
   })
 })
@@ -230,8 +230,7 @@ describe("Generate Reports feedback fetch", () => {
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
     await expect(fetchFeedbackReport(sender)).resolves.toEqual({ ok: true, feedbacks })
-    expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
+    expect(update).not.toHaveBeenCalled()
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_FEEDBACK" })
   })
 })
@@ -278,8 +277,7 @@ describe("Generate Reports stranded fetch", () => {
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
     await expect(fetchStrandedReport(sender)).resolves.toEqual({ ok: true, listings })
-    expect(update).toHaveBeenCalledWith(22, { active: true })
-    expect(update).not.toHaveBeenCalledWith(22, expect.objectContaining({ url: expect.any(String) }))
+    expect(update).not.toHaveBeenCalled()
     expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_STRANDED" })
   })
 })

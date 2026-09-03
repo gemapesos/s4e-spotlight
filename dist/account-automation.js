@@ -11,6 +11,19 @@ const CLASSIC_SHELL_SELECTORS = [
 	"a.logo-container[href=\"/home\"]",
 	"a[aria-label=\"Messages\"][href^=\"/messaging/\"]"
 ];
+const LOGIN_FORM_SELECTORS = [
+	"#ap_email",
+	"input[name=\"email\"]",
+	"input[type=\"email\"]",
+	"input[autocomplete=\"username\"]",
+	"#ap_password",
+	"input[name=\"password\"]",
+	"input[type=\"password\"]",
+	"#auth-mfa-otpcode",
+	"input[name=\"otpCode\"]",
+	"input[autocomplete=\"one-time-code\"]",
+	"input[inputmode=\"numeric\"]"
+];
 function visible(element) {
 	return element instanceof HTMLElement && element.offsetParent !== null;
 }
@@ -25,7 +38,10 @@ function hasAuthenticatedSellerUi(root = document) {
 	if (modernHits.length > 0) return true;
 	return classicHits.length >= 2;
 }
-function sellerCentralSessionStatus(pathname = location.pathname, root = document) {
+function hasSellerCentralLoginForm(root = document) {
+	return LOGIN_FORM_SELECTORS.some((selector) => visible(root.querySelector(selector)));
+}
+function sellerCentralSessionStatus(pathname = location.pathname, root = document, readyState = typeof document !== "undefined" ? document.readyState : "loading") {
 	let result;
 	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
 		result = {
@@ -35,6 +51,17 @@ function sellerCentralSessionStatus(pathname = location.pathname, root = documen
 	} else if (hasAuthenticatedSellerUi(root)) {
 		result = {
 			loggedInToStore: true,
+			settled: true
+		};
+	} else if (hasSellerCentralLoginForm(root)) {
+		result = {
+			loggedInToStore: false,
+			settled: true
+		};
+	} else if (readyState === "complete") {
+		// Fully loaded page with no store shell and no login form → logged out (avoid 15s probe wait).
+		result = {
+			loggedInToStore: false,
 			settled: true
 		};
 	} else {
