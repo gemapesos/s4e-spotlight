@@ -199,6 +199,9 @@ const GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR = `${GET_LISTINGS_V2_PREFIX}
 }`;
 const REMOVAL_STATUS_ELIGIBLE = "Total available for removal";
 const REMOVAL_STATUS_UNKNOWN = "unknown ineligible reason";
+const REMOVAL_STATUS_UNAVAILABLE = "Couldn’t load removal status";
+const UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE = "Some unfulfillable listings could not be loaded. This sheet includes only the listings that were obtainable.";
+const UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE = `Removal status could not be loaded for some SKUs. Those rows are marked “${REMOVAL_STATUS_UNAVAILABLE}”.`;
 const REMOVAL_STATUS_BY_CODE = {
 	InventoryInPendingRequest: "Inventory already scheduled for removal - no further action required",
 	InventoryIsBound: "Inventory temporarily unavailable for removal as a result of an in-progress transaction or other process – please check again in a few days.",
@@ -324,13 +327,24 @@ function unfulfillableSheetRow(listing) {
 		quantity(details?.expired),
 		quantity(details?.damagedByWarehouse),
 		quantity(details?.damagedByDistributor),
-		formatRemovalStatus(listing.removal),
+		listing.removalFetchFailed ? REMOVAL_STATUS_UNAVAILABLE : formatRemovalStatus(listing.removal),
 		cell(listing.listingData?.lastUpdated),
 		cell(listing.imageUrl)
 	];
 }
+function unfulfillableSheetNotes(listings) {
+	const notes = [];
+	if (listings.some((listing) => listing.listingsIncomplete)) notes.push([UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE]);
+	if (listings.some((listing) => listing.removalFetchFailed)) notes.push([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE]);
+	if (notes.length) notes.push([]);
+	return notes;
+}
 function unfulfillableSheetRows(listings) {
-	return [[...UNFULFILLABLE_SHEET_HEADERS], ...listings.map(unfulfillableSheetRow)];
+	return [
+		...unfulfillableSheetNotes(listings),
+		[...UNFULFILLABLE_SHEET_HEADERS],
+		...listings.map(unfulfillableSheetRow)
+	];
 }
 function graphqlMessages(payload) {
 	if (!payload || typeof payload !== "object" || !("errors" in payload)) return [];
@@ -399,7 +413,7 @@ function parseRecoveryInventories(payload) {
 	if (!Array.isArray(lineItems)) throw new Error("Couldn’t load unfulfillable removal status.");
 	return lineItems.filter((item) => Boolean(item && typeof item === "object"));
 }
-function mergeRemovalStatus(listings, lineItems) {
+function mergeRemovalStatus(listings, lineItems, failedPairKeys = new Set()) {
 	const byKey = new Map();
 	for (const item of lineItems) {
 		const merchantSku = item.merchantSku?.trim();
@@ -409,9 +423,17 @@ function mergeRemovalStatus(listings, lineItems) {
 	}
 	return listings.map((listing) => {
 		const pair = listingSkuPair(listing);
+		const key = pair ? skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku) : undefined;
+		if (key && failedPairKeys.has(key)) {
+			return {
+				...listing,
+				removal: [],
+				removalFetchFailed: true
+			};
+		}
 		return {
 			...listing,
-			removal: pair ? byKey.get(skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku)) ?? [] : []
+			removal: key ? byKey.get(key) ?? [] : []
 		};
 	});
 }
@@ -509,8 +531,12 @@ async function postInventoriesBatch(fetchImpl, token, pairs) {
 }
 async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
 	const pairs = listings.map(listingSkuPair).filter((pair) => pair !== undefined);
-	if (pairs.length === 0) return [];
+	if (pairs.length === 0) return {
+		lineItems: [],
+		failedPairKeys: new Set()
+	};
 	const lineItems = [];
+	const failedPairKeys = new Set();
 	let processed = 0;
 	onProgress?.({
 		source: "unfulfillable",
@@ -520,7 +546,11 @@ async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
 		phase: "removal"
 	});
 	for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
-		lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch));
+		try {
+			lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch));
+		} catch {
+			for (const pair of batch) failedPairKeys.add(skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku));
+		}
 		processed += batch.length;
 		onProgress?.({
 			source: "unfulfillable",
@@ -530,7 +560,10 @@ async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
 			phase: "removal"
 		});
 	}
-	return lineItems;
+	return {
+		lineItems,
+		failedPairKeys
+	};
 }
 async function fetchUnfulfillableListings(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
@@ -551,6 +584,8 @@ async function fetchUnfulfillableListings(options = {}) {
 	let includePagination = true;
 	const listings = [];
 	const seenCursors = new Set();
+	let reportedCount = 0;
+	let listingsIncomplete = false;
 	for (let page = 0; page < UNFULFILLABLE_MAX_PAGES; page += 1) {
 		let result;
 		try {
@@ -573,11 +608,15 @@ async function fetchUnfulfillableListings(options = {}) {
 			} else if (willRetryWithoutPagination) {
 				includePagination = false;
 				result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
+			} else if (listings.length > 0) {
+				listingsIncomplete = true;
+				break;
 			} else {
 				throw error;
 			}
 		}
 		listings.push(...result.listings);
+		reportedCount = result.count;
 		onProgress?.({
 			source: "unfulfillable",
 			status: "active",
@@ -585,14 +624,21 @@ async function fetchUnfulfillableListings(options = {}) {
 			total: result.count,
 			phase: "listings"
 		});
-		if (listings.length >= result.count || result.listings.length === 0) break;
-		if (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor) break;
-		if (seenCursors.has(result.cursor)) break;
+		if (listings.length >= result.count) break;
+		const emptyPage = result.listings.length === 0;
+		const canSkipEmptyPage = emptyPage && result.count > listings.length && Boolean(result.cursor) && query !== GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR;
+		if (emptyPage && !canSkipEmptyPage) break;
+		if (!emptyPage && (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor)) break;
+		if (!result.cursor || seenCursors.has(result.cursor)) break;
 		seenCursors.add(result.cursor);
 		cursor = result.cursor;
 	}
-	const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress);
-	const merged = mergeRemovalStatus(listings, lineItems);
+	if (reportedCount > listings.length) listingsIncomplete = true;
+	const { lineItems, failedPairKeys } = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress);
+	const merged = mergeRemovalStatus(listings, lineItems, failedPairKeys).map((listing) => listingsIncomplete ? {
+		...listing,
+		listingsIncomplete: true
+	} : listing);
 	onProgress?.({
 		source: "unfulfillable",
 		status: "complete",

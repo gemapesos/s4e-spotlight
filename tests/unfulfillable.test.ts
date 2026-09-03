@@ -6,10 +6,14 @@ import {
   INVENTORY_MANAGE_URL,
   REMOVAL_STATUS_BY_CODE,
   REMOVAL_STATUS_ELIGIBLE,
+  REMOVAL_STATUS_UNAVAILABLE,
   REMOVAL_STATUS_UNKNOWN,
   UNFULFILLABLE_GQL_URL,
+  UNFULFILLABLE_INVENTORIES_BATCH_SIZE,
   UNFULFILLABLE_INVENTORIES_URL,
+  UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE,
   UNFULFILLABLE_PAGE_SIZE,
+  UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE,
   UNFULFILLABLE_SHEET_HEADERS,
   fetchUnfulfillableListings,
   formatListingStatus,
@@ -90,7 +94,7 @@ function jsonResponse(payload: unknown, status = 200) {
   }
 }
 
-function listingsPayload(listings: UnfulfillableListing[], count = listings.length, cursor?: string | null) {
+function listingsPayload(listings: Array<UnfulfillableListing | null>, count = listings.filter(Boolean).length, cursor?: string | null) {
   return {
     data: {
       listingsV2: {
@@ -99,6 +103,17 @@ function listingsPayload(listings: UnfulfillableListing[], count = listings.leng
         ...(cursor === undefined ? {} : { cursor }),
         debugInfo: null,
       },
+    },
+  }
+}
+
+function listingWithSkus(sku: string, fnSku: string): UnfulfillableListing {
+  return {
+    ...expiredListing,
+    coreListingFields: {
+      ...expiredListing.coreListingFields,
+      sku,
+      fnSku,
     },
   }
 }
@@ -147,6 +162,19 @@ describe("unfulfillable sheet rows", () => {
     ])
   })
 
+  it("notes incomplete listing and removal fetches on the sheet", () => {
+    const rows = unfulfillableSheetRows([
+      { ...expiredListing, listingsIncomplete: true, removalFetchFailed: true },
+      { ...mixedListing, listingsIncomplete: true, removal: [{ label: REMOVAL_STATUS_ELIGIBLE, quantity: 1 }] },
+    ])
+    expect(rows[0]).toEqual([UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE])
+    expect(rows[1]).toEqual([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE])
+    expect(rows[2]).toEqual([])
+    expect(rows[3]).toEqual([...UNFULFILLABLE_SHEET_HEADERS])
+    expect(rows[4]?.[14]).toBe(REMOVAL_STATUS_UNAVAILABLE)
+    expect(rows[5]?.[14]).toBe(`${REMOVAL_STATUS_ELIGIBLE} - 1 unit`)
+  })
+
   it("humanizes listing statuses", () => {
     expect(formatListingStatus("ACTIVE")).toBe("Active")
     expect(formatListingStatus("OUT_OF_STOCK")).toBe("Out Of Stock")
@@ -178,6 +206,17 @@ describe("GetListingsV2 parsing", () => {
 
   it("surfaces GraphQL errors when listings are missing", () => {
     expect(() => parseListingsPage({ errors: [{ message: "Not authorized" }] })).toThrow("Not authorized")
+  })
+
+  it("keeps valid listings when a page mixes objects, nulls, and errors", () => {
+    expect(parseListingsPage({
+      errors: [{ message: "Inaccessible listing" }],
+      ...listingsPayload([expiredListing, null], 2),
+    })).toEqual({
+      listings: [expiredListing],
+      count: 2,
+      cursor: undefined,
+    })
   })
 
   it("detects an unknown cursor field", () => {
@@ -297,6 +336,18 @@ describe("recovery inventories mapping", () => {
     expect(merged[3].removal).toEqual([{ label: REMOVAL_STATUS_ELIGIBLE, quantity: 1 }])
     expect(unfulfillableSheetRows([merged[0]])[1][14]).toBe(`${REMOVAL_STATUS_BY_CODE.InventoryIsBound} - 2 units`)
   })
+
+  it("marks SKUs whose removal batch failed instead of leaving Removal Status blank", () => {
+    const merged = mergeRemovalStatus(
+      [expiredListing, mixedListing],
+      [sephoraLineItem],
+      new Set(["MIXED-SKU\0X00MIXED"]),
+    )
+    expect(merged[0].removalFetchFailed).toBeUndefined()
+    expect(merged[1]).toEqual({ ...mixedListing, removal: [], removalFetchFailed: true })
+    expect(unfulfillableSheetRows(merged)[0]).toEqual([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE])
+    expect(unfulfillableSheetRows(merged)[4][14]).toBe(REMOVAL_STATUS_UNAVAILABLE)
+  })
 })
 
 describe("fetchUnfulfillableListings", () => {
@@ -413,8 +464,8 @@ describe("fetchUnfulfillableListings", () => {
     root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
 
     await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
-      { ...expiredListing, removal: [] },
-      { ...expiredListing, removal: [] },
+      { ...expiredListing, removal: [], listingsIncomplete: true },
+      { ...expiredListing, removal: [], listingsIncomplete: true },
     ])
     expect(fetchImpl).toHaveBeenCalledTimes(3)
   })
@@ -494,5 +545,106 @@ describe("fetchUnfulfillableListings", () => {
     await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).rejects.toThrow(
       "Couldn’t load unfulfillable inventory (403).",
     )
+  })
+
+  it("returns an empty list when the store has no unfulfillable inventory", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([], 0)))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([])
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps page-1 listings when a later GraphQL page fails", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2, "page-2")))
+      .mockResolvedValueOnce(jsonResponse({}, 403))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
+      { ...expiredListing, removal: [], listingsIncomplete: true },
+    ])
+  })
+
+  it("keeps valid SKUs when a page includes null listings and GraphQL errors", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        errors: [{ message: "Inaccessible listing" }],
+        ...listingsPayload([expiredListing, null], 2),
+      }))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
+      { ...expiredListing, removal: [], listingsIncomplete: true },
+    ])
+  })
+
+  it("continues paging when an empty page still reports remaining listings", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([], 1, "page-2")))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 1, null)))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
+      { ...mixedListing, removal: [] },
+    ])
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
+
+  it("keeps listings when a removal-status batch fails", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing, mixedListing], 2)))
+      .mockResolvedValueOnce(jsonResponse({}, 400))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
+      { ...expiredListing, removal: [], removalFetchFailed: true },
+      { ...mixedListing, removal: [], removalFetchFailed: true },
+    ])
+    expect(unfulfillableSheetRows([
+      { ...expiredListing, removal: [], removalFetchFailed: true },
+      { ...mixedListing, removal: [], removalFetchFailed: true },
+    ])[0]).toEqual([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE])
+  })
+
+  it("merges successful removal batches and skips a failed batch", async () => {
+    const listings = Array.from({ length: UNFULFILLABLE_INVENTORIES_BATCH_SIZE + 1 }, (_, index) => (
+      listingWithSkus(`SKU-${index}`, `FN-${index}`)
+    ))
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload(listings, listings.length)))
+      .mockResolvedValueOnce(jsonResponse({
+        lineItems: [{
+          merchantSku: "SKU-0",
+          fulfillmentNetworkSku: "FN-0",
+          totalSellableQuantity: 0,
+          totalUnsellableQuantity: 2,
+          unsellableIneligibleQuantity: 0,
+          unsellableIneligibleQuantities: [],
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({ message: "inaccessible" }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    const result = await fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })
+    expect(result).toHaveLength(listings.length)
+    expect(result[0]?.removal).toEqual([{ label: REMOVAL_STATUS_ELIGIBLE, quantity: 2 }])
+    expect(result[0]?.removalFetchFailed).toBeUndefined()
+    expect(result[UNFULFILLABLE_INVENTORIES_BATCH_SIZE]?.removal).toEqual([])
+    expect(result[UNFULFILLABLE_INVENTORIES_BATCH_SIZE]?.removalFetchFailed).toBe(true)
+    expect(unfulfillableSheetRows(result)[0]).toEqual([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE])
+    expect(unfulfillableSheetRows(result).at(-1)?.[14]).toBe(REMOVAL_STATUS_UNAVAILABLE)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
   })
 })

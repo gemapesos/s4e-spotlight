@@ -99,6 +99,11 @@ export const GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR = `${GET_LISTINGS_V2_PREFIX}
 
 export const REMOVAL_STATUS_ELIGIBLE = "Total available for removal"
 export const REMOVAL_STATUS_UNKNOWN = "unknown ineligible reason"
+export const REMOVAL_STATUS_UNAVAILABLE = "Couldn’t load removal status"
+export const UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE =
+  "Some unfulfillable listings could not be loaded. This sheet includes only the listings that were obtainable."
+export const UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE =
+  `Removal status could not be loaded for some SKUs. Those rows are marked “${REMOVAL_STATUS_UNAVAILABLE}”.`
 
 export const REMOVAL_STATUS_BY_CODE = {
   InventoryInPendingRequest: "Inventory already scheduled for removal - no further action required",
@@ -168,6 +173,8 @@ export interface UnfulfillableListing {
     } | null
   } | null> | null
   removal?: RemovalStatusSegment[] | null
+  removalFetchFailed?: boolean
+  listingsIncomplete?: boolean
 }
 
 export interface RecoveryLineItem {
@@ -296,14 +303,22 @@ export function unfulfillableSheetRow(listing: UnfulfillableListing): Array<stri
     quantity(details?.expired),
     quantity(details?.damagedByWarehouse),
     quantity(details?.damagedByDistributor),
-    formatRemovalStatus(listing.removal),
+    listing.removalFetchFailed ? REMOVAL_STATUS_UNAVAILABLE : formatRemovalStatus(listing.removal),
     cell(listing.listingData?.lastUpdated),
     cell(listing.imageUrl),
   ]
 }
 
+function unfulfillableSheetNotes(listings: readonly UnfulfillableListing[]): Array<Array<string | number>> {
+  const notes: Array<Array<string | number>> = []
+  if (listings.some((listing) => listing.listingsIncomplete)) notes.push([UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE])
+  if (listings.some((listing) => listing.removalFetchFailed)) notes.push([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE])
+  if (notes.length) notes.push([])
+  return notes
+}
+
 export function unfulfillableSheetRows(listings: readonly UnfulfillableListing[]): Array<Array<string | number>> {
-  return [[...UNFULFILLABLE_SHEET_HEADERS], ...listings.map(unfulfillableSheetRow)]
+  return [...unfulfillableSheetNotes(listings), [...UNFULFILLABLE_SHEET_HEADERS], ...listings.map(unfulfillableSheetRow)]
 }
 
 function graphqlMessages(payload: unknown): string[] {
@@ -384,6 +399,7 @@ export function parseRecoveryInventories(payload: unknown): RecoveryLineItem[] {
 export function mergeRemovalStatus(
   listings: readonly UnfulfillableListing[],
   lineItems: readonly RecoveryLineItem[],
+  failedPairKeys: ReadonlySet<string> = new Set(),
 ): UnfulfillableListing[] {
   const byKey = new Map<string, RemovalStatusSegment[]>()
   for (const item of lineItems) {
@@ -394,9 +410,13 @@ export function mergeRemovalStatus(
   }
   return listings.map((listing) => {
     const pair = listingSkuPair(listing)
+    const key = pair ? skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku) : undefined
+    if (key && failedPairKeys.has(key)) {
+      return { ...listing, removal: [], removalFetchFailed: true }
+    }
     return {
       ...listing,
-      removal: pair ? byKey.get(skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku)) ?? [] : [],
+      removal: key ? byKey.get(key) ?? [] : [],
     }
   })
 }
@@ -515,19 +535,24 @@ async function fetchRemovalLineItems(
   token: string | undefined,
   listings: readonly UnfulfillableListing[],
   onProgress?: (event: ReportProgressEvent) => void,
-): Promise<RecoveryLineItem[]> {
+): Promise<{ lineItems: RecoveryLineItem[]; failedPairKeys: Set<string> }> {
   const pairs = listings.map(listingSkuPair).filter((pair): pair is { merchantSku: string; fulfillmentNetworkSku: string } => pair !== undefined)
-  if (pairs.length === 0) return []
+  if (pairs.length === 0) return { lineItems: [], failedPairKeys: new Set() }
 
   const lineItems: RecoveryLineItem[] = []
+  const failedPairKeys = new Set<string>()
   let processed = 0
   onProgress?.({ source: "unfulfillable", status: "active", loaded: 0, total: pairs.length, phase: "removal" })
   for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
-    lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch))
+    try {
+      lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch))
+    } catch {
+      for (const pair of batch) failedPairKeys.add(skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku))
+    }
     processed += batch.length
     onProgress?.({ source: "unfulfillable", status: "active", loaded: processed, total: pairs.length, phase: "removal" })
   }
-  return lineItems
+  return { lineItems, failedPairKeys }
 }
 
 export async function fetchUnfulfillableListings(
@@ -548,6 +573,8 @@ export async function fetchUnfulfillableListings(
   let includePagination = true
   const listings: UnfulfillableListing[] = []
   const seenCursors = new Set<string>()
+  let reportedCount = 0
+  let listingsIncomplete = false
 
   for (let page = 0; page < UNFULFILLABLE_MAX_PAGES; page += 1) {
     let result: ListingsPage
@@ -571,12 +598,16 @@ export async function fetchUnfulfillableListings(
       } else if (willRetryWithoutPagination) {
         includePagination = false
         result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
+      } else if (listings.length > 0) {
+        listingsIncomplete = true
+        break
       } else {
         throw error
       }
     }
 
     listings.push(...result.listings)
+    reportedCount = result.count
     onProgress?.({
       source: "unfulfillable",
       status: "active",
@@ -584,15 +615,22 @@ export async function fetchUnfulfillableListings(
       total: result.count,
       phase: "listings",
     })
-    if (listings.length >= result.count || result.listings.length === 0) break
-    if (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor) break
-    if (seenCursors.has(result.cursor)) break
+    if (listings.length >= result.count) break
+    const emptyPage = result.listings.length === 0
+    const canSkipEmptyPage = emptyPage && result.count > listings.length && Boolean(result.cursor) && query !== GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR
+    if (emptyPage && !canSkipEmptyPage) break
+    if (!emptyPage && (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor)) break
+    if (!result.cursor || seenCursors.has(result.cursor)) break
     seenCursors.add(result.cursor)
     cursor = result.cursor
   }
 
-  const lineItems = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress)
-  const merged = mergeRemovalStatus(listings, lineItems)
+  if (reportedCount > listings.length) listingsIncomplete = true
+
+  const { lineItems, failedPairKeys } = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress)
+  const merged = mergeRemovalStatus(listings, lineItems, failedPairKeys).map((listing) => (
+    listingsIncomplete ? { ...listing, listingsIncomplete: true } : listing
+  ))
   onProgress?.({
     source: "unfulfillable",
     status: "complete",
