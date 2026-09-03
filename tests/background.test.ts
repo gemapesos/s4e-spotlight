@@ -66,6 +66,19 @@ describe("background Case ID handling", () => {
     })
   })
 
+  it("opens a single case in an active tab", async () => {
+    const createTab = vi.fn().mockResolvedValueOnce({ id: 101 } as chrome.tabs.Tab)
+
+    await openCaseTabs(["21476974831"], senderTab, createTab)
+
+    expect(createTab).toHaveBeenCalledWith({
+      active: true,
+      openerTabId: 42,
+      url: buildCaseUrl("21476974831"),
+      windowId: 7,
+    })
+  })
+
   it("returns a structured success response for the message", async () => {
     const openTabs = vi.fn().mockResolvedValue({ openedCount: 1 })
     const sendResponse = vi.fn()

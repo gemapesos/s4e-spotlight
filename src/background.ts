@@ -163,7 +163,7 @@ async function createBackgroundTabs(
   if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
 
   return createTabsInParallel(
-    ids.map((id) => ({ id, active: false, url: buildUrl(id) })),
+    ids.map((id) => ({ id, active: ids.length === 1, url: buildUrl(id) })),
     senderTab as chrome.tabs.Tab & { id: number; windowId: number },
     createTab,
     removeTabs,
@@ -242,6 +242,8 @@ interface ActiveJob {
   storeId: string
   stage: "logout" | "signin" | "email" | "password" | "otp" | "authenticated" | "paused"
   startedAt: number
+  /** True when this job created the tab; cancel/failure must not close reused SC tabs. */
+  ownsTab: boolean
 }
 
 const AUTOMATION_CLICK_ACTIONS = new Set(["continue", "password-submit", "otp-submit"])
@@ -602,13 +604,57 @@ async function openStoreUrl(storeUrl: string, senderTab?: chrome.tabs.Tab): Prom
   if (tab?.id !== undefined) {
     await chrome.tabs.update(tab.id, { active: true, url: storeUrl })
     if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+    void restorePageFocus(tab.id)
+    void closeDuplicateSellerCentralTabs(tab.id)
     return
   }
-  await chrome.tabs.create({
+  const created = await chrome.tabs.create({
     active: true,
     url: storeUrl,
     ...(senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }),
   })
+  if (created.id !== undefined) {
+    void restorePageFocus(created.id)
+    void closeDuplicateSellerCentralTabs(created.id)
+  }
+}
+
+async function closeDuplicateSellerCentralTabs(keepTabId: number): Promise<void> {
+  const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
+  const toClose = tabs
+    .map((tab) => tab.id)
+    .filter((id): id is number => id !== undefined && id !== keepTabId)
+  if (toClose.length === 0) return
+  try { await chrome.tabs.remove(toClose) } catch { /* best effort */ }
+}
+
+/** Show a background-created tab once it renders a real page, so focus lands in the page. */
+export async function activateLoadedTab(tabId: number): Promise<void> {
+  try {
+    await waitForTabComplete(tabId)
+  } catch {
+    /* still activate so the user can see a partial page */
+  }
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    await chrome.tabs.update(tabId, { active: true })
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+  } catch { /* tab closed mid-switch */ }
+}
+
+/** Yank keyboard focus out of the omnibox after extension-driven navigations. */
+export async function restorePageFocus(tabId: number): Promise<void> {
+  try {
+    if (typeof chrome.tabs?.get !== "function" || typeof chrome.tabs?.onUpdated?.addListener !== "function") {
+      return
+    }
+    await waitForTabComplete(tabId)
+    const tab = await chrome.tabs.get(tabId)
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+    await chrome.tabs.update(tabId, { active: true })
+  } catch {
+    /* tab closed mid-switch */
+  }
 }
 
 async function getActiveJob(): Promise<ActiveJob | undefined> {
@@ -767,16 +813,52 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
           return { ok: true }
         }
         let tabId: number | undefined
+        let ownsTab = false
         try {
-          const tab = await chrome.tabs.create({ active: true, url: "about:blank" })
+          const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
+          const existing = pickSellerCentralTab(tabs, sender.tab?.windowId)
+          if (existing?.id !== undefined) {
+            tabId = existing.id
+            ownsTab = false
+            const job: ActiveJob = {
+              id: crypto.randomUUID(),
+              tabId: existing.id,
+              storeId: store.id,
+              stage: "logout",
+              startedAt: Date.now(),
+              ownsTab: false,
+            }
+            await setActiveJob(job)
+            await chrome.tabs.update(existing.id, { url: LOGOUT_URL })
+            void activateLoadedTab(existing.id)
+            return { ok: true, jobId: job.id }
+          }
+
+          // Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it
+          // focused across the whole switch, so create it in the background and activate it
+          // once it is showing a real page.
+          const tab = await chrome.tabs.create({
+            active: false,
+            url: "about:blank",
+            ...(sender.tab?.windowId === undefined ? {} : { windowId: sender.tab.windowId }),
+          })
           if (tab.id === undefined) throw new Error("Chrome did not create the login tab.")
           tabId = tab.id
-          const job: ActiveJob = { id: crypto.randomUUID(), tabId: tab.id, storeId: store.id, stage: "logout", startedAt: Date.now() }
+          ownsTab = true
+          const job: ActiveJob = {
+            id: crypto.randomUUID(),
+            tabId: tab.id,
+            storeId: store.id,
+            stage: "logout",
+            startedAt: Date.now(),
+            ownsTab: true,
+          }
           await setActiveJob(job)
           await chrome.tabs.update(tab.id, { url: LOGOUT_URL })
+          void activateLoadedTab(tab.id)
           return { ok: true, jobId: job.id }
         } catch (error) {
-          if (tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
+          if (ownsTab && tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
           await setActiveJob(undefined)
           throw error
         }
@@ -796,7 +878,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       const job = await getActiveJob()
       if (!job) return { ok: true }
       await setActiveJob(undefined)
-      if (job.tabId >= 0) try { await chrome.tabs.remove(job.tabId) } catch { /* tab already closed */ }
+      if (job.ownsTab && job.tabId >= 0) try { await chrome.tabs.remove(job.tabId) } catch { /* tab already closed */ }
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_GET_JOB": {
@@ -866,9 +948,11 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       }).catch(() => {})
       // #endregion
       job.stage = "authenticated"; await setActiveJob(job)
-      await chrome.tabs.update(job.tabId, { url: store.storeUrl })
+      await chrome.tabs.update(job.tabId, { active: true, url: store.storeUrl })
       await setCurrentStoreId(store.id)
       await setActiveJob(undefined)
+      void restorePageFocus(job.tabId)
+      void closeDuplicateSellerCentralTabs(job.tabId)
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_ERROR": {
