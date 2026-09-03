@@ -577,6 +577,50 @@ describe("CommandPalette", () => {
     expect(list).toHaveClass("no-scrollbar")
     expect(list).toHaveClass("overflow-y-auto")
     expect(list).toHaveClass("min-h-0")
+    expect(list).toHaveClass("max-h-80")
+    expect(list).toHaveAttribute("data-fade-mask", "none")
+  })
+
+  it("does not animate the command surface on first open", () => {
+    renderPalette()
+    expect(document.querySelector("[data-slot=command]")).not.toHaveClass("animate-surface-in")
+  })
+
+  it("animates the command surface after a mode switch", async () => {
+    const user = userEvent.setup()
+    renderPalette()
+
+    await user.click(screen.getByRole("option", { name: /Open Case ID\/s/ }))
+
+    expect(document.querySelector("[data-slot=command]")).toHaveClass("animate-surface-in")
+  })
+
+  it("shows directional fades only where the command list can scroll", () => {
+    renderPalette()
+    const list = screen.getByRole("listbox", { name: "Suggestions" }) as HTMLElement
+
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 128 },
+      scrollHeight: { configurable: true, value: 128 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    })
+    fireEvent.scroll(list)
+    expect(list).toHaveAttribute("data-fade-mask", "none")
+
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 128 },
+      scrollHeight: { configurable: true, value: 300 },
+    })
+    fireEvent.scroll(list)
+    expect(list).toHaveAttribute("data-fade-mask", "bottom")
+
+    Object.defineProperty(list, "scrollTop", { configurable: true, writable: true, value: 80 })
+    fireEvent.scroll(list)
+    expect(list).toHaveAttribute("data-fade-mask", "both")
+
+    Object.defineProperty(list, "scrollTop", { configurable: true, writable: true, value: 172 })
+    fireEvent.scroll(list)
+    expect(list).toHaveAttribute("data-fade-mask", "top")
   })
 
   it("generates a report and closes the palette", async () => {

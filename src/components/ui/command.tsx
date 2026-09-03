@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Command as CommandPrimitive } from "cmdk"
 
+import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"
 import { commandFilter } from "@/lib/searchScore"
 import { cn } from "@/lib/utils"
 import {
@@ -15,6 +16,13 @@ import {
   InputGroupAddon,
 } from "@/components/ui/input-group"
 import { SearchIcon, CheckIcon } from "lucide-react"
+
+const SURFACE_HEIGHT_DURATION_MS = 200
+const SURFACE_HEIGHT_EASING = "cubic-bezier(0.16, 1, 0.3, 1)"
+
+function prefersReducedMotion(targetWindow: Window | null): boolean {
+  return Boolean(targetWindow?.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
+}
 
 function Command({
   className,
@@ -33,6 +41,93 @@ function Command({
       loop={loop}
       {...props}
     />
+  )
+}
+
+function PaletteSurface({
+  children,
+  commandRef,
+  contentKey,
+  contentRef,
+  filter,
+  title,
+}: {
+  children: React.ReactNode
+  commandRef: React.RefObject<HTMLDivElement | null>
+  contentKey?: React.Key
+  contentRef: React.RefObject<HTMLDivElement | null>
+  filter?: React.ComponentProps<typeof CommandPrimitive>["filter"]
+  title: string
+}) {
+  const previousHeightRef = React.useRef<number | null>(null)
+  const heightAnimationRef = React.useRef<Animation | null>(null)
+  const previousKeyRef = React.useRef(contentKey)
+  const hasMountedRef = React.useRef(false)
+  const animateSwap = hasMountedRef.current && previousKeyRef.current !== contentKey
+  previousKeyRef.current = contentKey
+  hasMountedRef.current = true
+
+  React.useLayoutEffect(() => {
+    const el = contentRef.current
+    if (!el) return
+
+    heightAnimationRef.current?.cancel()
+    heightAnimationRef.current = null
+
+    const nextHeight = el.offsetHeight
+    const prevHeight = previousHeightRef.current
+    previousHeightRef.current = nextHeight
+
+    const targetWindow = el.ownerDocument.defaultView
+    if (
+      prevHeight == null ||
+      prevHeight === nextHeight ||
+      prefersReducedMotion(targetWindow) ||
+      typeof el.animate !== "function"
+    ) {
+      return
+    }
+
+    const animation = el.animate(
+      [{ height: `${prevHeight}px` }, { height: `${nextHeight}px` }],
+      { duration: SURFACE_HEIGHT_DURATION_MS, easing: SURFACE_HEIGHT_EASING },
+    )
+    heightAnimationRef.current = animation
+    animation.onfinish = () => {
+      if (heightAnimationRef.current === animation) heightAnimationRef.current = null
+      previousHeightRef.current = el.offsetHeight
+    }
+    animation.oncancel = () => {
+      if (heightAnimationRef.current === animation) heightAnimationRef.current = null
+    }
+
+    return () => {
+      animation.cancel()
+    }
+  }, [contentKey, contentRef])
+
+  React.useEffect(() => {
+    const el = contentRef.current
+    if (!el || typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(() => {
+      if (heightAnimationRef.current) return
+      previousHeightRef.current = el.offsetHeight
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [contentRef])
+
+  return (
+    <Command
+      key={contentKey}
+      ref={commandRef}
+      className={animateSwap ? "animate-surface-in motion-reduce:animate-none!" : undefined}
+      filter={filter}
+      label={title === "Accounts" ? "Search accounts" : "Search commands"}
+      tabIndex={-1}
+    >
+      {children}
+    </Command>
   )
 }
 
@@ -58,6 +153,7 @@ function CommandDialog({
   onEscapeKeyDown?: React.ComponentProps<typeof DialogContent>["onEscapeKeyDown"]
 }) {
   const commandRef = React.useRef<HTMLDivElement>(null)
+  const contentRef = React.useRef<HTMLDivElement>(null)
 
   React.useLayoutEffect(() => {
     const command = commandRef.current
@@ -69,8 +165,9 @@ function CommandDialog({
   return (
     <Dialog {...props}>
       <DialogContent
+        ref={contentRef}
         className={cn(
-          "top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0",
+          "top-1/3 left-1/2 -translate-x-1/2 translate-y-0 overflow-hidden rounded-xl! p-0",
           className
         )}
         container={container}
@@ -85,15 +182,15 @@ function CommandDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        <Command
-          key={contentKey}
-          ref={commandRef}
+        <PaletteSurface
+          commandRef={commandRef}
+          contentKey={contentKey}
+          contentRef={contentRef}
           filter={filter}
-          label={title === "Accounts" ? "Search accounts" : "Search commands"}
-          tabIndex={-1}
+          title={title}
         >
           {children}
-        </Command>
+        </PaletteSurface>
       </DialogContent>
     </Dialog>
   )
@@ -124,16 +221,44 @@ function CommandInput({
 
 function CommandList({
   className,
+  onScroll,
   ...props
 }: React.ComponentProps<typeof CommandPrimitive.List>) {
+  const listRef = React.useRef<HTMLDivElement>(null)
+  const [fadeMask, setFadeMask] = React.useState<FadeMaskState>("none")
+
+  const updateFadeMask = React.useCallback(() => {
+    const list = listRef.current
+    if (!list) return setFadeMask("none")
+    setFadeMask(fadeMaskForScroll(list))
+  }, [])
+
+  React.useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) return
+    updateFadeMask()
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(updateFadeMask)
+    observer.observe(list)
+    const sizer = list.querySelector("[cmdk-list-sizer]")
+    if (sizer) observer.observe(sizer)
+    return () => observer.disconnect()
+  }, [updateFadeMask])
+
   return (
     <CommandPrimitive.List
       data-slot="command-list"
+      data-fade-mask={fadeMask}
       className={cn(
-        "no-scrollbar max-h-72 min-h-0 scroll-py-1 overflow-x-hidden overflow-y-auto outline-none",
+        "scroll-fade no-scrollbar max-h-80 min-h-0 scroll-py-1 overflow-x-hidden overflow-y-auto outline-none",
         className
       )}
       {...props}
+      ref={listRef}
+      onScroll={(event) => {
+        updateFadeMask()
+        onScroll?.(event)
+      }}
     />
   )
 }

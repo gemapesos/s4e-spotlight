@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { handleContentMessage } from "../src/content"
+import { handleContentKeyDown, handleContentMessage } from "../src/content"
 import { FEEDBACK_PAGE_CONCURRENCY } from "../src/lib/feedback"
 
 function makeVisible() {
@@ -36,6 +36,36 @@ describe("content script report messages", () => {
 
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true }))
     expect(setOpen).toHaveBeenCalledWith(true, "report-login")
+  })
+
+  it("warms the palette on a modifier key without opening", () => {
+    const setOpen = vi.fn()
+    const load = vi.fn(async () => ({ setOpen }))
+
+    handleContentKeyDown(
+      new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),
+      load,
+    )
+
+    expect(load).toHaveBeenCalledOnce()
+    expect(setOpen).not.toHaveBeenCalled()
+  })
+
+  it("opens the palette on the shortcut after warming", async () => {
+    const setOpen = vi.fn()
+    const load = vi.fn(async () => ({ setOpen }))
+
+    handleContentKeyDown(
+      new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),
+      load,
+    )
+    handleContentKeyDown(
+      new KeyboardEvent("keydown", { code: "Slash", key: "/", metaKey: true, cancelable: true }),
+      load,
+    )
+
+    expect(load).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(setOpen).toHaveBeenCalledWith(true))
   })
 
   it("fetches unfulfillable listings from Seller Central", async () => {

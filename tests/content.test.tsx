@@ -15,6 +15,8 @@ import {
 } from "../src/paletteApp"
 
 let mounted: MountedCommandPalette | null = null
+const documentFonts = Object.getOwnPropertyDescriptor(document, "fonts")
+  ?? Object.getOwnPropertyDescriptor(Document.prototype, "fonts")
 
 afterEach(() => {
   mounted?.destroy()
@@ -24,6 +26,7 @@ afterEach(() => {
   document.body.removeAttribute("style")
   document.body.replaceChildren()
   document.documentElement.querySelectorAll("#command-palette-extension-root").forEach((node) => node.remove())
+  if (documentFonts) Object.defineProperty(document, "fonts", documentFonts)
 })
 
 describe("content-script mount", () => {
@@ -160,6 +163,56 @@ describe("content-script mount", () => {
 
     await vi.waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "GET_SETTINGS" })
+    })
+  })
+
+  it("registers Geist at mount and loads it before first paint", async () => {
+    const load = vi.fn().mockResolvedValue(undefined)
+    class FontFaceMock {
+      family: string
+      load = load
+      constructor(family: string) {
+        this.family = family
+      }
+    }
+    const add = vi.fn()
+    vi.stubGlobal("FontFace", FontFaceMock)
+    Object.defineProperty(document, "fonts", { configurable: true, value: { add } })
+    vi.stubGlobal("chrome", {
+      runtime: {
+        getURL: (path: string) => `chrome-extension://id/${path}`,
+        sendMessage: vi.fn().mockResolvedValue({ ok: true, settings: {} }),
+      },
+    })
+
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+
+    expect(add).toHaveBeenCalledOnce()
+    expect(add.mock.calls[0]?.[0]).toBeInstanceOf(FontFaceMock)
+    expect(add.mock.calls[0]?.[0].family).toBe("Geist Variable")
+    expect(load).toHaveBeenCalledOnce()
+  })
+
+  it("renders the first open after settings resolve", async () => {
+    let resolveSettings: ((value: unknown) => void) | undefined
+    const sendMessage = vi.fn((message: { type?: string }) => {
+      if (message.type === "GET_SETTINGS") {
+        return new Promise((resolve) => {
+          resolveSettings = resolve
+        })
+      }
+      return Promise.resolve({ ok: true })
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+    mounted?.setOpen(true)
+
+    expect(mounted?.shadowRoot.querySelector("[role=dialog]")).toBeNull()
+    expect(sendMessage).toHaveBeenCalledWith({ type: "GET_SETTINGS" })
+
+    resolveSettings?.({ ok: true, settings: {} })
+    await vi.waitFor(() => {
+      expect(mounted?.shadowRoot.querySelector("[role=dialog]")).not.toBeNull()
     })
   })
 

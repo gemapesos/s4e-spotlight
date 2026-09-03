@@ -26,6 +26,7 @@ import {
   type ReportProgressEvent,
   type ReportProgressState,
 } from "@/lib/reportProgress"
+import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"
 import { commandFilter } from "@/lib/searchScore"
 import {
   DEFAULT_ENABLED_FEATURES,
@@ -38,7 +39,6 @@ import { ReportProgressPanel } from "@/ReportProgressPanel"
 
 export type PaletteMode = "commands" | "case-ids" | "shipment-ids" | "sku-ids" | "confirm-ids" | "accounts" | "unlock" | "report-login" | "generating-reports"
 type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids"
-type FadeMaskState = "none" | "top" | "bottom" | "both"
 
 const CONFIRM_THRESHOLD = 10
 const MAX_BULK_IDS = 50
@@ -79,6 +79,16 @@ export interface AccountsStatus {
   stores: AccountStoreSummary[]
   activeSwitch?: ActiveSwitchSummary
   currentStore?: AccountStoreSummary | null
+}
+
+const EMPTY_ACCOUNTS_STATUS: AccountsStatus = {
+  initialized: false,
+  unlocked: false,
+  stores: [],
+}
+
+async function defaultGetAccountsStatus(): Promise<AccountsStatus> {
+  return EMPTY_ACCOUNTS_STATUS
 }
 
 export const commandGroups: ReadonlyArray<{
@@ -140,7 +150,7 @@ export function CommandPalette({
   onOpenCaseIds,
   onOpenShipmentIds,
   onOpenSkuIds = async () => undefined,
-  onGetAccountsStatus = async () => ({ initialized: false, unlocked: false, stores: [] }),
+  onGetAccountsStatus = defaultGetAccountsStatus,
   onUnlockAccounts = async () => undefined,
   onStartAccountSwitch = async () => undefined,
   onFocusCurrentStore = async () => undefined,
@@ -227,14 +237,27 @@ export function CommandPalette({
   const detectedCaseIds = React.useMemo(() => extractCaseIds(commandSearch), [commandSearch])
   const detectedShipmentIds = React.useMemo(() => extractShipmentIds(commandSearch), [commandSearch])
   const skuFallbackQuery = commandSearch.trim()
+  const accountsEnabled = isFeatureEnabled(enabledFeatures, "accounts")
+  const matchedStores = React.useMemo(() => {
+    if (!accountsEnabled || !skuFallbackQuery) return []
+    return stores.filter((store) => commandFilter(store.name, skuFallbackQuery) > 0)
+  }, [accountsEnabled, skuFallbackQuery, stores])
   const showSkuFallback = React.useMemo(() => {
     if (!isFeatureEnabled(enabledFeatures, "search-skus")) return false
     if (detectedCaseIds.length > 0 || detectedShipmentIds.length > 0) return false
+    if (matchedStores.length > 0) return false
     if (skuFallbackQuery.length < 1 || skuFallbackQuery.length > 40 || /\s/u.test(skuFallbackQuery)) return false
     return !visibleGroups.some((group) =>
       group.commands.some((command) => commandFilter(command.label, skuFallbackQuery, command.keywords) > 0),
     )
-  }, [detectedCaseIds.length, detectedShipmentIds.length, enabledFeatures, skuFallbackQuery, visibleGroups])
+  }, [
+    detectedCaseIds.length,
+    detectedShipmentIds.length,
+    enabledFeatures,
+    matchedStores.length,
+    skuFallbackQuery,
+    visibleGroups,
+  ])
 
   React.useEffect(() => {
     if (open) {
@@ -255,17 +278,33 @@ export function CommandPalette({
   }, [initialMode, open])
 
   React.useEffect(() => {
+    if (!open || !accountsEnabled) return
+    let cancelled = false
+    void onGetAccountsStatus()
+      .then((status) => {
+        if (cancelled) return
+        setStores(status.stores)
+        setActiveSwitch(status.activeSwitch)
+        setCurrentStore(status.currentStore ?? null)
+        setAccountsLoaded(true)
+        setAccountsUnlocked(status.unlocked)
+      })
+      .catch(() => {
+        // Prefetch is best-effort; Accounts mode still loads with its own error path.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [accountsEnabled, onGetAccountsStatus, open])
+
+  React.useEffect(() => {
     if (isIdentifierInputMode(mode)) identifierInputRef.current?.focus()
   }, [mode])
 
   const updateFadeMask = React.useCallback(() => {
     const input = identifierInputRef.current
     if (!input) return setFadeMask("none")
-    const threshold = 1
-    const hasOverflow = input.scrollHeight - input.clientHeight > threshold
-    const above = hasOverflow && input.scrollTop > threshold
-    const below = hasOverflow && input.scrollTop + input.clientHeight < input.scrollHeight - threshold
-    setFadeMask(above && below ? "both" : above ? "top" : below ? "bottom" : "none")
+    setFadeMask(fadeMaskForScroll(input))
   }, [])
 
   React.useLayoutEffect(() => {
@@ -529,10 +568,10 @@ export function CommandPalette({
         title={title}
       >
         {mode === "commands" ? <>
-          <CommandInput autoFocus aria-label="Search commands" disabled={submitting} onValueChange={(value) => { setCommandSearch(value); setError(null) }} placeholder="Type a command or search..." value={commandSearch} />
+          <CommandInput autoFocus aria-label="Search commands" disabled={submitting} onValueChange={(value) => { setCommandSearch(value); setError(null) }} placeholder="Type a command or store..." value={commandSearch} />
           {submitting && statusMessage ? <p aria-live="polite" className="px-2 py-1.5 text-sm text-muted-foreground">{statusMessage}</p> : null}
           <CommandList aria-label="Commands">
-            {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || showSkuFallback ? null : (
+            {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || showSkuFallback || matchedStores.length > 0 ? null : (
               <CommandEmpty>No results found.</CommandEmpty>
             )}
             {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 ? (
@@ -562,6 +601,27 @@ export function CommandPalette({
                       <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("shipment", detectedShipmentIds)}</span>
                     </CommandItem>
                   ) : null}
+                </CommandGroup>
+                <CommandSeparator alwaysRender />
+              </>
+            ) : null}
+            {matchedStores.length > 0 ? (
+              <>
+                <CommandGroup forceMount heading="Stores">
+                  {matchedStores.map((store) => (
+                    <CommandItem
+                      key={store.id}
+                      data-checked={currentStore?.id === store.id || undefined}
+                      disabled={submitting}
+                      forceMount
+                      keywords={[store.name]}
+                      onSelect={() => void chooseStore(store)}
+                      value={`Switch to ${store.name}`}
+                    >
+                      <Building2 aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{store.name}</span>
+                    </CommandItem>
+                  ))}
                 </CommandGroup>
                 <CommandSeparator alwaysRender />
               </>
@@ -718,7 +778,7 @@ export function CommandPalette({
                 aria-describedby={error ? "identifier-input-error" : "identifier-input-count"}
                 aria-invalid={Boolean(error)}
                 aria-label={inputMode.ariaLabel}
-                className="identifier-input no-scrollbar min-h-32"
+                className="identifier-input scroll-fade no-scrollbar min-h-32"
                 data-fade-mask={fadeMask}
                 disabled={submitting}
                 placeholder={inputMode.placeholder}

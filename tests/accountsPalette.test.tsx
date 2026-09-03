@@ -33,6 +33,46 @@ function renderAccounts(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Accounts palette", () => {
+  it("prefetches stores when the palette opens", async () => {
+    const props = renderAccounts()
+    await vi.waitFor(() => expect(props.onGetAccountsStatus).toHaveBeenCalled())
+  })
+
+  it("switches from a matching store on the main search without opening Accounts", async () => {
+    const user = userEvent.setup()
+    const props = renderAccounts()
+    await vi.waitFor(() => expect(props.onGetAccountsStatus).toHaveBeenCalled())
+
+    await user.type(screen.getByRole("combobox", { name: "Search commands" }), "JMG")
+    await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+
+    expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
+    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    expect(screen.queryByRole("combobox", { name: "Search accounts" })).not.toBeInTheDocument()
+  })
+
+  it("unlocks from a top-level store match before switching", async () => {
+    const user = userEvent.setup()
+    const getStatus = vi.fn().mockResolvedValue({
+      initialized: true,
+      unlocked: false,
+      stores: [{ id: "store-1", name: "JMG Outdoors" }],
+    })
+    const props = renderAccounts({ onGetAccountsStatus: getStatus })
+    await vi.waitFor(() => expect(getStatus).toHaveBeenCalled())
+
+    await user.type(screen.getByRole("combobox", { name: "Search commands" }), "JMG")
+    await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+    await user.type(await screen.findByLabelText("Master password"), "master password")
+    await user.keyboard("{Enter}")
+
+    await vi.waitFor(() => {
+      expect(props.onUnlockAccounts).toHaveBeenCalledWith("master password")
+      expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
+      expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    })
+  })
+
   it("clears the command search before showing and selecting stores", async () => {
     const user = userEvent.setup()
     const props = renderAccounts()
@@ -82,7 +122,7 @@ describe("Accounts palette", () => {
     const props = renderAccounts()
     await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
-    expect(props.onGetAccountsStatus).toHaveBeenCalledOnce()
+    expect(props.onGetAccountsStatus).toHaveBeenCalled()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
     expect(props.onOpenChange).toHaveBeenCalledWith(false)
   })

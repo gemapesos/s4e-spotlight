@@ -26,14 +26,43 @@ const HOST_ID = "command-palette-extension-root"
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open"
 const PASTE_GUARD_KEY = "__s4eSpotlightPasteGuard"
 const GEIST_FONT_FILE = "geist-latin-wght-normal.woff2"
+const FIRST_OPEN_ASSET_TIMEOUT_MS = 120
 
-function paletteFontFaceCss(): string {
+export async function loadPaletteFont(targetDocument: Document): Promise<void> {
   const fontUrl =
     typeof chrome !== "undefined" && typeof chrome.runtime?.getURL === "function"
       ? chrome.runtime.getURL(GEIST_FONT_FILE)
       : ""
-  if (!fontUrl) return ""
-  return `@font-face{font-family:"Geist Variable";font-style:normal;font-display:swap;font-weight:100 900;src:url("${fontUrl}") format("woff2-variations")}`
+  if (!fontUrl) return
+  if (typeof FontFace === "undefined" || !targetDocument.fonts) return
+  try {
+    const face = new FontFace("Geist Variable", `url("${fontUrl}")`, {
+      display: "swap",
+      style: "normal",
+      weight: "100 900",
+    })
+    targetDocument.fonts.add(face)
+    await face.load()
+  } catch {
+    // Best-effort; the UI falls back to the system stack.
+  }
+}
+
+function waitWithTimeout(promise: Promise<unknown>, ms: number, targetWindow: Window | null): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    void promise.then(finish, finish)
+    if (!targetWindow) {
+      finish()
+      return
+    }
+    targetWindow.setTimeout(finish, ms)
+  })
 }
 
 interface PasteGuardController {
@@ -341,8 +370,7 @@ export function mountCommandPalette({
 
   const shadowRoot = host.attachShadow({ mode: shadowMode })
   const style = targetDocument.createElement("style")
-  const fontFace = paletteFontFaceCss()
-  style.textContent = fontFace ? `${fontFace}\n${styles}` : styles
+  style.textContent = styles
   shadowRoot.append(style)
 
   const mountPoint = targetDocument.createElement("div")
@@ -359,6 +387,15 @@ export function mountCommandPalette({
   let previousFocus: HTMLElement | null = null
   let unlockDocumentScroll: (() => void) | null = null
   let enabledFeatures: EnabledFeatures = DEFAULT_ENABLED_FEATURES
+  let openGeneration = 0
+  let firstOpenAssetsSettled = false
+
+  const fontReady = loadPaletteFont(targetDocument)
+  const settingsReady = getSettings().then((settings) => {
+    if (enabledFeaturesEqual(enabledFeatures, settings.features)) return
+    enabledFeatures = settings.features
+    if (isOpen) renderPalette()
+  })
 
   const renderPalette = () => {
     root?.render(
@@ -396,6 +433,8 @@ export function mountCommandPalette({
       return
     }
 
+    const generation = ++openGeneration
+
     if (nextOpen) {
       previousFocus = getDeepActiveElement(targetDocument)
       unlockDocumentScroll = lockDocumentScroll(targetDocument)
@@ -408,19 +447,35 @@ export function mountCommandPalette({
     host.style.pointerEvents = nextOpen ? "auto" : "none"
     if (nextOpen) applyPaletteRemScale(host, targetDocument)
 
-    renderPalette()
-    if (nextOpen) {
-      void getSettings().then((settings) => {
-        if (!isOpen) return
-        if (enabledFeaturesEqual(enabledFeatures, settings.features)) return
-        enabledFeatures = settings.features
-        renderPalette()
-      })
+    const render = () => {
+      if (generation !== openGeneration) return
+      renderPalette()
+      if (nextOpen) {
+        void getSettings().then((settings) => {
+          if (!isOpen) return
+          if (enabledFeaturesEqual(enabledFeatures, settings.features)) return
+          enabledFeatures = settings.features
+          renderPalette()
+        })
+      }
+      if (!nextOpen) {
+        requestAnimationFrame(() => previousFocus?.focus({ preventScroll: true }))
+      }
     }
 
-    if (!nextOpen) {
-      requestAnimationFrame(() => previousFocus?.focus({ preventScroll: true }))
+    if (nextOpen && !firstOpenAssetsSettled) {
+      void waitWithTimeout(
+        Promise.all([fontReady, settingsReady]),
+        FIRST_OPEN_ASSET_TIMEOUT_MS,
+        targetDocument.defaultView,
+      ).then(() => {
+        firstOpenAssetsSettled = true
+        render()
+      })
+      return
     }
+
+    render()
   }
 
   const onKeyDown = (event: KeyboardEvent) => {
