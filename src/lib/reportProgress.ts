@@ -1,9 +1,9 @@
 export const REPORTS_PROGRESS_TYPE = "REPORTS_PROGRESS"
 
-export const REPORT_SOURCES = ["unfulfillable", "feedback", "stranded", "suppressed"] as const
+export const REPORT_SOURCES = ["unfulfillable", "feedback", "stranded", "suppressed", "shippingQueue"] as const
 export type ReportSource = (typeof REPORT_SOURCES)[number]
 export type ReportStageStatus = "pending" | "active" | "complete" | "error"
-export type ReportProgressPhase = "listings" | "removal" | "issues"
+export type ReportProgressPhase = "listings" | "removal" | "issues" | "details"
 
 export type ReportProgressEvent = {
   source: ReportSource
@@ -32,6 +32,7 @@ export const REPORT_PROGRESS_ROWS = [
   { id: "feedback", label: "Seller feedback" },
   { id: "stranded", label: "Stranded inventory" },
   { id: "suppressed", label: "Search suppressed listings" },
+  { id: "shippingQueue", label: "Shipping queue" },
   { id: "workbook", label: "Building spreadsheet" },
 ] as const
 
@@ -42,12 +43,13 @@ export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
     feedback: { status: "pending" },
     stranded: { status: "pending" },
     suppressed: { status: "pending" },
+    shippingQueue: { status: "pending" },
   },
   workbook: "pending",
 }
 
 export function isReportSource(value: unknown): value is ReportSource {
-  return value === "unfulfillable" || value === "feedback" || value === "stranded" || value === "suppressed"
+  return value === "unfulfillable" || value === "feedback" || value === "stranded" || value === "suppressed" || value === "shippingQueue"
 }
 
 export function isReportProgressEvent(value: unknown): value is ReportProgressEvent {
@@ -110,6 +112,7 @@ export function reportSourcePercent(event: Pick<ReportProgressEvent, "source" | 
   if (event.source === "unfulfillable") return unfulfillableProgressPercent(event)
   if (event.source === "feedback") return feedbackProgressPercent(event)
   if (event.source === "suppressed") return suppressedProgressPercent(event)
+  if (event.source === "shippingQueue") return shippingQueueProgressPercent(event)
   return null
 }
 
@@ -150,6 +153,15 @@ export function feedbackProgressPercent(
   return Math.round(100 * Math.min(1, (event.loaded ?? 0) / total))
 }
 
+export function shippingQueueProgressPercent(
+  event: Pick<ReportProgressEvent, "loaded" | "total" | "status">,
+): number | null {
+  if (event.status === "complete") return 100
+  const total = event.total
+  if (total == null || total <= 0) return null
+  return Math.round(100 * Math.min(1, (event.loaded ?? 0) / total))
+}
+
 export function reportSourceDetail(source: ReportSource, state: ReportSourceState): string {
   if (state.status === "pending") return "Waiting"
   if (state.status === "complete") return "Done"
@@ -176,6 +188,15 @@ export function reportSourceDetail(source: ReportSource, state: ReportSourceStat
     if (state.total != null) return `${state.loaded ?? 0} of ${state.total} listings`
     if (state.loaded) return `${state.loaded} listings`
     return "Loading listings"
+  }
+  if (source === "shippingQueue") {
+    if (state.phase === "details") {
+      if (state.total) return `Shipment details ${state.loaded ?? 0} of ${state.total}`
+      return "Loading shipment details"
+    }
+    if (state.total != null) return `${state.loaded ?? 0} of ${state.total} shipments`
+    if (state.loaded) return `${state.loaded} shipments`
+    return "Loading shipments"
   }
   return "Loading"
 }

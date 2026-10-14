@@ -45,6 +45,7 @@ function extensionScriptsPlugin(): Plugin {
   const feedbackPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/feedback.ts")
   const strandedPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/stranded.ts")
   const suppressedPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/suppressed.ts")
+  const shippingQueuePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/shippingQueue.ts")
   const contentPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/content.tsx")
   const shortcutPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/shortcut.ts")
 
@@ -64,11 +65,12 @@ function extensionScriptsPlugin(): Plugin {
       this.addWatchFile(feedbackPath)
       this.addWatchFile(strandedPath)
       this.addWatchFile(suppressedPath)
+      this.addWatchFile(shippingQueuePath)
       this.addWatchFile(contentPath)
       this.addWatchFile(shortcutPath)
     },
     async generateBundle(_options, bundle) {
-      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource, settingsSource, sellerCentralSessionSource, unfulfillableSource, feedbackSource, strandedSource, suppressedSource, contentSource, shortcutSource, geistFont] = await Promise.all([
+      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource, settingsSource, sellerCentralSessionSource, unfulfillableSource, feedbackSource, strandedSource, suppressedSource, shippingQueueSource, contentSource, shortcutSource, geistFont] = await Promise.all([
         readFile(backgroundPath, "utf8"),
         readFile(pasteGuardPath, "utf8"),
         readFile(passkeyGuardPath, "utf8"),
@@ -81,11 +83,12 @@ function extensionScriptsPlugin(): Plugin {
         readFile(feedbackPath, "utf8"),
         readFile(strandedPath, "utf8"),
         readFile(suppressedPath, "utf8"),
+        readFile(shippingQueuePath, "utf8"),
         readFile(contentPath, "utf8"),
         readFile(shortcutPath, "utf8"),
         readFile(geistFontPath),
       ])
-      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult, settingsResult, sellerCentralSessionResult, unfulfillableResult, feedbackResult, strandedResult, suppressedResult, contentResult, shortcutResult] = await Promise.all([
+      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult, settingsResult, sellerCentralSessionResult, unfulfillableResult, feedbackResult, strandedResult, suppressedResult, shippingQueueResult, contentResult, shortcutResult] = await Promise.all([
         transformWithOxc(backgroundSource, backgroundPath),
         transformWithOxc(pasteGuardSource, pasteGuardPath),
         transformWithOxc(passkeyGuardSource, passkeyGuardPath),
@@ -98,6 +101,7 @@ function extensionScriptsPlugin(): Plugin {
         transformWithOxc(feedbackSource, feedbackPath),
         transformWithOxc(strandedSource, strandedPath),
         transformWithOxc(suppressedSource, suppressedPath),
+        transformWithOxc(shippingQueueSource, shippingQueuePath),
         transformWithOxc(contentSource, contentPath),
         transformWithOxc(shortcutSource, shortcutPath),
       ])
@@ -107,7 +111,7 @@ function extensionScriptsPlugin(): Plugin {
         `${sellerCentralSessionBoot}\n${stripModuleSyntax(accountAutomationResult.code)}`,
       )
       const contentBoot = asClassicContentScript(
-        `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(unfulfillableResult.code)}\n${stripModuleSyntax(feedbackResult.code)}\n${stripModuleSyntax(strandedResult.code)}\n${stripModuleSyntax(suppressedResult.code)}\n${stripModuleSyntax(contentResult.code)}`,
+        `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(unfulfillableResult.code)}\n${stripModuleSyntax(feedbackResult.code)}\n${stripModuleSyntax(strandedResult.code)}\n${stripModuleSyntax(suppressedResult.code)}\n${stripModuleSyntax(shippingQueueResult.code)}\n${stripModuleSyntax(contentResult.code)}`,
       )
 
       this.emitFile({

@@ -477,6 +477,38 @@ export async function fetchSuppressedReport(senderTab) {
 	await waitForTabComplete(tabId);
 	return sendSuppressedFetch(tabId);
 }
+async function sendShippingQueueFetch(tabId) {
+	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
+	let lastError;
+	while (Date.now() < deadline) {
+		try {
+			const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_SHIPPING_QUEUE" });
+			if (response?.ok) {
+				return {
+					ok: true,
+					shipments: Array.isArray(response.shipments) ? response.shipments : []
+				};
+			}
+			throw new Error(response?.error ?? "Couldn’t load shipping queue.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!/Receiving end does not exist/i.test(message)) {
+				console.error("[ShippingQueue Background] Fetch failed:", error);
+				throw error instanceof Error ? error : new Error(message);
+			}
+			lastError = message;
+		}
+		await sleep(SESSION_PROBE_INTERVAL_MS);
+	}
+	console.error("[ShippingQueue Background] Timed out waiting for content script:", lastError);
+	throw new Error(lastError ?? "Couldn’t load shipping queue.");
+}
+export async function fetchShippingQueueReport(senderTab) {
+	rememberReportProgressTab(senderTab?.id);
+	const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false });
+	await waitForTabComplete(tabId);
+	return sendShippingQueueFetch(tabId);
+}
 export async function probeSellerCentralSession(tabId) {
 	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
 	let last;
@@ -1109,6 +1141,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 			void fetchSuppressedReport(sender.tab).then(sendResponse, (error) => sendResponse({
 				ok: false,
 				error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory."
+			}));
+			return true;
+		}
+		if (type === "REPORTS_FETCH_SHIPPING_QUEUE") {
+			void fetchShippingQueueReport(sender.tab).then(sendResponse, (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t load shipping queue."
 			}));
 			return true;
 		}

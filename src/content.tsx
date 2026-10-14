@@ -2,6 +2,7 @@ import { fetchNeutralNegativeFeedbacks } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
 import type { ReportProgressEvent } from "./lib/reportProgress"
 import { sellerCentralSessionStatus } from "./lib/sellerCentralSession"
+import { fetchShippingQueueShipments } from "./lib/shippingQueue"
 import { fetchStrandedListings } from "./lib/stranded"
 import { fetchSuppressedListings } from "./lib/suppressed"
 import { fetchUnfulfillableListings } from "./lib/unfulfillable"
@@ -138,6 +139,19 @@ export function handleContentMessage(
         ok: false,
         error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory.",
       }),
+    )
+    return true
+  }
+  if (record.type === "REPORTS_FETCH_SHIPPING_QUEUE") {
+    void fetchShippingQueueShipments({ onProgress: emitReportProgress }).then(
+      (shipments) => sendResponse({ ok: true, shipments }),
+      (error: unknown) => {
+        console.error("[ShippingQueue Content] Fetch failed:", error)
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : "Couldn’t load shipping queue.",
+        })
+      },
     )
     return true
   }

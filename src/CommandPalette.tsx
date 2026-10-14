@@ -431,6 +431,7 @@ export function CommandPalette({
           feedback: { status: "active" },
           stranded: { status: "active" },
           suppressed: { status: "active" },
+          shippingQueue: { status: "active" },
         },
       }))
       await onGenerateReports(

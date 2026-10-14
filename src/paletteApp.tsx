@@ -19,6 +19,7 @@ import {
   type ReportProgressEvent,
   type ReportSource,
 } from "./lib/reportProgress"
+import type { ShippingQueueShipment } from "./lib/shippingQueue"
 import type { StrandedListing } from "./lib/stranded"
 import type { SuppressedListing } from "./lib/suppressed"
 import type { UnfulfillableListing } from "./lib/unfulfillable"
@@ -306,6 +307,16 @@ export async function fetchSuppressedListingsFromBackground(): Promise<Suppresse
   return Array.isArray(response.listings) ? response.listings : []
 }
 
+export async function fetchShippingQueueFromBackground(): Promise<ShippingQueueShipment[]> {
+  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_SHIPPING_QUEUE" }) as {
+    ok?: boolean
+    shipments?: ShippingQueueShipment[]
+    error?: string
+  }
+  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  return Array.isArray(response.shipments) ? response.shipments : []
+}
+
 const reportProgressListeners = new Set<(event: ReportProgressEvent) => void>()
 
 export function subscribeReportProgress(listener: (event: ReportProgressEvent) => void): () => void {
@@ -351,13 +362,15 @@ export async function generateReports(
     onProgress?.({ source: "feedback", status: "active" })
     onProgress?.({ source: "stranded", status: "active" })
     onProgress?.({ source: "suppressed", status: "active" })
-    const [listings, feedbacks, strandedListings, suppressedListings] = await Promise.all([
+    onProgress?.({ source: "shippingQueue", status: "active" })
+    const [listings, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
       trackReportSource("unfulfillable", fetchUnfulfillableListingsFromBackground(), [], onProgress),
       trackReportSource("feedback", fetchFeedbacksFromBackground(), [], onProgress),
       trackReportSource("stranded", fetchStrandedListingsFromBackground(), [], onProgress),
       trackReportSource("suppressed", fetchSuppressedListingsFromBackground(), [], onProgress),
+      trackReportSource("shippingQueue", fetchShippingQueueFromBackground(), [], onProgress),
     ])
-    downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings, suppressedListings)), reportFileName(storeName, now), targetDocument)
+    downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings, suppressedListings, shipments)), reportFileName(storeName, now), targetDocument)
   } finally {
     unsubscribe()
   }

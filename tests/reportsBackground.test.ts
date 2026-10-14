@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   fetchFeedbackReport,
+  fetchShippingQueueReport,
   fetchStrandedReport,
   fetchSuppressedReport,
   fetchUnfulfillableReport,
@@ -333,15 +334,63 @@ describe("Generate Reports suppressed fetch", () => {
   })
 })
 
+describe("Generate Reports shipping queue fetch", () => {
+  const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; shipments?: unknown[]; error?: string }> => ({ ok: true, shipments: [] }))
+  const focusWindow = vi.fn(async () => ({}))
+  const addUpdatedListener = vi.fn()
+  const removeUpdatedListener = vi.fn()
+
+  beforeEach(() => {
+    create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 })
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([])
+    get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, shipments: [] })
+    focusWindow.mockReset(); focusWindow.mockResolvedValue({})
+    addUpdatedListener.mockReset()
+    removeUpdatedListener.mockReset()
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create,
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: addUpdatedListener, removeListener: removeUpdatedListener },
+      },
+      windows: { update: focusWindow },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("fetches shipments from the current Seller Central tab", async () => {
+    const shipments = [{ shipmentId: "FBA19RKC646S", shipmentName: "Test Shipment" }]
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockResolvedValue({ ok: true, shipments })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(fetchShippingQueueReport(sender)).resolves.toEqual({ ok: true, shipments })
+    expect(update).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+  })
+})
+
 describe("Generate Reports parallel fetches", () => {
   const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
   const update = vi.fn(async () => ({}))
   const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
   const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
-  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; listings?: unknown[]; feedbacks?: unknown[] }> => ({
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; listings?: unknown[]; feedbacks?: unknown[]; shipments?: unknown[] }> => ({
     ok: true,
     listings: [],
     feedbacks: [],
+    shipments: [],
   }))
   const focusWindow = vi.fn(async () => ({}))
 
@@ -350,7 +399,7 @@ describe("Generate Reports parallel fetches", () => {
     update.mockReset(); update.mockResolvedValue({})
     query.mockReset(); query.mockResolvedValue([])
     get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
-    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, listings: [], feedbacks: [] })
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, listings: [], feedbacks: [], shipments: [] })
     focusWindow.mockReset(); focusWindow.mockResolvedValue({})
     vi.stubGlobal("chrome", {
       tabs: {
@@ -367,7 +416,7 @@ describe("Generate Reports parallel fetches", () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
-  it("opens only one Seller Central tab when four fetches race", async () => {
+  it("opens only one Seller Central tab when five fetches race", async () => {
     let created = false
     query.mockImplementation(async () => (
       created ? [{ id: 91, windowId: 4, lastAccessed: 1 } as chrome.tabs.Tab] : []
@@ -383,6 +432,7 @@ describe("Generate Reports parallel fetches", () => {
       fetchFeedbackReport(sender),
       fetchStrandedReport(sender),
       fetchSuppressedReport(sender),
+      fetchShippingQueueReport(sender),
     ])
 
     expect(create).toHaveBeenCalledOnce()
@@ -393,9 +443,9 @@ describe("Generate Reports parallel fetches", () => {
     get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
-    await fetchSuppressedReport(sender)
+    await fetchShippingQueueReport(sender)
     sendMessage.mockClear()
-    await relayReportProgress({ type: "REPORTS_PROGRESS", source: "suppressed", status: "active" })
-    expect(sendMessage).toHaveBeenCalledWith(7, { type: "REPORTS_PROGRESS", source: "suppressed", status: "active" })
+    await relayReportProgress({ type: "REPORTS_PROGRESS", source: "shippingQueue", status: "active" })
+    expect(sendMessage).toHaveBeenCalledWith(7, { type: "REPORTS_PROGRESS", source: "shippingQueue", status: "active" })
   })
 })

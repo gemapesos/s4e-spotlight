@@ -235,6 +235,7 @@ describe("content-script mount", () => {
       if (message.type === "REPORTS_FETCH_FEEDBACK") return { ok: true, feedbacks: [] }
       if (message.type === "REPORTS_FETCH_STRANDED") return { ok: true, listings: [] }
       if (message.type === "REPORTS_FETCH_SUPPRESSED") return { ok: true, listings: [] }
+      if (message.type === "REPORTS_FETCH_SHIPPING_QUEUE") return { ok: true, shipments: [] }
       return {
         ok: true,
         initialized: true,
@@ -261,6 +262,7 @@ describe("content-script mount", () => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
       expect(createObjectURL).toHaveBeenCalledOnce()
 
@@ -270,6 +272,7 @@ describe("content-script mount", () => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
       expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
     } finally {
@@ -277,7 +280,7 @@ describe("content-script mount", () => {
     }
   })
 
-  it("starts unfulfillable, feedback, stranded, and suppressed fetches in parallel", async () => {
+  it("starts unfulfillable, feedback, stranded, suppressed, and shipping queue fetches in parallel", async () => {
     const resolvers: Record<string, (value: unknown) => void> = {}
     const sendMessage = vi.fn((message: { type?: string }) => new Promise((resolve) => {
       resolvers[message.type ?? ""] = resolve
@@ -295,24 +298,29 @@ describe("content-script mount", () => {
         expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
         expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
         expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
       })
       expect(resolvers.REPORTS_FETCH_UNFULFILLABLE).toBeTypeOf("function")
       expect(resolvers.REPORTS_FETCH_FEEDBACK).toBeTypeOf("function")
       expect(resolvers.REPORTS_FETCH_STRANDED).toBeTypeOf("function")
       expect(resolvers.REPORTS_FETCH_SUPPRESSED).toBeTypeOf("function")
+      expect(resolvers.REPORTS_FETCH_SHIPPING_QUEUE).toBeTypeOf("function")
       expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "active" })
       expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "active" })
       expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "active" })
       expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "active" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "active" })
       resolvers.REPORTS_FETCH_UNFULFILLABLE?.({ ok: true, listings: [] })
       resolvers.REPORTS_FETCH_FEEDBACK?.({ ok: true, feedbacks: [] })
       resolvers.REPORTS_FETCH_STRANDED?.({ ok: true, listings: [] })
       resolvers.REPORTS_FETCH_SUPPRESSED?.({ ok: true, listings: [] })
+      resolvers.REPORTS_FETCH_SHIPPING_QUEUE?.({ ok: true, shipments: [] })
       await pending
       expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete" })
     } finally {
       click.mockRestore()
     }
@@ -331,6 +339,9 @@ describe("content-script mount", () => {
       }
       if (message.type === "REPORTS_FETCH_SUPPRESSED") {
         return { ok: true, listings: [{ coreListingFields: { sku: "STOCK-SKU" }, availability: { quantity: 4 } }] }
+      }
+      if (message.type === "REPORTS_FETCH_SHIPPING_QUEUE") {
+        return { ok: true, shipments: [] }
       }
       return { ok: true, currentStore: { name: "JMG Outdoors" } }
     })
@@ -351,10 +362,12 @@ describe("content-script mount", () => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
       expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "error" })
       expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete" })
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
       expect(createObjectURL).toHaveBeenCalledOnce()
     } finally {
@@ -368,6 +381,7 @@ describe("content-script mount", () => {
       if (message.type === "REPORTS_FETCH_FEEDBACK") return { ok: true, feedbacks: [] }
       if (message.type === "REPORTS_FETCH_STRANDED") return { ok: true, listings: [] }
       if (message.type === "REPORTS_FETCH_SUPPRESSED") return { ok: true, listings: [] }
+      if (message.type === "REPORTS_FETCH_SHIPPING_QUEUE") return { ok: true, shipments: [] }
       return {
         ok: true,
         initialized: true,
@@ -395,6 +409,7 @@ describe("content-script mount", () => {
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
       expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")
     } finally {
       click.mockRestore()

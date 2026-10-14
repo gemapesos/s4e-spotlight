@@ -157,6 +157,30 @@ describe("report workbook", () => {
           availability: { quantity: 0 },
         },
       ],
+      [
+        {
+          shipmentName: "FBA STA (09/29/2026 15:25)-HGR6",
+          shipmentId: "FBA19RKC646S",
+          destinationFC: "HGR6",
+          fcAddress: "US",
+          shipmentStatus: "CLOSED",
+          createdDate: 1790695510000,
+          lastUpdatedDate: 1791563619000,
+          mskus: 9,
+          shippedQuantity: 26,
+          receivedQuantity: 24,
+          expectedQuantity: 26,
+          locatedQuantity: 24,
+          stowedQuantity: 24,
+          workflowId: "wff782a6b5-8e13-47a0-9e82-417a9c198772",
+          workflowType: "SEND_TO_AMAZON",
+          poId: "67ZEINCX",
+          blocked: false,
+          partneredImport: false,
+          merchantLaunched: false,
+          finalized: false,
+        },
+      ],
     ))
     expect(listWorkbookSheetNames(bytes)).toEqual([...REPORT_SHEETS])
 
@@ -209,8 +233,18 @@ describe("report workbook", () => {
     expect(suppressed).not.toContain("ZERO-SKU")
 
     const shippingQueue = new TextDecoder().decode(files.get("xl/worksheets/sheet5.xml"))
-    expect(shippingQueue).toContain("<sheetData/>")
-    expect(shippingQueue).not.toContain("<row")
+    expect(shippingQueue).toContain("<row r=\"1\">")
+    expect(shippingQueue).toContain("Shipment Name")
+    expect(shippingQueue).toContain("Shipment ID")
+    expect(shippingQueue).toContain("Shipment URL")
+    expect(shippingQueue).toContain("Quantity Discrepancy")
+    expect(shippingQueue).toContain("FBA19RKC646S")
+    expect(shippingQueue).toContain("HGR6")
+    expect(shippingQueue).toContain("29-Sep-2026 15:25:10")
+    // Shipped quantity: 26 (numeric), received quantity: 24 (numeric), discrepancy: -2 (numeric)
+    expect(shippingQueue).toContain("<v>26</v>")
+    expect(shippingQueue).toContain("<v>24</v>")
+    expect(shippingQueue).toContain("<v>-2</v>")
   })
 })
 

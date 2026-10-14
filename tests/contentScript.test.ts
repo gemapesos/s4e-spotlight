@@ -277,4 +277,48 @@ describe("content script report messages", () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it("fetches shipments from Seller Central shipping queue API", async () => {
+    const rawShipments = [
+      {
+        shipmentName: "FBA STA (09/29/2026 15:25)-HGR6",
+        shipmentId: "FBA19RKC646S",
+        destinationFC: "HGR6",
+        shipmentStatus: "CLOSED",
+        createdDate: 1790695510000,
+        lastUpdatedDate: 1791563619000,
+      },
+    ]
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => rawShipments,
+    }))
+    vi.stubGlobal("fetch", fetchImpl)
+    const sendResponse = vi.fn()
+
+    try {
+      expect(handleContentMessage(
+        { type: "REPORTS_FETCH_SHIPPING_QUEUE" },
+        {} as chrome.runtime.MessageSender,
+        sendResponse,
+      )).toBe(true)
+
+      await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+        ok: true,
+        shipments: [expect.objectContaining({
+          shipmentName: "FBA STA (09/29/2026 15:25)-HGR6",
+          shipmentId: "FBA19RKC646S",
+          destinationFC: "HGR6",
+          shipmentStatus: "CLOSED",
+        })],
+      }))
+      expect(fetchImpl).toHaveBeenCalledWith(
+        expect.stringContaining("https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments"),
+        expect.objectContaining({ method: "GET", credentials: "include" }),
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
