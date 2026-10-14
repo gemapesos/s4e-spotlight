@@ -430,6 +430,7 @@ export function CommandPalette({
           unfulfillable: { status: "active" },
           feedback: { status: "active" },
           stranded: { status: "active" },
+          suppressed: { status: "active" },
         },
       }))
       await onGenerateReports(

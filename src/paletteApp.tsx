@@ -20,6 +20,7 @@ import {
   type ReportSource,
 } from "./lib/reportProgress"
 import type { StrandedListing } from "./lib/stranded"
+import type { SuppressedListing } from "./lib/suppressed"
 import type { UnfulfillableListing } from "./lib/unfulfillable"
 
 const HOST_ID = "command-palette-extension-root"
@@ -295,6 +296,16 @@ export async function fetchStrandedListingsFromBackground(): Promise<StrandedLis
   return Array.isArray(response.listings) ? response.listings : []
 }
 
+export async function fetchSuppressedListingsFromBackground(): Promise<SuppressedListing[]> {
+  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_SUPPRESSED" }) as {
+    ok?: boolean
+    listings?: SuppressedListing[]
+    error?: string
+  }
+  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  return Array.isArray(response.listings) ? response.listings : []
+}
+
 const reportProgressListeners = new Set<(event: ReportProgressEvent) => void>()
 
 export function subscribeReportProgress(listener: (event: ReportProgressEvent) => void): () => void {
@@ -339,12 +350,14 @@ export async function generateReports(
     onProgress?.({ source: "unfulfillable", status: "active" })
     onProgress?.({ source: "feedback", status: "active" })
     onProgress?.({ source: "stranded", status: "active" })
-    const [listings, feedbacks, strandedListings] = await Promise.all([
+    onProgress?.({ source: "suppressed", status: "active" })
+    const [listings, feedbacks, strandedListings, suppressedListings] = await Promise.all([
       trackReportSource("unfulfillable", fetchUnfulfillableListingsFromBackground(), [], onProgress),
       trackReportSource("feedback", fetchFeedbacksFromBackground(), [], onProgress),
       trackReportSource("stranded", fetchStrandedListingsFromBackground(), [], onProgress),
+      trackReportSource("suppressed", fetchSuppressedListingsFromBackground(), [], onProgress),
     ])
-    downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings)), reportFileName(storeName, now), targetDocument)
+    downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings, suppressedListings)), reportFileName(storeName, now), targetDocument)
   } finally {
     unsubscribe()
   }

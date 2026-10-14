@@ -15,11 +15,14 @@ describe("report progress helpers", () => {
     expect(unfulfillableProgressPercent({ status: "complete" })).toBe(100)
   })
 
-  it("keeps feedback indeterminate until the last page is known", () => {
+  it("calculates progress percentages correctly for all sources", () => {
     expect(feedbackProgressPercent({ status: "active", loaded: 2 })).toBeNull()
     expect(feedbackProgressPercent({ status: "active", loaded: 2, total: 4 })).toBe(50)
     expect(reportSourcePercent({ source: "stranded", status: "active" })).toBeNull()
     expect(reportSourcePercent({ source: "stranded", status: "complete" })).toBe(100)
+    expect(reportSourcePercent({ source: "suppressed", status: "active", loaded: 1, total: 4, phase: "listings" })).toBe(20)
+    expect(reportSourcePercent({ source: "suppressed", status: "active", loaded: 2, total: 4, phase: "issues" })).toBe(90)
+    expect(reportSourcePercent({ source: "suppressed", status: "complete" })).toBe(100)
   })
 
   it("applies per-source events without resetting the others", () => {
@@ -31,6 +34,7 @@ describe("report progress helpers", () => {
           unfulfillable: { status: "active" },
           feedback: { status: "active" },
           stranded: { status: "active" },
+          suppressed: { status: "active" },
         },
       },
       { source: "feedback", status: "active", loaded: 2 },
@@ -38,5 +42,6 @@ describe("report progress helpers", () => {
     expect(next.sources.feedback).toEqual({ status: "active", loaded: 2, total: undefined, phase: undefined })
     expect(next.sources.unfulfillable.status).toBe("active")
     expect(next.sources.stranded.status).toBe("active")
+    expect(next.sources.suppressed.status).toBe("active")
   })
 })

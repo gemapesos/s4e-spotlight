@@ -83,7 +83,7 @@ describe("report workbook", () => {
     ])
   })
 
-  it("fills Unfulfillable and Stranded rows and stacks Daily Tasks sections", () => {
+  it("fills Unfulfillable, Stranded, and in-stock Suppressed rows and stacks Daily Tasks sections", () => {
     const bytes = buildReportWorkbook(reportWorkbookSheets(
       [
         {
@@ -133,6 +133,30 @@ describe("report workbook", () => {
           SupportedActions: "EditListing#RemovalOrder#RefreshSIRC#PostponeAutoRemoval",
         },
       ],
+      [
+        {
+          coreListingFields: { sku: "STOCK-SKU", asin: "B0STOCK", fnSku: "X00STOCK", fulfillmentChannel: "AFN" },
+          listingData: { title: "In-stock suppressed towel" },
+          status: {
+            status: "SEARCH_SUPPRESSED",
+            statusText: "Search suppressed",
+            inlineAction: "FIX_LISTING_SUPPRESSION",
+            inlineActionText: "Fix listing suppression",
+          },
+          availability: { quantity: 12 },
+          offers: [{ price: { price: { amount: "16.99", currencyUnit: "USD" } } }],
+          issues: [{
+            localizedIssueMessage: "'Product Description' is required but missing.",
+            type: "CVS_MISSING_REQUIRED_ATTRIBUTE",
+          }],
+        },
+        {
+          coreListingFields: { sku: "ZERO-SKU", asin: "B0ZERO", fnSku: "X00ZERO" },
+          listingData: { title: "Zero quantity suppressed towel" },
+          status: { status: "SEARCH_SUPPRESSED" },
+          availability: { quantity: 0 },
+        },
+      ],
     ))
     expect(listWorkbookSheetNames(bytes)).toEqual([...REPORT_SHEETS])
 
@@ -175,11 +199,18 @@ describe("report workbook", () => {
     expect(stranded).toContain('<c r="J2"><v>1</v></c>')
     expect(stranded).not.toContain('<c r="H2" t="inlineStr">')
 
-    for (const index of [3, 4]) {
-      const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
-      expect(sheet).toContain("<sheetData/>")
-      expect(sheet).not.toContain("<row")
-    }
+    const suppressed = new TextDecoder().decode(files.get("xl/worksheets/sheet4.xml"))
+    expect(suppressed).toContain("<row r=\"1\">")
+    expect(suppressed).toContain("SKU")
+    expect(suppressed).toContain("STOCK-SKU")
+    expect(suppressed).toContain("Search Suppressed")
+    expect(suppressed).toContain("FIX_LISTING_SUPPRESSION")
+    expect(suppressed).toContain("Product Description")
+    expect(suppressed).not.toContain("ZERO-SKU")
+
+    const shippingQueue = new TextDecoder().decode(files.get("xl/worksheets/sheet5.xml"))
+    expect(shippingQueue).toContain("<sheetData/>")
+    expect(shippingQueue).not.toContain("<row")
   })
 })
 

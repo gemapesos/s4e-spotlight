@@ -3,6 +3,7 @@ import { isPaletteShortcut } from "./lib/shortcut"
 import type { ReportProgressEvent } from "./lib/reportProgress"
 import { sellerCentralSessionStatus } from "./lib/sellerCentralSession"
 import { fetchStrandedListings } from "./lib/stranded"
+import { fetchSuppressedListings } from "./lib/suppressed"
 import { fetchUnfulfillableListings } from "./lib/unfulfillable"
 
 const PALETTE_APP_FILE = "palette-app.js"
@@ -126,6 +127,16 @@ export function handleContentMessage(
       (error: unknown) => sendResponse({
         ok: false,
         error: error instanceof Error ? error.message : "Couldn’t load stranded inventory.",
+      }),
+    )
+    return true
+  }
+  if (record.type === "REPORTS_FETCH_SUPPRESSED") {
+    void fetchSuppressedListings({ onProgress: emitReportProgress }).then(
+      (listings) => sendResponse({ ok: true, listings }),
+      (error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory.",
       }),
     )
     return true

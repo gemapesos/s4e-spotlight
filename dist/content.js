@@ -1103,6 +1103,1086 @@ async function fetchStrandedListings(options = {}) {
 	return listings;
 }
 
+const SUPPRESSED_GQL_URL = UNFULFILLABLE_GQL_URL;
+const SUPPRESSED_PAGE_SIZE = 250;
+const SUPPRESSED_MAX_PAGES = 40;
+const SUPPRESSED_LISTINGS_INCOMPLETE_NOTE = "Some search-suppressed listings could not be loaded. This sheet includes only the listings that were obtainable.";
+const SUPPRESSED_ISSUES_INCOMPLETE_NOTE = "Suppression reasons could not be loaded for some SKUs. Those rows are marked “Couldn’t load suppression reason”.";
+const SUPPRESSED_ISSUE_UNAVAILABLE = "Couldn’t load suppression reason";
+const SUPPRESSED_ISSUES_CONCURRENCY = 5;
+const SUPPRESSED_SHEET_HEADERS = [
+	"SKU",
+	"ASIN",
+	"FNSKU",
+	"Title",
+	"Title differentiation",
+	"Image URL",
+	"Detail page URL",
+	"SKU Central link",
+	"Status",
+	"Status text",
+	"Highlighted state",
+	"Inline action",
+	"Inline action text",
+	"Fix listing URL",
+	"Issue",
+	"Issue type",
+	"Issue attribute",
+	"Enforcement",
+	"Issue source",
+	"Issue tags",
+	"Product type",
+	"Listing type",
+	"Bundle status",
+	"Fulfillment channel",
+	"Condition",
+	"Sub-condition",
+	"Parent ASIN",
+	"Parent SKU",
+	"Children",
+	"Is parent",
+	"Is customizable",
+	"Marketplace count",
+	"External IDs",
+	"Favorite",
+	"Tags",
+	"Shipping template",
+	"Shipping template ID",
+	"Legacy template",
+	"Date created",
+	"Last updated",
+	"Last 30 day GMS",
+	"Last 30 day GV",
+	"Last 30 day units sold",
+	"Quality grade",
+	"Quality grade updated",
+	"Available",
+	"Infinite quantity",
+	"Inventory availability",
+	"On hand",
+	"Inbound",
+	"Reserved",
+	"Reserved FC transfer",
+	"Reserved customer order",
+	"Reserved FC processing",
+	"Buyable in transit",
+	"Pending customer orders in transit",
+	"Unfulfillable",
+	"Carrier damaged",
+	"Customer damaged",
+	"Defective",
+	"Expired",
+	"Warehouse damaged",
+	"Distributor damaged",
+	"Researching short term",
+	"Researching mid term",
+	"Researching long term",
+	"FBA recommendation",
+	"Fulfillment markets",
+	"AA availabilities",
+	"Inventory alert",
+	"Days of supply",
+	"Recommended inventory",
+	"Price",
+	"Currency",
+	"Sale price",
+	"Min allowed price",
+	"Max allowed price",
+	"Business price",
+	"Quantity discount",
+	"Max retail price",
+	"Estimated shipping",
+	"Points",
+	"Automated pricing",
+	"Tax rate",
+	"Tax exclusive price",
+	"Tax exclusive business price",
+	"Lowest price",
+	"Lowest shipping",
+	"Buy box price",
+	"Buy box shipping",
+	"Sales rank",
+	"Sales rank category",
+	"Competitive benchmark price",
+	"Competitive benchmark shipping",
+	"Business program",
+	"Haul offer",
+	"FFO offer",
+	"Non-ALL offer",
+	"Actions",
+	"Points Central link"
+];
+const GET_SUPPRESSED_LISTINGS_PREFIX = `fragment CurrencyFields on Currency {
+  amount
+  currencyUnit
+  currencySymbol
+  __typename
+}
+
+query getListingsV2($pagination: PaginationInput, $searchTerm: SearchTerm, $parentRecords: [String!], $multiSelectFilters: [MultiSelectFilter], $sortRequest: SortRequest, $multiSKUList: [String]) {
+  listingsV2(
+    pagination: $pagination
+    usecase: MANAGE_INVENTORY_VIEW
+    searchTerm: $searchTerm
+    parentRecords: $parentRecords
+    multiSelectFilters: $multiSelectFilters
+    sortRequest: $sortRequest
+    multiSKUList: $multiSKUList
+    features: ["EML_CDQ_ENABLED"]
+  ) {
+    listings {
+      coreListingFields {
+        asin
+        sku
+        fnSku
+        fulfillmentChannel
+        __typename
+      }
+      listingData {
+        asin
+        sku
+        fnSku
+        productType
+        bundleStatus
+        externalIds {
+          value
+          type
+          __typename
+        }
+        dateCreated
+        lastUpdated
+        parentAsin
+        parentSku
+        numberOfChildren
+        listingType
+        qualityRecommendationScore {
+          grade
+          lastUpdatedDate
+          __typename
+        }
+        last30DayGms
+        last30DayGv
+        last30DayUnitsSold
+        title
+        titleDifferentiation
+        __typename
+      }
+      annotations {
+        favorite
+        tagsAnnotation {
+          value
+          __typename
+        }
+        __typename
+      }
+      imageUrl
+      detailPageUrl
+      skuCentralLink
+      estimatedShipping {
+        ...CurrencyFields
+        __typename
+      }
+      isCustomizable
+      isParentListing
+      shippingTemplate {
+        Legacy
+        TemplateName
+        TemplateId
+        __typename
+      }
+      marketplaceCount
+      status {
+        status
+        statusText
+        redirectionLink
+        inlineAction
+        inlineActionText
+        highlightedState
+        __typename
+      }
+      actions {
+        __typename
+        ... on ListingActionWorkflow {
+          type
+          displayGroup
+          solutionId
+          solutionParams {
+            key
+            value
+            __typename
+          }
+          __typename
+        }
+        ... on ListingActionRedirect {
+          type
+          displayGroup
+          isFetchRequest
+          queryParams {
+            key
+            value
+            __typename
+          }
+          url
+          fragmentIdentifier
+          __typename
+        }
+        ... on ListingActionAnnotation {
+          type
+          displayGroup
+          listingAnnotations {
+            favorite
+            __typename
+          }
+          __typename
+        }
+        ... on ListingActionOperation {
+          type
+          displayGroup
+          offerIds
+          params {
+            key
+            value
+            __typename
+          }
+          __typename
+        }
+      }
+      availability {
+        reserved {
+          fcTransfer
+          customerOrder
+          fcProcessing
+          __typename
+        }
+        buyableInTransit
+        pendingCustomerOrdersInTransit
+        quantity
+        isQuantityInfinite
+        inventoryAvailability
+        unfulfillable
+        unfulfillableDetails {
+          expired
+          damagedByCarrier
+          damagedByCustomer
+          damagedByDistributor
+          damagedByWarehouse
+          defective
+          __typename
+        }
+        researching {
+          shortTerm
+          midTerm
+          longTerm
+          __typename
+        }
+        inbound
+        onHandQuantity
+        reservedQuantity
+        fbaRecommendation {
+          type
+          attributes
+          tags
+          parameters {
+            key
+            value
+            __typename
+          }
+          enforcementActions
+          exemptionsExpiryDate
+          creationTimestamp
+          __typename
+        }
+        availabilities {
+          fmid
+          quantity
+          fulfillmentChannelName
+          isFulfilledByAmazon
+          __typename
+        }
+        aaAvailabilities {
+          quantity
+          fulfillmentChannelName
+          isAggregatedAvailability
+          __typename
+        }
+        inventoryAlert {
+          isThresholdReached
+          threshold
+          alertType
+          __typename
+        }
+        recommendation {
+          daysOfSupply
+          recommendedInventory
+          __typename
+        }
+        __typename
+      }
+      offers {
+        offerId
+        marketplace {
+          marketplaceId
+          defaultCountryCode
+          __typename
+        }
+        ... on Offer3P {
+          fulfillmentChannel
+          businessProgram {
+            value
+            valueLabel
+            __typename
+          }
+          minAllowedPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          maxAllowedPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          price {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          businessPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            percentQuantityPrice {
+              quantity
+              amount
+              __typename
+            }
+            fixedQuantityPrice {
+              quantity
+              amount
+              __typename
+            }
+            __typename
+          }
+          quantityDiscount {
+            percentQuantityPrice {
+              quantity
+              amount
+              __typename
+            }
+            fixedQuantityPrice {
+              quantity
+              amount
+              __typename
+            }
+            __typename
+          }
+          salePrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          condition {
+            condition
+            subCondition
+            __typename
+          }
+          points
+          pointsLink
+          automatedPricing {
+            enrollmentStatus
+            __typename
+          }
+          maxRetailPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          haulOffer {
+            offerId
+            label
+            state
+            isHaulOffer
+            hasHaulOffer
+            haulPrice {
+              price {
+                ...CurrencyFields
+                __typename
+              }
+              __typename
+            }
+            __typename
+          }
+          ffoOffer {
+            offerId
+            label
+            state
+            isFFOOffer
+            ffoPrice {
+              price {
+                ...CurrencyFields
+                __typename
+              }
+              __typename
+            }
+            __typename
+          }
+          nonAllOffer {
+            label
+            state
+            isNonAllOffer
+            hasNonAllOffer
+            nonAllPrice {
+              price {
+                ...CurrencyFields
+                __typename
+              }
+              __typename
+            }
+            __typename
+          }
+          __typename
+        }
+        __typename
+      }
+      pricing {
+        competitionState {
+          lowestPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            shipping {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          lowestOfferPoints
+          buyBoxPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            shipping {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          buyBoxPoints
+          salesRank {
+            rank
+            productCategory
+            __typename
+          }
+          __typename
+        }
+        competitivePricingSummary {
+          competitiveBenchmarkPrice {
+            price {
+              ...CurrencyFields
+              __typename
+            }
+            shipping {
+              ...CurrencyFields
+              __typename
+            }
+            __typename
+          }
+          __typename
+        }
+        points
+        automatedPricing {
+          enrollmentStatus
+          __typename
+        }
+        taxData {
+          taxRate
+          taxExclusivePrice
+          taxExclusiveBusinessPrice
+          __typename
+        }
+        __typename
+      }
+      pointsCentralLink
+      __typename
+    }
+    count`;
+const GET_SUPPRESSED_LISTINGS_QUERY = `${GET_SUPPRESSED_LISTINGS_PREFIX}
+    __typename
+  }
+}`;
+const GET_LISTING_ISSUES_QUERY = `query getListingIssuesActionsForSku($sku: String!, $contributorToken: String, $marketplaceIds: [String], $clientType: SparcClientType) {
+  listingIssuesActions(
+    input: {sku: $sku, marketplaceIds: $marketplaceIds, contributorId: $contributorToken, clientType: $clientType}
+  ) {
+    issues {
+      localizedIssueMessage
+      type
+      tags
+      enforcementActions
+      issueSource
+      parameters {
+        key
+        value
+        __typename
+      }
+      issuePathForwards {
+        type
+        attributes {
+          v3FlatPath
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}`;
+function suppressedCell(value) {
+	if (value == null) return "";
+	return String(value);
+}
+function suppressedQuantity(value) {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function optionalNumber(value) {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && value.trim()) {
+		const amount = Number(value);
+		if (Number.isFinite(amount)) return amount;
+	}
+	return "";
+}
+function suppressedYesNo(value) {
+	if (value == null) return "";
+	return value ? "Yes" : "No";
+}
+function currencyAmount(price) {
+	return optionalNumber(price?.amount);
+}
+function joinParts(parts) {
+	return parts.map((part) => part == null ? "" : String(part).trim()).filter(Boolean).join(" | ");
+}
+function keyValues(pairs) {
+	return (pairs ?? []).filter((pair) => Boolean(pair)).map((pair) => `${pair.key ?? ""}=${pair.value ?? ""}`).filter((part) => part !== "=").join(", ");
+}
+function quantityPrices(entries, suffix = "") {
+	return (entries ?? []).filter((entry) => Boolean(entry)).map((entry) => `${suppressedCell(entry.quantity)}${suffix}:${suppressedCell(entry.amount)}`).filter((part) => part !== `${suffix}:` && part !== ":");
+}
+function formatQuantityDiscount(discount) {
+	if (!discount) return "";
+	return [...quantityPrices(discount.percentQuantityPrice, "%"), ...quantityPrices(discount.fixedQuantityPrice)].join(", ");
+}
+function formatFbaRecommendation(recommendation) {
+	if (!recommendation) return "";
+	return joinParts([
+		recommendation.type,
+		(recommendation.tags ?? []).filter(Boolean).join(", "),
+		(recommendation.attributes ?? []).filter(Boolean).join(", "),
+		keyValues(recommendation.parameters),
+		(recommendation.enforcementActions ?? []).filter(Boolean).join(", ")
+	]);
+}
+function formatAvailabilities(listing) {
+	return (listing.availability?.availabilities ?? []).filter((item) => Boolean(item)).map((item) => `${suppressedCell(item.fmid)}:${suppressedQuantity(item.quantity)}:${suppressedCell(item.fulfillmentChannelName)}`).filter(Boolean).join(" | ");
+}
+function formatAaAvailabilities(listing) {
+	return (listing.availability?.aaAvailabilities ?? []).filter((item) => Boolean(item)).map((item) => joinParts([
+		item.fulfillmentChannelName,
+		suppressedQuantity(item.quantity),
+		item.isAggregatedAvailability ? "aggregated" : ""
+	])).filter(Boolean).join(" | ");
+}
+function formatInventoryAlert(listing) {
+	const alert = listing.availability?.inventoryAlert;
+	if (!alert) return "";
+	return joinParts([
+		alert.alertType,
+		alert.threshold == null ? "" : `threshold=${alert.threshold}`,
+		alert.isThresholdReached == null ? "" : `reached=${suppressedYesNo(alert.isThresholdReached)}`
+	]);
+}
+function formatSpecialOffer(offer, price) {
+	if (!offer) return "";
+	const amount = currencyAmount(price);
+	return joinParts([
+		offer.label,
+		offer.state,
+		amount === "" ? "" : amount
+	]);
+}
+function offerRichness(offer) {
+	let score = 0;
+	const bump = (value) => {
+		if (value != null && value !== "") score += 1;
+	};
+	bump(offer.price?.price?.amount);
+	bump(offer.businessPrice);
+	bump(offer.quantityDiscount);
+	bump(offer.salePrice?.price?.amount);
+	bump(offer.minAllowedPrice?.price?.amount);
+	bump(offer.maxAllowedPrice?.price?.amount);
+	bump(offer.automatedPricing);
+	bump(offer.maxRetailPrice?.price?.amount);
+	bump(offer.haulOffer);
+	bump(offer.ffoOffer);
+	bump(offer.nonAllOffer);
+	bump(offer.points);
+	bump(offer.condition?.condition);
+	return score;
+}
+function primaryOffer(listing) {
+	const offers = (listing.offers ?? []).filter((offer) => Boolean(offer));
+	if (offers.length === 0) return undefined;
+	return offers.reduce((best, offer) => offerRichness(offer) > offerRichness(best) ? offer : best);
+}
+function suppressedGraphqlMessages(payload) {
+	if (!payload || typeof payload !== "object" || !("errors" in payload)) return [];
+	const errors = payload.errors;
+	if (!Array.isArray(errors)) return [];
+	return errors.map((error) => {
+		if (!error || typeof error !== "object" || !("message" in error)) return "";
+		return String(error.message ?? "");
+	}).filter(Boolean);
+}
+function asSuppressedListing(value) {
+	if (!value || typeof value !== "object") return undefined;
+	return value;
+}
+function parseSuppressedListingsPage(payload) {
+	const messages = suppressedGraphqlMessages(payload);
+	const data = payload && typeof payload === "object" && "data" in payload ? payload.data : undefined;
+	const listingsV2 = data && typeof data === "object" && "listingsV2" in data ? data.listingsV2 : undefined;
+	if (!listingsV2 || typeof listingsV2 !== "object") {
+		if (messages.length) throw new Error(messages.join(" "));
+		throw new Error("Couldn’t load search-suppressed inventory.");
+	}
+	const record = listingsV2;
+	const listings = Array.isArray(record.listings) ? record.listings.map(asSuppressedListing).filter((listing) => listing !== undefined) : [];
+	const count = typeof record.count === "number" && Number.isFinite(record.count) ? record.count : listings.length;
+	return {
+		listings,
+		count
+	};
+}
+function suppressedSheetRow(listing) {
+	const offer = primaryOffer(listing);
+	const details = listing.availability?.unfulfillableDetails;
+	const competition = listing.pricing?.competitionState;
+	const benchmark = listing.pricing?.competitivePricingSummary?.competitiveBenchmarkPrice;
+	const price = currencyAmount(offer?.price?.price);
+	return [
+		suppressedCell(listing.coreListingFields?.sku ?? listing.listingData?.sku),
+		suppressedCell(listing.coreListingFields?.asin ?? listing.listingData?.asin),
+		suppressedCell(listing.coreListingFields?.fnSku ?? listing.listingData?.fnSku),
+		suppressedCell(listing.listingData?.title),
+		suppressedCell(listing.listingData?.titleDifferentiation),
+		suppressedCell(listing.imageUrl),
+		suppressedCell(listing.detailPageUrl),
+		suppressedCell(listing.skuCentralLink),
+		formatListingStatus(listing.status?.status),
+		suppressedCell(listing.status?.statusText),
+		suppressedCell(listing.status?.highlightedState),
+		suppressedCell(listing.status?.inlineAction),
+		suppressedCell(listing.status?.inlineActionText),
+		suppressedCell(listing.status?.redirectionLink),
+		...suppressedIssueCells(listing),
+		suppressedCell(listing.listingData?.productType),
+		suppressedCell(listing.listingData?.listingType),
+		suppressedCell(listing.listingData?.bundleStatus),
+		suppressedCell(listing.coreListingFields?.fulfillmentChannel ?? offer?.fulfillmentChannel),
+		suppressedCell(offer?.condition?.condition),
+		suppressedCell(offer?.condition?.subCondition),
+		suppressedCell(listing.listingData?.parentAsin),
+		suppressedCell(listing.listingData?.parentSku),
+		suppressedQuantity(listing.listingData?.numberOfChildren),
+		suppressedYesNo(listing.isParentListing),
+		suppressedYesNo(listing.isCustomizable),
+		suppressedQuantity(listing.marketplaceCount),
+		(listing.listingData?.externalIds ?? []).filter((id) => Boolean(id)).map((id) => `${suppressedCell(id.type)}:${suppressedCell(id.value)}`).filter((part) => part !== ":").join(", "),
+		suppressedYesNo(listing.annotations?.favorite),
+		(listing.annotations?.tagsAnnotation ?? []).map((tag) => tag?.value).filter((value) => Boolean(value)).join(", "),
+		suppressedCell(listing.shippingTemplate?.TemplateName),
+		suppressedCell(listing.shippingTemplate?.TemplateId),
+		suppressedYesNo(listing.shippingTemplate?.Legacy),
+		suppressedCell(listing.listingData?.dateCreated),
+		suppressedCell(listing.listingData?.lastUpdated),
+		optionalNumber(listing.listingData?.last30DayGms),
+		optionalNumber(listing.listingData?.last30DayGv),
+		optionalNumber(listing.listingData?.last30DayUnitsSold),
+		suppressedCell(listing.listingData?.qualityRecommendationScore?.grade),
+		suppressedCell(listing.listingData?.qualityRecommendationScore?.lastUpdatedDate),
+		suppressedQuantity(listing.availability?.quantity),
+		suppressedYesNo(listing.availability?.isQuantityInfinite),
+		suppressedCell(listing.availability?.inventoryAvailability),
+		suppressedQuantity(listing.availability?.onHandQuantity),
+		suppressedQuantity(listing.availability?.inbound),
+		suppressedQuantity(listing.availability?.reservedQuantity),
+		suppressedQuantity(listing.availability?.reserved?.fcTransfer),
+		suppressedQuantity(listing.availability?.reserved?.customerOrder),
+		suppressedQuantity(listing.availability?.reserved?.fcProcessing),
+		suppressedQuantity(listing.availability?.buyableInTransit),
+		suppressedQuantity(listing.availability?.pendingCustomerOrdersInTransit),
+		suppressedQuantity(listing.availability?.unfulfillable),
+		suppressedQuantity(details?.damagedByCarrier),
+		suppressedQuantity(details?.damagedByCustomer),
+		suppressedQuantity(details?.defective),
+		suppressedQuantity(details?.expired),
+		suppressedQuantity(details?.damagedByWarehouse),
+		suppressedQuantity(details?.damagedByDistributor),
+		suppressedQuantity(listing.availability?.researching?.shortTerm),
+		suppressedQuantity(listing.availability?.researching?.midTerm),
+		suppressedQuantity(listing.availability?.researching?.longTerm),
+		formatFbaRecommendation(listing.availability?.fbaRecommendation),
+		formatAvailabilities(listing),
+		formatAaAvailabilities(listing),
+		formatInventoryAlert(listing),
+		optionalNumber(listing.availability?.recommendation?.daysOfSupply),
+		optionalNumber(listing.availability?.recommendation?.recommendedInventory),
+		price,
+		suppressedCell(offer?.price?.price?.currencyUnit),
+		currencyAmount(offer?.salePrice?.price),
+		currencyAmount(offer?.minAllowedPrice?.price),
+		currencyAmount(offer?.maxAllowedPrice?.price),
+		currencyAmount(offer?.businessPrice?.price),
+		formatQuantityDiscount(offer?.quantityDiscount ?? offer?.businessPrice),
+		currencyAmount(offer?.maxRetailPrice?.price),
+		currencyAmount(listing.estimatedShipping),
+		suppressedCell(offer?.points ?? listing.pricing?.points),
+		suppressedCell(offer?.automatedPricing?.enrollmentStatus ?? listing.pricing?.automatedPricing?.enrollmentStatus),
+		optionalNumber(listing.pricing?.taxData?.taxRate),
+		optionalNumber(listing.pricing?.taxData?.taxExclusivePrice),
+		optionalNumber(listing.pricing?.taxData?.taxExclusiveBusinessPrice),
+		currencyAmount(competition?.lowestPrice?.price),
+		currencyAmount(competition?.lowestPrice?.shipping),
+		currencyAmount(competition?.buyBoxPrice?.price),
+		currencyAmount(competition?.buyBoxPrice?.shipping),
+		optionalNumber(competition?.salesRank?.rank),
+		suppressedCell(competition?.salesRank?.productCategory),
+		currencyAmount(benchmark?.price),
+		currencyAmount(benchmark?.shipping),
+		suppressedCell(offer?.businessProgram?.valueLabel ?? offer?.businessProgram?.value),
+		formatSpecialOffer(offer?.haulOffer, offer?.haulOffer?.haulPrice?.price),
+		formatSpecialOffer(offer?.ffoOffer, offer?.ffoOffer?.ffoPrice?.price),
+		formatSpecialOffer(offer?.nonAllOffer, offer?.nonAllOffer?.nonAllPrice?.price),
+		(listing.actions ?? []).map((action) => action?.type).filter((type) => Boolean(type)).join(", "),
+		suppressedCell(listing.pointsCentralLink)
+	];
+}
+function listingSku(listing) {
+	const sku = listing.coreListingFields?.sku?.trim() || listing.listingData?.sku?.trim();
+	return sku || undefined;
+}
+function issueParameter(issue, key) {
+	for (const parameter of issue.parameters ?? []) {
+		if (parameter?.key === key && parameter.value) return parameter.value;
+	}
+	return "";
+}
+function issueAttribute(issue) {
+	const fromParams = issueParameter(issue, "v3_flat_attribute_name") || issueParameter(issue, "attribute_name");
+	if (fromParams) return fromParams.replace(/^\[|\]$/g, "");
+	for (const forward of issue.issuePathForwards ?? []) {
+		for (const attribute of forward?.attributes ?? []) {
+			if (attribute?.v3FlatPath) return attribute.v3FlatPath;
+		}
+	}
+	return "";
+}
+function formatSuppressedIssues(issues) {
+	const rows = (issues ?? []).filter((issue) => Boolean(issue));
+	const join = (values) => values.map((value) => value?.trim() ?? "").filter(Boolean).join(" || ");
+	const tags = new Set();
+	for (const issue of rows) {
+		for (const tag of issue.tags ?? []) {
+			if (tag) tags.add(tag);
+		}
+	}
+	return {
+		message: join(rows.map((issue) => issue.localizedIssueMessage)),
+		type: join(rows.map((issue) => issue.type)),
+		attribute: join(rows.map(issueAttribute)),
+		enforcement: join(rows.map((issue) => (issue.enforcementActions ?? []).filter(Boolean).join(", "))),
+		source: join(rows.map((issue) => issue.issueSource)),
+		tags: [...tags].join(", ")
+	};
+}
+function suppressedIssueCells(listing) {
+	if (listing.issuesFetchFailed) {
+		return [
+			SUPPRESSED_ISSUE_UNAVAILABLE,
+			"",
+			"",
+			"",
+			"",
+			""
+		];
+	}
+	const formatted = formatSuppressedIssues(listing.issues);
+	return [
+		formatted.message,
+		formatted.type,
+		formatted.attribute,
+		formatted.enforcement,
+		formatted.source,
+		formatted.tags
+	];
+}
+function suppressedChunk(items, size) {
+	const batches = [];
+	for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size));
+	return batches;
+}
+function parseListingIssues(payload) {
+	const messages = suppressedGraphqlMessages(payload);
+	const data = payload && typeof payload === "object" && "data" in payload ? payload.data : undefined;
+	const listingIssuesActions = data && typeof data === "object" && "listingIssuesActions" in data ? data.listingIssuesActions : undefined;
+	if (!listingIssuesActions || typeof listingIssuesActions !== "object") {
+		if (messages.length) throw new Error(messages.join(" "));
+		throw new Error("Couldn’t load listing suppression reasons.");
+	}
+	const issues = listingIssuesActions.issues;
+	if (!Array.isArray(issues)) return [];
+	return issues.filter((issue) => Boolean(issue && typeof issue === "object"));
+}
+function hasNonZeroQuantity(listing) {
+	if (listing.availability?.isQuantityInfinite) return true;
+	const available = listing.availability?.quantity;
+	return typeof available === "number" && Number.isFinite(available) && available !== 0;
+}
+function inStockSuppressedListings(listings) {
+	return listings.filter(hasNonZeroQuantity);
+}
+function suppressedSheetNotes(listings) {
+	const notes = [];
+	if (listings.some((listing) => listing.listingsIncomplete)) notes.push([SUPPRESSED_LISTINGS_INCOMPLETE_NOTE]);
+	if (listings.some((listing) => listing.issuesFetchFailed)) notes.push([SUPPRESSED_ISSUES_INCOMPLETE_NOTE]);
+	if (notes.length) notes.push([]);
+	return notes;
+}
+function suppressedSheetRows(listings) {
+	const rows = inStockSuppressedListings(listings);
+	return [
+		...suppressedSheetNotes(listings),
+		[...SUPPRESSED_SHEET_HEADERS],
+		...rows.map(suppressedSheetRow)
+	];
+}
+function suppressedListingsVariables(from) {
+	return {
+		pagination: {
+			from,
+			size: SUPPRESSED_PAGE_SIZE
+		},
+		sortRequest: {
+			key: "QUANTITY_AVAILABLE",
+			order: "DESCENDING"
+		},
+		multiSelectFilters: [
+			{
+				key: "LISTING_STATUS",
+				values: ["SearchSuppressed"]
+			},
+			{
+				key: "FULFILLMENT",
+				values: ["AllChannels"]
+			},
+			{
+				key: "CONDITION",
+				values: []
+			}
+		]
+	};
+}
+async function fetchSuppressedAntiCsrfTokenFromInventory(fetchImpl) {
+	const response = await fetchImpl(INVENTORY_MANAGE_URL, {
+		method: "GET",
+		credentials: "include",
+		headers: { accept: "text/html" }
+	});
+	if (!response.ok) return undefined;
+	let html = "";
+	try {
+		html = await response.text();
+	} catch {
+		return undefined;
+	}
+	return readAntiCsrfTokenFromHtml(html);
+}
+async function postSuppressedListingsPage(fetchImpl, token, from) {
+	const response = await fetchImpl(SUPPRESSED_GQL_URL, {
+		method: "POST",
+		credentials: "include",
+		headers: {
+			accept: "application/graphql-response+json, application/json",
+			"content-type": "application/json",
+			"anti-csrftoken-a2z": token
+		},
+		body: JSON.stringify({
+			operationName: "getListingsV2",
+			variables: suppressedListingsVariables(from),
+			query: GET_SUPPRESSED_LISTINGS_QUERY
+		})
+	});
+	if (!response.ok) throw new Error(`Couldn’t load search-suppressed inventory (${response.status}).`);
+	let payload;
+	try {
+		payload = await response.json();
+	} catch {
+		throw new Error("Couldn’t load search-suppressed inventory.");
+	}
+	return parseSuppressedListingsPage(payload);
+}
+async function postListingIssues(fetchImpl, token, sku) {
+	const response = await fetchImpl(SUPPRESSED_GQL_URL, {
+		method: "POST",
+		credentials: "include",
+		headers: {
+			accept: "application/graphql-response+json, application/json",
+			"content-type": "application/json",
+			"anti-csrftoken-a2z": token
+		},
+		body: JSON.stringify({
+			operationName: "getListingIssuesActionsForSku",
+			variables: {
+				sku,
+				contributorToken: ""
+			},
+			query: GET_LISTING_ISSUES_QUERY
+		})
+	});
+	if (!response.ok) throw new Error(`Couldn’t load listing suppression reasons (${response.status}).`);
+	let payload;
+	try {
+		payload = await response.json();
+	} catch {
+		throw new Error("Couldn’t load listing suppression reasons.");
+	}
+	return parseListingIssues(payload);
+}
+async function fetchListingIssues(fetchImpl, token, listings, onProgress) {
+	if (listings.length === 0) return [];
+	onProgress?.({
+		source: "suppressed",
+		status: "active",
+		loaded: 0,
+		total: listings.length,
+		phase: "issues"
+	});
+	const withIssues = [];
+	let processed = 0;
+	for (const batch of suppressedChunk(listings, SUPPRESSED_ISSUES_CONCURRENCY)) {
+		const results = await Promise.all(batch.map(async (listing) => {
+			const sku = listingSku(listing);
+			if (!sku) return {
+				...listing,
+				issues: []
+			};
+			try {
+				return {
+					...listing,
+					issues: await postListingIssues(fetchImpl, token, sku)
+				};
+			} catch {
+				return {
+					...listing,
+					issues: [],
+					issuesFetchFailed: true
+				};
+			}
+		}));
+		withIssues.push(...results);
+		processed += batch.length;
+		onProgress?.({
+			source: "suppressed",
+			status: "active",
+			loaded: processed,
+			total: listings.length,
+			phase: "issues"
+		});
+	}
+	return withIssues;
+}
+async function fetchSuppressedListings(options = {}) {
+	const fetchImpl = options.fetch ?? globalThis.fetch;
+	const root = options.root ?? document;
+	const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "");
+	const onProgress = options.onProgress;
+	let token = readAntiCsrfToken(root, cookie);
+	if (!token) token = await fetchSuppressedAntiCsrfTokenFromInventory(fetchImpl);
+	if (!token) throw new Error("Couldn’t read the Seller Central security token.");
+	onProgress?.({
+		source: "suppressed",
+		status: "active",
+		loaded: 0,
+		phase: "listings"
+	});
+	const listings = [];
+	let reportedCount = 0;
+	let listingsIncomplete = false;
+	let stoppedAtZeroAvailable = false;
+	for (let page = 0; page < SUPPRESSED_MAX_PAGES; page += 1) {
+		const from = page * SUPPRESSED_PAGE_SIZE;
+		let result;
+		try {
+			result = await postSuppressedListingsPage(fetchImpl, token, from);
+		} catch (error) {
+			if (listings.length > 0) {
+				listingsIncomplete = true;
+				break;
+			}
+			throw error;
+		}
+		// Available quantity is descending, so the first out-of-stock row ends the scan.
+		const cutoff = result.listings.findIndex((listing) => !hasNonZeroQuantity(listing));
+		if (cutoff === -1) {
+			listings.push(...result.listings);
+		} else {
+			listings.push(...result.listings.slice(0, cutoff));
+			stoppedAtZeroAvailable = true;
+		}
+		reportedCount = result.count;
+		onProgress?.({
+			source: "suppressed",
+			status: "active",
+			loaded: listings.length,
+			total: result.count,
+			phase: "listings"
+		});
+		if (stoppedAtZeroAvailable) break;
+		if (listings.length >= result.count) break;
+		if (result.listings.length === 0) break;
+	}
+	if (!stoppedAtZeroAvailable && reportedCount > listings.length) listingsIncomplete = true;
+	const tagged = listingsIncomplete ? listings.map((listing) => ({
+		...listing,
+		listingsIncomplete: true
+	})) : listings;
+	const inStock = inStockSuppressedListings(tagged);
+	const merged = await fetchListingIssues(fetchImpl, token, inStock, onProgress);
+	onProgress?.({
+		source: "suppressed",
+		status: "complete",
+		loaded: merged.length,
+		total: merged.length,
+		phase: merged.length > 0 ? "issues" : "listings"
+	});
+	return merged;
+}
+
 const PALETTE_APP_FILE = "palette-app.js";
 let mounted = null;
 let pending = null;
@@ -1194,6 +2274,16 @@ function handleContentMessage(message, _sender, sendResponse, load = loadPalette
 		}), (error) => sendResponse({
 			ok: false,
 			error: error instanceof Error ? error.message : "Couldn’t load stranded inventory."
+		}));
+		return true;
+	}
+	if (record.type === "REPORTS_FETCH_SUPPRESSED") {
+		void fetchSuppressedListings({ onProgress: emitReportProgress }).then((listings) => sendResponse({
+			ok: true,
+			listings
+		}), (error) => sendResponse({
+			ok: false,
+			error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory."
 		}));
 		return true;
 	}

@@ -1,6 +1,7 @@
 import { dailyTasksSheetRows } from "./dailyTasks"
 import type { SellerFeedback } from "./feedback"
 import { strandedSheetRows, type StrandedListing } from "./stranded"
+import { suppressedSheetRows, type SuppressedListing } from "./suppressed"
 import { unfulfillableSheetRows, type UnfulfillableListing } from "./unfulfillable"
 import { buildWorkbook, type WorkbookSheet } from "./xlsxWorkbook"
 
@@ -48,11 +49,13 @@ export function reportWorkbookSheets(
   unfulfillableListings: readonly UnfulfillableListing[] = [],
   feedbacks: readonly SellerFeedback[] = [],
   strandedListings: readonly StrandedListing[] = [],
+  suppressedListings: readonly SuppressedListing[] = [],
 ): WorkbookSheet[] {
   return REPORT_SHEETS.map((name) => {
     if (name === "Daily Tasks") return { name, rows: dailyTasksSheetRows(feedbacks) }
     if (name === "Unfulfillable") return { name, rows: unfulfillableSheetRows(unfulfillableListings) }
     if (name === "Stranded") return { name, rows: strandedSheetRows(strandedListings) }
+    if (name === "Suppressed") return { name, rows: suppressedSheetRows(suppressedListings) }
     return { name }
   })
 }

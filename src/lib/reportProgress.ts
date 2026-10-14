@@ -1,9 +1,9 @@
 export const REPORTS_PROGRESS_TYPE = "REPORTS_PROGRESS"
 
-export const REPORT_SOURCES = ["unfulfillable", "feedback", "stranded"] as const
+export const REPORT_SOURCES = ["unfulfillable", "feedback", "stranded", "suppressed"] as const
 export type ReportSource = (typeof REPORT_SOURCES)[number]
 export type ReportStageStatus = "pending" | "active" | "complete" | "error"
-export type ReportProgressPhase = "listings" | "removal"
+export type ReportProgressPhase = "listings" | "removal" | "issues"
 
 export type ReportProgressEvent = {
   source: ReportSource
@@ -31,6 +31,7 @@ export const REPORT_PROGRESS_ROWS = [
   { id: "unfulfillable", label: "Unfulfillable listings" },
   { id: "feedback", label: "Seller feedback" },
   { id: "stranded", label: "Stranded inventory" },
+  { id: "suppressed", label: "Search suppressed listings" },
   { id: "workbook", label: "Building spreadsheet" },
 ] as const
 
@@ -40,12 +41,13 @@ export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
     unfulfillable: { status: "pending" },
     feedback: { status: "pending" },
     stranded: { status: "pending" },
+    suppressed: { status: "pending" },
   },
   workbook: "pending",
 }
 
 export function isReportSource(value: unknown): value is ReportSource {
-  return value === "unfulfillable" || value === "feedback" || value === "stranded"
+  return value === "unfulfillable" || value === "feedback" || value === "stranded" || value === "suppressed"
 }
 
 export function isReportProgressEvent(value: unknown): value is ReportProgressEvent {
@@ -107,6 +109,7 @@ export function reportSourcePercent(event: Pick<ReportProgressEvent, "source" | 
   if (event.status === "error") return null
   if (event.source === "unfulfillable") return unfulfillableProgressPercent(event)
   if (event.source === "feedback") return feedbackProgressPercent(event)
+  if (event.source === "suppressed") return suppressedProgressPercent(event)
   return null
 }
 
@@ -115,6 +118,20 @@ export function unfulfillableProgressPercent(
 ): number | null {
   if (event.status === "complete") return 100
   if (event.phase === "removal") {
+    const total = event.total ?? 0
+    if (total <= 0) return 100
+    return 80 + Math.round(20 * Math.min(1, (event.loaded ?? 0) / total))
+  }
+  const total = event.total ?? 0
+  if (total <= 0) return event.loaded ? 80 : 0
+  return Math.round(80 * Math.min(1, (event.loaded ?? 0) / total))
+}
+
+export function suppressedProgressPercent(
+  event: Pick<ReportProgressEvent, "loaded" | "total" | "phase" | "status">,
+): number | null {
+  if (event.status === "complete") return 100
+  if (event.phase === "issues") {
     const total = event.total ?? 0
     if (total <= 0) return 100
     return 80 + Math.round(20 * Math.min(1, (event.loaded ?? 0) / total))
@@ -150,6 +167,15 @@ export function reportSourceDetail(source: ReportSource, state: ReportSourceStat
     if (state.total) return `Page ${state.loaded ?? 0} of ${state.total}`
     if (state.loaded) return `Page ${state.loaded}`
     return "Loading"
+  }
+  if (source === "suppressed") {
+    if (state.phase === "issues") {
+      if (state.total) return `Suppression reasons ${state.loaded ?? 0} of ${state.total}`
+      return "Loading suppression reasons"
+    }
+    if (state.total != null) return `${state.loaded ?? 0} of ${state.total} listings`
+    if (state.loaded) return `${state.loaded} listings`
+    return "Loading listings"
   }
   return "Loading"
 }

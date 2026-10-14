@@ -221,4 +221,60 @@ describe("content script report messages", () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it("fetches search-suppressed listings from Seller Central", async () => {
+    document.head.insertAdjacentHTML("beforeend", '<meta name="anti-csrftoken-a2z" content="csrf-token">')
+    const listing = {
+      coreListingFields: { sku: "STOCK-SKU", asin: "B0STOCK", fnSku: "X00STOCK" },
+      listingData: { title: "In-stock suppressed towel" },
+      status: { status: "SEARCH_SUPPRESSED", inlineAction: "FIX_LISTING_SUPPRESSION" },
+      availability: { quantity: 12 },
+      offers: [{ price: { price: { amount: "16.99", currencyUnit: "USD" } } }],
+    }
+    const issue = {
+      localizedIssueMessage: "'Product Description' is required but missing.",
+      type: "CVS_MISSING_REQUIRED_ATTRIBUTE",
+      tags: ["MISSING_PRODUCT_ATTRIBUTE"],
+      enforcementActions: ["index_suppressed", "quarantined"],
+      issueSource: "Item",
+      parameters: [{ key: "v3_flat_attribute_name", value: "product_description" }],
+    }
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) as { operationName?: string } : {}
+      if (body.operationName === "getListingIssuesActionsForSku") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { listingIssuesActions: { issues: [issue] } } }),
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { listingsV2: { listings: [listing, { ...listing, coreListingFields: { sku: "ZERO-SKU" }, availability: { quantity: 0 } }], count: 2 } } }),
+      }
+    })
+    vi.stubGlobal("fetch", fetchImpl)
+    const sendResponse = vi.fn()
+
+    try {
+      expect(handleContentMessage(
+        { type: "REPORTS_FETCH_SUPPRESSED" },
+        {} as chrome.runtime.MessageSender,
+        sendResponse,
+      )).toBe(true)
+
+      await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+        ok: true,
+        listings: [{ ...listing, issues: [issue] }],
+      }))
+      expect(fetchImpl).toHaveBeenCalledWith(
+        "https://sellercentral.amazon.com/myinventory/gql",
+        expect.objectContaining({ method: "POST", credentials: "include" }),
+      )
+    } finally {
+      document.querySelectorAll('meta[name="anti-csrftoken-a2z"]').forEach((node) => node.remove())
+      vi.unstubAllGlobals()
+    }
+  })
 })

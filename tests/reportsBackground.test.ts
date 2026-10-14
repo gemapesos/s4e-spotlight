@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   fetchFeedbackReport,
   fetchStrandedReport,
+  fetchSuppressedReport,
   fetchUnfulfillableReport,
   prepareReports,
   relayReportProgress,
@@ -43,6 +44,9 @@ describe("Generate Reports Seller Central preflight", () => {
         onUpdated: { addListener: addUpdatedListener, removeListener: removeUpdatedListener },
       },
       windows: { update: focusWindow },
+      storage: {
+        local: { get: vi.fn(async () => ({})) },
+      },
     })
   })
 
@@ -282,6 +286,53 @@ describe("Generate Reports stranded fetch", () => {
   })
 })
 
+describe("Generate Reports suppressed fetch", () => {
+  const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<{ ok?: boolean; listings?: unknown[]; error?: string }> => ({ ok: true, listings: [] }))
+  const focusWindow = vi.fn(async () => ({}))
+  const addUpdatedListener = vi.fn()
+  const removeUpdatedListener = vi.fn()
+
+  beforeEach(() => {
+    create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 })
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([])
+    get.mockReset(); get.mockResolvedValue({ id: 91, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, listings: [] })
+    focusWindow.mockReset(); focusWindow.mockResolvedValue({})
+    addUpdatedListener.mockReset()
+    removeUpdatedListener.mockReset()
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create,
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: addUpdatedListener, removeListener: removeUpdatedListener },
+      },
+      windows: { update: focusWindow },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("fetches search-suppressed listings from the current Seller Central tab", async () => {
+    const listings = [{ coreListingFields: { sku: "STOCK-SKU" }, availability: { quantity: 12 } }]
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockResolvedValue({ ok: true, listings })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(fetchSuppressedReport(sender)).resolves.toEqual({ ok: true, listings })
+    expect(update).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_SUPPRESSED" })
+  })
+})
+
 describe("Generate Reports parallel fetches", () => {
   const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
   const update = vi.fn(async () => ({}))
@@ -316,7 +367,7 @@ describe("Generate Reports parallel fetches", () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
-  it("opens only one Seller Central tab when three fetches race", async () => {
+  it("opens only one Seller Central tab when four fetches race", async () => {
     let created = false
     query.mockImplementation(async () => (
       created ? [{ id: 91, windowId: 4, lastAccessed: 1 } as chrome.tabs.Tab] : []
@@ -331,6 +382,7 @@ describe("Generate Reports parallel fetches", () => {
       fetchUnfulfillableReport(sender),
       fetchFeedbackReport(sender),
       fetchStrandedReport(sender),
+      fetchSuppressedReport(sender),
     ])
 
     expect(create).toHaveBeenCalledOnce()
@@ -341,9 +393,9 @@ describe("Generate Reports parallel fetches", () => {
     get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
-    await fetchUnfulfillableReport(sender)
+    await fetchSuppressedReport(sender)
     sendMessage.mockClear()
-    await relayReportProgress({ type: "REPORTS_PROGRESS", source: "unfulfillable", status: "active" })
-    expect(sendMessage).toHaveBeenCalledWith(7, { type: "REPORTS_PROGRESS", source: "unfulfillable", status: "active" })
+    await relayReportProgress({ type: "REPORTS_PROGRESS", source: "suppressed", status: "active" })
+    expect(sendMessage).toHaveBeenCalledWith(7, { type: "REPORTS_PROGRESS", source: "suppressed", status: "active" })
   })
 })

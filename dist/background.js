@@ -449,6 +449,34 @@ export async function fetchStrandedReport(senderTab) {
 	await waitForTabComplete(tabId);
 	return sendStrandedFetch(tabId);
 }
+async function sendSuppressedFetch(tabId) {
+	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
+	let lastError;
+	while (Date.now() < deadline) {
+		try {
+			const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_SUPPRESSED" });
+			if (response?.ok) {
+				return {
+					ok: true,
+					listings: Array.isArray(response.listings) ? response.listings : []
+				};
+			}
+			throw new Error(response?.error ?? "Couldn’t load search-suppressed inventory.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message);
+			lastError = message;
+		}
+		await sleep(SESSION_PROBE_INTERVAL_MS);
+	}
+	throw new Error(lastError ?? "Couldn’t load search-suppressed inventory.");
+}
+export async function fetchSuppressedReport(senderTab) {
+	rememberReportProgressTab(senderTab?.id);
+	const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false });
+	await waitForTabComplete(tabId);
+	return sendSuppressedFetch(tabId);
+}
 export async function probeSellerCentralSession(tabId) {
 	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
 	let last;
@@ -1074,6 +1102,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 			void fetchStrandedReport(sender.tab).then(sendResponse, (error) => sendResponse({
 				ok: false,
 				error: error instanceof Error ? error.message : "Couldn’t load stranded inventory."
+			}));
+			return true;
+		}
+		if (type === "REPORTS_FETCH_SUPPRESSED") {
+			void fetchSuppressedReport(sender.tab).then(sendResponse, (error) => sendResponse({
+				ok: false,
+				error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory."
 			}));
 			return true;
 		}
