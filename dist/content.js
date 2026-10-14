@@ -1109,6 +1109,9 @@ let pending = null;
 async function loadPalette() {
 	if (mounted) return mounted;
 	if (!pending) {
+		if (typeof chrome === "undefined" || !chrome.runtime?.id) {
+			throw new Error("Extension context invalidated.");
+		}
 		pending = import(chrome.runtime.getURL(PALETTE_APP_FILE)).then((mod) => {
 			mounted = mod.mountCommandPalette();
 			if (!mounted) throw new Error("Could not mount the command palette.");
@@ -1125,7 +1128,7 @@ function onKeyDown(event) {
 }
 function handleContentKeyDown(event, load = loadPalette) {
 	if (!isPaletteShortcut(event)) {
-		if (event.metaKey || event.ctrlKey) void load();
+		if (event.metaKey || event.ctrlKey) void load().catch(() => undefined);
 		return;
 	}
 	event.preventDefault();

@@ -51,6 +51,17 @@ describe("content script report messages", () => {
     expect(setOpen).not.toHaveBeenCalled()
   })
 
+  it("swallows a palette warm after the extension context is invalidated", async () => {
+    const load = vi.fn().mockRejectedValue(new Error("Extension context invalidated."))
+
+    handleContentKeyDown(
+      new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),
+      load,
+    )
+
+    await vi.waitFor(() => expect(load).toHaveBeenCalledOnce())
+  })
+
   it("opens the palette on the shortcut after warming", async () => {
     const setOpen = vi.fn()
     const load = vi.fn(async () => ({ setOpen }))

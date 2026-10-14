@@ -23,6 +23,9 @@ let pending: Promise<MountedPalette> | null = null
 async function loadPalette(): Promise<MountedPalette> {
   if (mounted) return mounted
   if (!pending) {
+    if (typeof chrome === "undefined" || !chrome.runtime?.id) {
+      throw new Error("Extension context invalidated.")
+    }
     pending = import(chrome.runtime.getURL(PALETTE_APP_FILE))
       .then((mod: PaletteAppModule) => {
         mounted = mod.mountCommandPalette()
@@ -46,7 +49,7 @@ export function handleContentKeyDown(
   load: () => Promise<MountedPalette> = loadPalette,
 ): void {
   if (!isPaletteShortcut(event)) {
-    if (event.metaKey || event.ctrlKey) void load()
+    if (event.metaKey || event.ctrlKey) void load().catch(() => undefined)
     return
   }
 
