@@ -24,6 +24,18 @@ function prefersReducedMotion(targetWindow: Window | null): boolean {
   return Boolean(targetWindow?.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
 }
 
+/**
+ * cmdk prevents the default of every Enter inside the palette to select a list item, which
+ * also stops Enter from pressing a focused button. Press the button here instead.
+ */
+function pressFocusedButtonOnEnter(event: React.KeyboardEvent<HTMLDivElement>): void {
+  if (event.key !== "Enter" || event.nativeEvent.isComposing) return
+  const target = event.target
+  if (!(target instanceof HTMLButtonElement) || target.disabled) return
+  event.preventDefault()
+  target.click()
+}
+
 function Command({
   className,
   filter = commandFilter,
@@ -124,6 +136,7 @@ function PaletteSurface({
       className={animateSwap ? "animate-surface-in motion-reduce:animate-none!" : undefined}
       filter={filter}
       label={title === "Accounts" ? "Search accounts" : "Search commands"}
+      onKeyDown={pressFocusedButtonOnEnter}
       tabIndex={-1}
     >
       {children}
@@ -159,6 +172,9 @@ function CommandDialog({
     const command = commandRef.current
     if (contentKey === undefined || !command) return
     if (command.querySelector("input, textarea, [contenteditable=true]")) return
+    // Keep a control that focused itself (autoFocus) on this screen.
+    const active = (command.getRootNode() as Document | ShadowRoot).activeElement
+    if (active && active !== command && command.contains(active)) return
     command.focus()
   }, [contentKey])
 

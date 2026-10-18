@@ -38,7 +38,7 @@ import {
 } from "@/lib/reportProgress"
 import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"
 import { downloadGeneratedReport } from "@/lib/reportDownload"
-import type { GeneratedReport, ReportDownloadFormat } from "@/lib/reports"
+import { reportWarnings, type GeneratedReport, type ReportDownloadFormat } from "@/lib/reports"
 import { commandFilter } from "@/lib/searchScore"
 import { cn } from "@/lib/utils"
 import {
@@ -64,6 +64,8 @@ type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids"
 
 const CONFIRM_THRESHOLD = 10
 const MAX_BULK_IDS = 50
+/** A click this soon after a pointer press on the same button belongs to that press. */
+const POINTER_CLICK_WINDOW_MS = 1_000
 
 interface InputModeDefinition {
   ariaLabel: string
@@ -156,14 +158,8 @@ function ReportDownloadButton({
   hidden: boolean
   onDownload: () => void
 }) {
-  const lastDownloadAt = React.useRef(0)
-
-  const downloadOnce = () => {
-    const now = performance.now()
-    if (now - lastDownloadAt.current < 50) return
-    lastDownloadAt.current = now
-    onDownload()
-  }
+  /** When a pointer press started a download; its own click arrives 50–150 ms later. */
+  const pointerDownloadAt = React.useRef(Number.NEGATIVE_INFINITY)
 
   return (
     <Button
@@ -173,11 +169,16 @@ function ReportDownloadButton({
         hidden ? "invisible pointer-events-none" : "animate-download-in motion-reduce:animate-none!",
       )}
       disabled={hidden}
-      onClick={downloadOnce}
+      onClick={(event) => {
+        // Keyboard clicks have detail 0; a pointer click right after the press is the same press.
+        if (event.detail > 0 && performance.now() - pointerDownloadAt.current < POINTER_CLICK_WINDOW_MS) return
+        onDownload()
+      }}
       onPointerDown={(event) => {
         if (event.button !== 0 || hidden) return
         event.preventDefault()
-        downloadOnce()
+        pointerDownloadAt.current = performance.now()
+        onDownload()
       }}
       size="default"
       tabIndex={hidden ? -1 : undefined}
@@ -302,6 +303,7 @@ export function CommandPalette({
     },
   }), [onOpenCaseIds, onOpenShipmentIds, onOpenSkuIds])
   const inputMode = inputModes[identifierMode]
+  const warnings = React.useMemo(() => (generatedReport ? reportWarnings(generatedReport) : []), [generatedReport])
 
   const visibleGroups = React.useMemo(
     () =>
@@ -898,7 +900,12 @@ export function CommandPalette({
           {errorAlert()}
         </> : mode === "generating-reports" ? <>
           {submitting ? null : backButton()}
-          <ReportProgressPanel failed={Boolean(error)} progress={reportProgress} submitting={submitting} />
+          <ReportProgressPanel
+            failed={Boolean(error)}
+            progress={reportProgress}
+            submitting={submitting}
+            warnings={warnings}
+          />
           <div className="flex justify-center gap-2 px-2 pb-2">
             <ReportDownloadButton
               hidden={!generatedReport || Boolean(error)}

@@ -374,6 +374,21 @@ describe("CommandPalette", () => {
     expect(openCaseIds).toHaveBeenCalledWith(ids)
   })
 
+  it("confirms a bulk open with Enter on the focused button", async () => {
+    const user = userEvent.setup()
+    const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
+    renderPalette(true, openCaseIds)
+    const ids = Array.from({ length: 11 }, (_, index) => String(30_000_000_000 + index))
+
+    await user.click(screen.getByRole("option", { name: /Open Case ID/ }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: ids.join("\n") } })
+    await user.click(screen.getByRole("button", { name: "Open" }))
+    expect(screen.getByRole("button", { name: "Open 11 tabs" })).toHaveFocus()
+    await user.keyboard("{Enter}")
+
+    expect(openCaseIds).toHaveBeenCalledWith(ids)
+  })
+
   it("rejects more than fifty IDs before messaging the background", async () => {
     const user = userEvent.setup()
     const openCaseIds = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
@@ -977,5 +992,55 @@ describe("CommandPalette", () => {
     })
 
     expect(screen.getByText("Couldn’t load shipping queue (503).")).toBeVisible()
+  })
+
+  it("downloads once per click and from the keyboard", async () => {
+    const user = userEvent.setup()
+    const report = {
+      storeName: "JMG Outdoors",
+      generatedAt: new Date(2026, 7, 14),
+      unfulfillableListings: [],
+      feedbacks: [],
+      strandedListings: [],
+      suppressedListings: [],
+      shipments: [],
+    }
+    const onDownloadReport = vi.fn()
+    renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      onDownloadReport,
+      onGenerateReports: vi.fn().mockResolvedValue(report),
+      onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: true }),
+    })
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await user.click(await screen.findByRole("button", { name: "Sheets" }))
+    expect(onDownloadReport).toHaveBeenCalledTimes(1)
+    expect(onDownloadReport).toHaveBeenLastCalledWith(report, "sheets")
+
+    screen.getByRole("button", { name: "Raw" }).focus()
+    await user.keyboard("{Enter}")
+    expect(onDownloadReport).toHaveBeenCalledTimes(2)
+    expect(onDownloadReport).toHaveBeenLastCalledWith(report, "raw")
+  })
+
+  it("lists sections that loaded only partly once the report is ready", async () => {
+    const user = userEvent.setup()
+    renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      onGenerateReports: vi.fn().mockResolvedValue({
+        storeName: "Cherrylane Enterprises",
+        generatedAt: new Date(2026, 9, 18),
+        unfulfillableListings: Array.from({ length: 10 }, () => ({ listingsIncomplete: true })),
+        feedbacks: [],
+        strandedListings: [],
+        suppressedListings: [],
+        shipments: [],
+      }),
+      onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: true }),
+    })
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+
+    expect(await screen.findByText("Only 10 unfulfillable listings loaded; Seller Central lists more.")).toBeVisible()
+    expect(screen.getByRole("button", { name: "Sheets" })).toBeVisible()
   })
 })

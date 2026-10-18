@@ -1,7 +1,8 @@
 import { dailyTasksSheetRows } from "./dailyTasks"
 import { formatDayMonthYear } from "./dates"
 import type { SellerFeedback } from "./feedback"
-import { shippingQueueSheetRows, type ShippingQueueShipment } from "./shippingQueue"
+import type { ReportSource } from "./reportProgress"
+import { shipmentDetailsIncomplete, shippingQueueSheetRows, type ShippingQueueShipment } from "./shippingQueue"
 import { strandedSheetRows, type StrandedListing } from "./stranded"
 import { suppressedSheetRows, type SuppressedListing } from "./suppressed"
 import { unfulfillableSheetRows, type UnfulfillableListing } from "./unfulfillable"
@@ -46,6 +47,46 @@ export interface GeneratedReport {
 }
 
 export type ReportDownloadFormat = "raw" | "sheets"
+
+export interface ReportWarning {
+  source: ReportSource
+  text: string
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralForm}`
+}
+
+/**
+ * Sections that loaded only partly. The Raw workbook notes these above each sheet, but the
+ * Sheets download has no room for notes, so the palette shows them instead.
+ */
+export function reportWarnings(report: GeneratedReport): ReportWarning[] {
+  const warnings: ReportWarning[] = []
+  const add = (source: ReportSource, text: string) => warnings.push({ source, text })
+  const countWhere = <T>(items: readonly T[], test: (item: T) => unknown) => items.filter(test).length
+  const { unfulfillableListings: unfulfillable, feedbacks, suppressedListings: suppressed, shipments } = report
+
+  if (unfulfillable.some((listing) => listing.listingsIncomplete)) {
+    add("unfulfillable", `Only ${plural(unfulfillable.length, "unfulfillable listing")} loaded; Seller Central lists more.`)
+  }
+  const removalMissing = countWhere(unfulfillable, (listing) => listing.removalFetchFailed)
+  if (removalMissing) add("unfulfillable", `Removal status is missing for ${plural(removalMissing, "SKU")}.`)
+  if (feedbacks.some((feedback) => feedback.feedbackIncomplete)) {
+    add("feedback", `Only the newest ${plural(feedbacks.length, "feedback entry", "feedback entries")} loaded.`)
+  }
+  if (suppressed.some((listing) => listing.listingsIncomplete)) {
+    add("suppressed", "Some search-suppressed listings couldn’t be loaded.")
+  }
+  const issuesMissing = countWhere(suppressed, (listing) => listing.issuesFetchFailed)
+  if (issuesMissing) add("suppressed", `Suppression reasons are missing for ${plural(issuesMissing, "SKU")}.`)
+  if (shipments.some((shipment) => shipment.listingsIncomplete)) add("shippingQueue", "Some shipments couldn’t be listed.")
+  const detailsMissing = countWhere(shipments, (shipment) => shipment.detailsFetchFailed)
+  if (detailsMissing) add("shippingQueue", `Details are missing for ${plural(detailsMissing, "shipment")}.`)
+  const linesMissing = countWhere(shipments, (shipment) => shipmentDetailsIncomplete(shipment.details))
+  if (linesMissing) add("shippingQueue", `SKU lines are incomplete for ${plural(linesMissing, "shipment")}.`)
+  return warnings
+}
 
 export function reportWorkbookSheets(report: Partial<Pick<
   GeneratedReport,

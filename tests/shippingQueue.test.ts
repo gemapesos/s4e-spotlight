@@ -50,6 +50,7 @@ import {
   shippingQueueYesNo,
   type ShippingQueueShipment,
 } from "../src/lib/shippingQueue"
+import { createLogger, setLogSink, type LogEntry } from "../src/lib/log"
 import type { ReportProgressEvent } from "../src/lib/reportProgress"
 
 const SAMPLE_RAW_SHIPMENT = {
@@ -642,6 +643,37 @@ describe("fetchShippingQueueShipments", () => {
     expect(second.searchParams.get("lastShipmentId")).toBe("FBA_P1_1")
     expect(second.searchParams.get("createdDate")).toBe("1767122910000")
     expect(second.searchParams.get("lastUpdatedDate")).toBe("1768331292000")
+  })
+
+  it("starts loading details for a page while the next list page loads", async () => {
+    const page1 = [
+      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_0" },
+      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_1" },
+    ]
+    const page2 = [{ ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P2_0" }]
+    const fetchImpl = routedFetch({ pages: [page1, page2] })
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+
+    try {
+      const shipments = await fetchShippingQueueShipments({
+        ...NO_CUTOFF,
+        fetch: fetchImpl,
+        pageSize: 2,
+        log: createLogger("content"),
+      })
+
+      const urls = fetchImpl.mock.calls.map(([url]) => String(url))
+      const secondListCall = urls.findIndex((url, index) => index > 0 && url.startsWith(SHIPPING_QUEUE_URL))
+      expect(urls.findIndex((url) => url.includes("/eligibilities/FBA_P1_0"))).toBeLessThan(secondListCall)
+      expect(shipments.map((s) => s.shipmentId)).toEqual(["FBA_P1_0", "FBA_P1_1", "FBA_P2_0"])
+      expect(entries.filter((entry) => entry.event === "shippingQueue.listPage").map((entry) => entry.data)).toEqual([
+        { page: 1, rows: 2, inWindow: 2, added: 2 },
+        { page: 2, rows: 1, inWindow: 1, added: 1 },
+      ])
+    } finally {
+      setLogSink(null)
+    }
   })
 
   it("stops when a page is short, empty, or only repeats shipments", async () => {

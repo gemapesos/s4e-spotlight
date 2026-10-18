@@ -11,6 +11,11 @@ import {
 
 export const SUPPRESSED_GQL_URL = UNFULFILLABLE_GQL_URL
 export const SUPPRESSED_PAGE_SIZE = 250
+/**
+ * Listings arrive sorted by available quantity and the scan stops at the first one out of stock,
+ * so a small first page usually holds every in-stock listing without Amazon pricing 250 rows.
+ */
+export const SUPPRESSED_FIRST_PAGE_SIZE = 50
 export const SUPPRESSED_MAX_PAGES = 40
 export const SUPPRESSED_LISTINGS_INCOMPLETE_NOTE =
   "Some search-suppressed listings could not be loaded. This sheet includes only the listings that were obtainable."
@@ -775,6 +780,8 @@ export interface SuppressedListing {
 interface ListingsPage {
   listings: SuppressedListing[]
   count: number
+  /** Rows Amazon returned, including unreadable ones; the next page starts after them. */
+  rows: number
 }
 
 export interface FetchSuppressedListingsOptions {
@@ -935,11 +942,10 @@ export function parseSuppressedListingsPage(payload: unknown): ListingsPage {
   }
 
   const record = listingsV2 as { listings?: unknown; count?: unknown }
-  const listings = Array.isArray(record.listings)
-    ? record.listings.map(asSuppressedListing).filter((listing): listing is SuppressedListing => listing !== undefined)
-    : []
+  const rows = Array.isArray(record.listings) ? record.listings : []
+  const listings = rows.map(asSuppressedListing).filter((listing): listing is SuppressedListing => listing !== undefined)
   const count = typeof record.count === "number" && Number.isFinite(record.count) ? record.count : listings.length
-  return { listings, count }
+  return { listings, count, rows: rows.length }
 }
 
 export function suppressedSheetRow(listing: SuppressedListing): Array<string | number> {
@@ -1155,9 +1161,9 @@ export function suppressedSheetRows(listings: readonly SuppressedListing[]): Arr
   return [...suppressedSheetNotes(listings), [...SUPPRESSED_SHEET_HEADERS], ...rows.map(suppressedSheetRow)]
 }
 
-function suppressedListingsVariables(from: number): Record<string, unknown> {
+function suppressedListingsVariables(from: number, size: number): Record<string, unknown> {
   return {
-    pagination: { from, size: SUPPRESSED_PAGE_SIZE },
+    pagination: { from, size },
     sortRequest: { key: "QUANTITY_AVAILABLE", order: "DESCENDING" },
     multiSelectFilters: [
       { key: "LISTING_STATUS", values: ["SearchSuppressed"] },
@@ -1171,6 +1177,7 @@ async function postSuppressedListingsPage(
   fetchImpl: typeof globalThis.fetch,
   token: string,
   from: number,
+  size: number,
 ): Promise<ListingsPage> {
   const response = await fetchImpl(SUPPRESSED_GQL_URL, {
     method: "POST",
@@ -1182,7 +1189,7 @@ async function postSuppressedListingsPage(
     },
     body: JSON.stringify({
       operationName: "getListingsV2",
-      variables: suppressedListingsVariables(from),
+      variables: suppressedListingsVariables(from, size),
       query: GET_SUPPRESSED_LISTINGS_QUERY,
     }),
   })
@@ -1284,15 +1291,17 @@ export async function fetchSuppressedListings(
   onProgress?.({ source: "suppressed", status: "active", loaded: 0, phase: "listings" })
 
   const listings: SuppressedListing[] = []
+  let offset = 0
   let reportedCount = 0
   let listingsIncomplete = false
   let stoppedAtZeroAvailable = false
 
   for (let page = 0; page < SUPPRESSED_MAX_PAGES; page += 1) {
-    const from = page * SUPPRESSED_PAGE_SIZE
+    const size = page === 0 ? SUPPRESSED_FIRST_PAGE_SIZE : SUPPRESSED_PAGE_SIZE
+    const pageDone = log?.time("suppressed.page", { page, from: offset, size })
     let result: ListingsPage
     try {
-      result = await postSuppressedListingsPage(fetchImpl, token, from)
+      result = await postSuppressedListingsPage(fetchImpl, token, offset, size)
     } catch (error) {
       if (listings.length > 0) {
         log?.warn("suppressed.listingsStopped", { page, loaded: listings.length, error: describeError(error) })
@@ -1304,13 +1313,12 @@ export async function fetchSuppressedListings(
 
     // Available quantity is descending, so the first out-of-stock row ends the scan.
     const cutoff = result.listings.findIndex((listing) => !hasNonZeroQuantity(listing))
-    if (cutoff === -1) {
-      listings.push(...result.listings)
-    } else {
-      listings.push(...result.listings.slice(0, cutoff))
-      stoppedAtZeroAvailable = true
-    }
+    const inStock = cutoff === -1 ? result.listings : result.listings.slice(0, cutoff)
+    listings.push(...inStock)
+    stoppedAtZeroAvailable = cutoff !== -1
+    offset += result.rows
     reportedCount = result.count
+    pageDone?.({ rows: result.rows, inStock: inStock.length, reported: result.count })
     onProgress?.({
       source: "suppressed",
       status: "active",
@@ -1318,13 +1326,11 @@ export async function fetchSuppressedListings(
       total: result.count,
       phase: "listings",
     })
-    if (stoppedAtZeroAvailable) break
-    if (listings.length >= result.count) break
-    if (result.listings.length === 0) break
+    if (stoppedAtZeroAvailable || result.rows === 0 || offset >= result.count) break
   }
 
-  if (!stoppedAtZeroAvailable && reportedCount > listings.length) {
-    log?.warn("suppressed.listingsIncomplete", { loaded: listings.length, reported: reportedCount })
+  if (!stoppedAtZeroAvailable && reportedCount > offset) {
+    log?.warn("suppressed.listingsIncomplete", { scanned: offset, reported: reportedCount })
     listingsIncomplete = true
   }
 

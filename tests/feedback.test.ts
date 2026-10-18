@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { dailyTasksSheetRows } from "../src/lib/dailyTasks"
+import { createLogger, setLogSink, type LogEntry } from "../src/lib/log"
 import {
   FEEDBACKS_URL,
   FEEDBACK_FROM_RATING,
+  FEEDBACK_INCOMPLETE_NOTE,
+  FEEDBACK_MAX_PAGES,
   FEEDBACK_PAGE_CONCURRENCY,
   FEEDBACK_PAGE_SIZE,
   FEEDBACK_SHEET_HEADERS,
@@ -321,5 +325,30 @@ describe("fetchNeutralNegativeFeedbacks", () => {
     await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).rejects.toThrow(
       "Couldn’t load seller feedback (403).",
     )
+  })
+
+  it("flags every entry and logs a warning when the page limit stops before the last page", async () => {
+    const fetchImpl = fetchByPage({}, continuingPage(negativeFeedback, 0))
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+
+    try {
+      const feedbacks = await fetchNeutralNegativeFeedbacks({
+        fetch: fetchImpl as unknown as typeof fetch,
+        log: createLogger("content"),
+      })
+
+      expect(fetchImpl).toHaveBeenCalledTimes(FEEDBACK_MAX_PAGES)
+      expect(feedbacks).toHaveLength(FEEDBACK_MAX_PAGES)
+      expect(feedbacks.every((feedback) => feedback.feedbackIncomplete)).toBe(true)
+      expect(dailyTasksSheetRows(feedbacks).slice(0, 2)).toEqual([["Feedback Manager"], [FEEDBACK_INCOMPLETE_NOTE]])
+      expect(entries).toContainEqual(expect.objectContaining({
+        level: "warn",
+        event: "feedback.pageLimit",
+        data: { pages: FEEDBACK_MAX_PAGES, entries: FEEDBACK_MAX_PAGES },
+      }))
+    } finally {
+      setLogSink(null)
+    }
   })
 })
