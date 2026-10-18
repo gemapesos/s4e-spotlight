@@ -46,11 +46,23 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import type { AccountVault, CredentialRecord, StoreRecord } from "@/lib/accounts"
+import { errorMessage } from "@/lib/log"
+import { cn } from "@/lib/utils"
 import { api } from "@/options/api"
 
 type Page = "loading" | "create" | "locked" | "editor"
 type DeleteTarget = { kind: "store" | "credential"; id: string; name: string }
 type Notice = { message: string; error: boolean }
+
+const RESET_CONFIRMATION = "RESET"
+
+function EmptyState({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-32 items-center justify-center rounded-xl px-4 text-center text-sm text-muted-foreground ring-1 ring-foreground/10">
+      {children}
+    </div>
+  )
+}
 
 function SecretField({ label, value }: { label: string; value: string }) {
   const [revealed, setRevealed] = React.useState(false)
@@ -102,6 +114,23 @@ export function OptionsApp() {
     setNotice(message ? { message, error } : null)
   }, [])
 
+  /**
+   * Runs one vault action at a time (key derivation is slow enough to invite double submits)
+   * and resolves whether it succeeded.
+   */
+  const runBusy = React.useCallback(async (action: () => Promise<unknown>, failure: string): Promise<boolean> => {
+    setBusy(true)
+    try {
+      await action()
+      return true
+    } catch (error) {
+      showNotice(errorMessage(error, failure), true)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }, [showNotice])
+
   React.useEffect(() => {
     if (!notice || notice.error) return
     const timer = window.setTimeout(() => setNotice(null), 5_000)
@@ -125,7 +154,7 @@ export function OptionsApp() {
         setPage("editor")
       }
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Could not load accounts.", true)
+      showNotice(errorMessage(error, "Could not load accounts."), true)
     } finally {
       setBusy(false)
     }
@@ -146,7 +175,7 @@ export function OptionsApp() {
       setDeleteTarget(null)
       showNotice(success)
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Could not save the vault.", true)
+      showNotice(errorMessage(error, "Could not save the vault."), true)
     } finally {
       setBusy(false)
     }
@@ -173,38 +202,36 @@ export function OptionsApp() {
 
   async function onCreate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (busy) return
     const form = new FormData(event.currentTarget)
     const password = String(form.get("password") ?? "")
     if (password !== String(form.get("confirm") ?? "")) return showNotice("Master passwords do not match.", true)
-    try {
-      await api({ type: "ACCOUNTS_CREATE", masterPassword: password })
+    if (await runBusy(() => api({ type: "ACCOUNTS_CREATE", masterPassword: password }), "Could not create the vault.")) {
       await load()
-    } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Could not create the vault.", true)
     }
   }
 
   async function onUnlock(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (busy) return
     const password = String(new FormData(event.currentTarget).get("password") ?? "")
-    try {
-      await api({ type: "ACCOUNTS_UNLOCK", masterPassword: password })
+    if (await runBusy(() => api({ type: "ACCOUNTS_UNLOCK", masterPassword: password }), "Could not unlock accounts.")) {
       await load()
-    } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Could not unlock accounts.", true)
     }
   }
 
   async function onReset() {
-    if (resetConfirmation !== "RESET") return showNotice("Type RESET exactly to delete the vault.", true)
-    try {
+    if (resetConfirmation !== RESET_CONFIRMATION) return showNotice("Type RESET exactly to delete the vault.", true)
+    const reset = await runBusy(async () => {
       await api({ type: "ACCOUNTS_RESET" })
       setResetOpen(false)
       setResetConfirmation("")
-      await load()
-    } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Could not reset the vault.", true)
-    }
+    }, "Could not reset the vault.")
+    if (reset) await load()
+  }
+
+  async function onLock() {
+    if (await runBusy(() => api({ type: "ACCOUNTS_LOCK" }), "Could not lock accounts.")) await load()
   }
 
   async function onSaveCredential(event: React.FormEvent<HTMLFormElement>) {
@@ -243,16 +270,15 @@ export function OptionsApp() {
 
   async function onChangePassword(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (busy) return
     const form = new FormData(event.currentTarget)
     const password = String(form.get("password") ?? "")
     if (password !== String(form.get("confirm") ?? "")) return showNotice("Master passwords do not match.", true)
-    try {
+    await runBusy(async () => {
       await api({ type: "ACCOUNTS_CHANGE_MASTER_PASSWORD", masterPassword: password })
       setPasswordOpen(false)
       showNotice("Master password changed.")
-    } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Could not change the master password.", true)
-    }
+    }, "Could not change the master password.")
   }
 
   async function onConfirmDelete() {
@@ -268,15 +294,17 @@ export function OptionsApp() {
       actions={
         page === "editor" ? (
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => setPasswordOpen(true)} type="button" variant="outline">Change master password</Button>
-            <Button onClick={() => void api({ type: "ACCOUNTS_LOCK" }).then(load, (error) => showNotice(error instanceof Error ? error.message : "Could not lock accounts.", true))} type="button" variant="outline">Lock</Button>
+            <Button disabled={busy} onClick={() => setPasswordOpen(true)} type="button" variant="outline">
+              Change master password
+            </Button>
+            <Button disabled={busy} onClick={() => void onLock()} type="button" variant="outline">Lock</Button>
           </div>
         ) : undefined
       }
       description="Manage encrypted Seller Central stores and shared credentials."
       title="Accounts"
     >
-      <main aria-busy={busy || page === "loading"} className={`grid gap-6${busy ? " opacity-60" : ""}`}>
+      <main aria-busy={busy || page === "loading"} className={cn("grid gap-6 transition-opacity", busy && "opacity-60")}>
         {notice ? (
           <Alert
             role={notice.error ? "alert" : "status"}
@@ -312,7 +340,7 @@ export function OptionsApp() {
                   <Input autoComplete="new-password" id="create-confirm" minLength={10} name="confirm" required type="password" />
                 </div>
                 <div>
-                  <Button disabled={busy} type="submit">Create vault</Button>
+                  <Button disabled={busy} type="submit">{busy ? "Creating…" : "Create vault"}</Button>
                 </div>
               </form>
             </CardContent>
@@ -333,7 +361,7 @@ export function OptionsApp() {
                     <Input autoComplete="current-password" autoFocus id="unlock-password" name="password" required type="password" />
                   </div>
                   <div>
-                    <Button disabled={busy} type="submit">Unlock</Button>
+                    <Button disabled={busy} type="submit">{busy ? "Unlocking…" : "Unlock"}</Button>
                   </div>
                 </form>
               </CardContent>
@@ -344,7 +372,14 @@ export function OptionsApp() {
                 <CardDescription>Resetting permanently deletes the encrypted account vault. This action cannot be undone.</CardDescription>
               </CardHeader>
               <CardContent>
-                <Button onClick={() => { setResetConfirmation(""); setResetOpen(true) }} type="button" variant="destructive">Reset vault</Button>
+                <Button
+                  disabled={busy}
+                  onClick={() => { setResetConfirmation(""); setResetOpen(true) }}
+                  type="button"
+                  variant="destructive"
+                >
+                  Reset vault
+                </Button>
               </CardContent>
             </Card>
           </div>
@@ -362,7 +397,7 @@ export function OptionsApp() {
               </CardHeader>
               <CardContent className="grid gap-3">
                 {vault.credentials.length === 0 ? (
-                  <div className="flex min-h-32 items-center justify-center rounded-xl text-sm text-muted-foreground ring-1 ring-foreground/10">No credentials yet.</div>
+                  <EmptyState>No credentials yet.</EmptyState>
                 ) : vault.credentials.map((item) => (
                   <article className="grid gap-3 rounded-xl p-4 ring-1 ring-foreground/10" key={item.id}>
                     <div className="flex flex-wrap items-start justify-between gap-2">
@@ -372,7 +407,14 @@ export function OptionsApp() {
                       </div>
                       <div className="flex gap-2">
                         <Button onClick={() => openCredential(item)} size="sm" type="button" variant="outline">Edit</Button>
-                        <Button onClick={() => requestDelete("credential", item.id, item.domain)} size="sm" type="button" variant="destructive">Delete</Button>
+                        <Button
+                          onClick={() => requestDelete("credential", item.id, item.domain)}
+                          size="sm"
+                          type="button"
+                          variant="destructive"
+                        >
+                          Delete
+                        </Button>
                       </div>
                     </div>
                     <SecretField label={`Password for ${item.domain}`} value={item.password} />
@@ -391,7 +433,9 @@ export function OptionsApp() {
               </CardHeader>
               <CardContent className="grid gap-3">
                 {vault.stores.length === 0 ? (
-                  <div className="flex min-h-32 items-center justify-center rounded-xl text-sm text-muted-foreground ring-1 ring-foreground/10">Add a credential, then add your first store.</div>
+                  <EmptyState>
+                    {vault.credentials.length === 0 ? "Add a credential, then add your first store." : "No stores yet."}
+                  </EmptyState>
                 ) : vault.stores.map((item) => {
                   const domain = credentialsById.get(item.credentialId)?.domain ?? "Missing credential"
                   return (
@@ -403,7 +447,14 @@ export function OptionsApp() {
                         </div>
                         <div className="flex gap-2">
                           <Button onClick={() => openStore(item)} size="sm" type="button" variant="outline">Edit</Button>
-                          <Button onClick={() => requestDelete("store", item.id, item.name)} size="sm" type="button" variant="destructive">Delete</Button>
+                          <Button
+                            onClick={() => requestDelete("store", item.id, item.name)}
+                            size="sm"
+                            type="button"
+                            variant="destructive"
+                          >
+                            Delete
+                          </Button>
                         </div>
                       </div>
                       <p className="text-sm break-all text-muted-foreground">{item.storeUrl}</p>
@@ -420,8 +471,8 @@ export function OptionsApp() {
         <DialogContent>
           <form className="grid gap-4" onSubmit={(event) => void onSaveCredential(event)}>
             <DialogHeader>
-              <DialogTitle>Credential</DialogTitle>
-              <DialogDescription>Add the sign-in details shared by one or more stores.</DialogDescription>
+              <DialogTitle>{editingCredential ? "Edit credential" : "Add credential"}</DialogTitle>
+              <DialogDescription>The sign-in details shared by one or more stores.</DialogDescription>
             </DialogHeader>
             <div className="grid gap-2">
               <Label htmlFor="credential-domain">Domain / email</Label>
@@ -429,11 +480,26 @@ export function OptionsApp() {
             </div>
             <div className="grid gap-2">
               <Label htmlFor="credential-password">Password</Label>
-              <Input autoComplete="off" defaultValue={editingCredential?.password} id="credential-password" name="password" required type="password" />
+              <Input
+                autoComplete="off"
+                defaultValue={editingCredential?.password}
+                id="credential-password"
+                name="password"
+                required
+                type="password"
+              />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="credential-otp">TOTP URI</Label>
-              <Input autoComplete="off" defaultValue={editingCredential?.otpAuthUri} id="credential-otp" name="otpAuthUri" placeholder="otpauth://totp/…" required type="password" />
+              <Input
+                autoComplete="off"
+                defaultValue={editingCredential?.otpAuthUri}
+                id="credential-otp"
+                name="otpAuthUri"
+                placeholder="otpauth://totp/…"
+                required
+                type="password"
+              />
             </div>
             <DialogFooter>
               <Button onClick={() => setCredentialOpen(false)} type="button" variant="outline">Cancel</Button>
@@ -447,7 +513,7 @@ export function OptionsApp() {
         <DialogContent>
           <form className="grid gap-4" onSubmit={(event) => void onSaveStore(event)}>
             <DialogHeader>
-              <DialogTitle>Store</DialogTitle>
+              <DialogTitle>{editingStore ? "Edit store" : "Add store"}</DialogTitle>
               <DialogDescription>Connect a Seller Central destination to a saved credential.</DialogDescription>
             </DialogHeader>
             <div className="grid gap-2">
@@ -469,7 +535,14 @@ export function OptionsApp() {
             </div>
             <div className="grid gap-2">
               <Label htmlFor="store-url">Seller Central store URL</Label>
-              <Input defaultValue={editingStore?.storeUrl} id="store-url" name="storeUrl" placeholder="https://sellercentral.amazon.com/home?…" required type="url" />
+              <Input
+                defaultValue={editingStore?.storeUrl}
+                id="store-url"
+                name="storeUrl"
+                placeholder="https://sellercentral.amazon.com/home?…"
+                required
+                type="url"
+              />
             </div>
             <DialogFooter>
               <Button onClick={() => setStoreOpen(false)} type="button" variant="outline">Cancel</Button>
@@ -496,7 +569,7 @@ export function OptionsApp() {
             </div>
             <DialogFooter>
               <Button onClick={() => setPasswordOpen(false)} type="button" variant="outline">Cancel</Button>
-              <Button disabled={busy} type="submit">Change password</Button>
+              <Button disabled={busy} type="submit">{busy ? "Changing…" : "Change password"}</Button>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -525,11 +598,22 @@ export function OptionsApp() {
           </AlertDialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="reset-confirmation">Type RESET</Label>
-            <Input autoComplete="off" id="reset-confirmation" onChange={(event) => setResetConfirmation(event.target.value)} value={resetConfirmation} />
+            <Input
+              autoComplete="off"
+              id="reset-confirmation"
+              onChange={(event) => setResetConfirmation(event.target.value)}
+              value={resetConfirmation}
+            />
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void onReset()} variant="destructive">Reset vault</AlertDialogAction>
+            <AlertDialogAction
+              disabled={busy || resetConfirmation !== RESET_CONFIRMATION}
+              onClick={() => void onReset()}
+              variant="destructive"
+            >
+              Reset vault
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { handleContentKeyDown, handleContentMessage } from "../src/content"
 import { FEEDBACK_PAGE_CONCURRENCY } from "../src/lib/feedback"
+import { setLogSink, type LogEntry } from "../src/lib/log"
 
 function makeVisible() {
   vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockReturnValue(document.body)
@@ -136,8 +137,9 @@ describe("content script report messages", () => {
           ...listing,
           removal: [{ label: "Total available for removal", quantity: 1 }],
         }],
+        nextRemovalOrderId: null,
       }))
-      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      expect(fetchImpl).toHaveBeenCalledTimes(3)
     } finally {
       document.querySelectorAll('meta[name="anti-csrftoken-a2z"]').forEach((node) => node.remove())
       vi.unstubAllGlobals()
@@ -320,5 +322,37 @@ describe("content script report messages", () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe("content script report logging", () => {
+  afterEach(() => {
+    setLogSink(null)
+    vi.unstubAllGlobals()
+  })
+
+  it("logs each source with its run, item count, and request timings", async () => {
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, text: async () => "" })))
+    const sendResponse = vi.fn()
+
+    handleContentMessage({ type: "REPORTS_FETCH_STRANDED", runId: "report-7" }, {} as chrome.runtime.MessageSender, sendResponse)
+
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+      ok: false,
+      error: "Couldn’t load stranded inventory (503).",
+    }))
+    const fetchEntry = entries.find((entry) => entry.event === "report.fetch")
+    expect(fetchEntry).toMatchObject({
+      level: "error",
+      ctx: "content",
+      run: "report-7",
+      data: {
+        source: "stranded",
+        requests: { "GET /inventoryplanning/stranded-inventory": expect.objectContaining({ n: 1, failed: 1 }) },
+      },
+    })
+    expect(fetchEntry?.ms).toBeTypeOf("number")
   })
 })

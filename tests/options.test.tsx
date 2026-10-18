@@ -69,4 +69,24 @@ describe("accounts options page", () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(screen.getByRole("alert")).toBeVisible()
   })
+
+  it("enables Reset vault only after RESET is typed", async () => {
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: false }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    render(<OptionsApp />)
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole("button", { name: "Reset vault" }))
+    const dialog = screen.getByRole("alertdialog", { name: "Reset vault?" })
+    const confirm = within(dialog).getByRole("button", { name: "Reset vault" })
+    expect(confirm).toBeDisabled()
+    await user.type(within(dialog).getByLabelText("Type RESET"), "RESET")
+    expect(confirm).toBeEnabled()
+    await user.click(confirm)
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_RESET" }))
+  })
 })

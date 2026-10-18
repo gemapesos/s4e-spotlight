@@ -15,12 +15,15 @@ import {
   UNFULFILLABLE_PAGE_SIZE,
   UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE,
   UNFULFILLABLE_SHEET_HEADERS,
+  fetchNextRemovalOrderId,
   fetchUnfulfillableListings,
   formatListingStatus,
   formatRemovalStatus,
   isInvalidPaginationInput,
   isMissingCursorField,
   mergeRemovalStatus,
+  incrementRemovalOrderId,
+  latestRemovalOrderId,
   parseListingsPage,
   parseRecoveryInventories,
   readAntiCsrfToken,
@@ -646,5 +649,38 @@ describe("fetchUnfulfillableListings", () => {
     expect(unfulfillableSheetRows(result)[0]).toEqual([UNFULFILLABLE_REMOVAL_INCOMPLETE_NOTE])
     expect(unfulfillableSheetRows(result).at(-1)?.[14]).toBe(REMOVAL_STATUS_UNAVAILABLE)
     expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe("removal order ids", () => {
+  it("reads the first S4E id in report order and increments it", () => {
+    const payload = {
+      columnData: [
+        ["2026-10-01", "S4EAB0007", "removal"],
+        ["2026-09-01", "S4EAB0006"],
+        ["not an id"],
+      ],
+    }
+    expect(latestRemovalOrderId(payload)).toBe("S4EAB0007")
+    expect(incrementRemovalOrderId("S4EAB0007")).toBe("S4EAB0008")
+    expect(incrementRemovalOrderId("S4EZZ9999")).toBe("S4EZZ10000")
+    expect(latestRemovalOrderId({ columnData: [["01-Oct-2026", 12]] })).toBeNull()
+    expect(incrementRemovalOrderId("removal-1")).toBeNull()
+  })
+
+  it("returns null when the removal order report cannot be read", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) })
+    await expect(fetchNextRemovalOrderId(fetchImpl as unknown as typeof fetch)).resolves.toBeNull()
+
+    const broken = vi.fn().mockRejectedValue(new Error("offline"))
+    await expect(fetchNextRemovalOrderId(broken as unknown as typeof fetch)).resolves.toBeNull()
+
+    const found = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ columnData: [["created", "S4ECD0042"]] }),
+    })
+    await expect(fetchNextRemovalOrderId(found as unknown as typeof fetch)).resolves.toBe("S4ECD0043")
   })
 })

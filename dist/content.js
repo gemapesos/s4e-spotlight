@@ -1,4 +1,335 @@
 (function () {
+const LOG_ENTRIES_MESSAGE = "LOG_ENTRIES";
+const LOGS_GET_MESSAGE = "LOGS_GET";
+const LOGS_CLEAR_MESSAGE = "LOGS_CLEAR";
+const LOGS_STORAGE_KEY = "s4e-logs";
+const MAX_STORED_LOG_ENTRIES = 1e3;
+/** Requests slower than this are logged individually. */
+const SLOW_REQUEST_MS = 5e3;
+const LOG_PREFIX = "[S4E]";
+const LOG_TEXT_LIMIT = 300;
+const LOG_STACK_LIMIT = 600;
+const LOG_DATA_LIMIT = 4e3;
+const LOG_FORWARD_DELAY_MS = 400;
+const LOG_FORWARD_BATCH = 25;
+const LOG_MESSAGE_ENTRY_LIMIT = 100;
+const LOG_STORE_FLUSH_MS = 1e3;
+/** Individual failure entries per endpoint before the rest are only counted. */
+const REQUEST_FAILURE_LOG_LIMIT = 5;
+let logSink = null;
+const logToConsole = !(typeof process !== "undefined" && process.env?.VITEST);
+/** Routes every entry written in this context to `sink`, or stops routing when null. */
+function setLogSink(sink) {
+	logSink = sink;
+}
+function logNow() {
+	return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+function clipLogText(value, limit = LOG_TEXT_LIMIT) {
+	return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+function errorMessage(error, fallback = "Unknown error.") {
+	if (error instanceof Error && error.message) return error.message;
+	if (typeof error === "string" && error) return error;
+	return fallback;
+}
+/** A compact, serializable description of an error for log data. */
+function describeError(error) {
+	if (!(error instanceof Error)) return { message: clipLogText(errorMessage(error)) };
+	const described = {
+		name: error.name,
+		message: clipLogText(errorMessage(error))
+	};
+	if (error.stack) described.stack = clipLogText(error.stack, LOG_STACK_LIMIT);
+	return described;
+}
+function writeLogEntry(entry) {
+	if (logToConsole) {
+		const write = entry.level === "error" ? console.error : entry.level === "warn" ? console.warn : console.info;
+		const timing = entry.ms === undefined ? "" : ` ${entry.ms}ms`;
+		const run = entry.run ? ` [${entry.run}]` : "";
+		write(`${LOG_PREFIX} ${entry.ctx} · ${entry.event}${timing}${run}`, ...entry.data ? [entry.data] : []);
+	}
+	try {
+		logSink?.(entry);
+	} catch {}
+}
+function createLogger(ctx, run) {
+	const write = (level, event, data, ms) => {
+		const entry = {
+			t: Date.now(),
+			level,
+			ctx,
+			event
+		};
+		if (run) entry.run = run;
+		if (ms !== undefined) entry.ms = ms;
+		if (data && Object.keys(data).length > 0) entry.data = data;
+		writeLogEntry(entry);
+	};
+	return {
+		info: (event, data) => write("info", event, data),
+		warn: (event, data) => write("warn", event, data),
+		error: (event, data) => write("error", event, data),
+		time: (event, data) => {
+			const startedAt = logNow();
+			return (more, level = "info") => {
+				const elapsed = Math.round(logNow() - startedAt);
+				write(level, event, data || more ? {
+					...data,
+					...more
+				} : undefined, elapsed);
+				return elapsed;
+			};
+		},
+		withRun: (nextRun) => createLogger(ctx, nextRun)
+	};
+}
+function createLogRunId(prefix) {
+	return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+/** Sends entries to the background worker in small batches. Install with setLogSink. */
+function forwardLogsToBackground() {
+	let queue = [];
+	let timer;
+	const flush = () => {
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+		const entries = queue;
+		queue = [];
+		if (entries.length === 0 || typeof chrome === "undefined" || !chrome.runtime?.id) return;
+		try {
+			void chrome.runtime.sendMessage({
+				type: LOG_ENTRIES_MESSAGE,
+				entries
+			}).catch(() => undefined);
+		} catch {}
+	};
+	return (entry) => {
+		queue.push(entry);
+		if (queue.length >= LOG_FORWARD_BATCH) flush();
+		else timer ??= setTimeout(flush, LOG_FORWARD_DELAY_MS);
+	};
+}
+/** Validates an entry received from another context and caps its size. */
+function sanitizeLogEntry(value) {
+	if (!value || typeof value !== "object") return undefined;
+	const record = value;
+	const levels = [
+		"info",
+		"warn",
+		"error"
+	];
+	if (typeof record.t !== "number" || !levels.includes(record.level)) return undefined;
+	if (typeof record.ctx !== "string" || typeof record.event !== "string") return undefined;
+	const entry = {
+		t: record.t,
+		level: record.level,
+		ctx: clipLogText(record.ctx, 40),
+		event: clipLogText(record.event, 120)
+	};
+	if (typeof record.run === "string") entry.run = clipLogText(record.run, 60);
+	if (typeof record.ms === "number" && Number.isFinite(record.ms)) entry.ms = record.ms;
+	if (record.data && typeof record.data === "object") {
+		let serialized = "";
+		try {
+			serialized = JSON.stringify(record.data);
+		} catch {
+			serialized = "";
+		}
+		entry.data = serialized.length <= LOG_DATA_LIMIT ? record.data : {
+			truncated: true,
+			preview: clipLogText(serialized, LOG_TEXT_LIMIT)
+		};
+	}
+	return entry;
+}
+function sanitizeLogEntries(value) {
+	if (!Array.isArray(value)) return [];
+	return value.slice(0, LOG_MESSAGE_ENTRY_LIMIT).map(sanitizeLogEntry).filter((entry) => entry !== undefined);
+}
+/** A ring buffer of the newest entries in extension storage. Only the background worker writes it. */
+function createLogStore(storage, maxEntries = MAX_STORED_LOG_ENTRIES) {
+	let pending = [];
+	let timer;
+	let chain = Promise.resolve();
+	const readStored = async () => {
+		const stored = (await storage.get(LOGS_STORAGE_KEY))[LOGS_STORAGE_KEY];
+		return Array.isArray(stored) ? stored : [];
+	};
+	const enqueue = (task) => {
+		const next = chain.then(task, task);
+		chain = next.catch(() => undefined);
+		return next;
+	};
+	const flush = () => {
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+		return enqueue(async () => {
+			const batch = pending;
+			pending = [];
+			if (batch.length === 0) return;
+			const next = [...await readStored(), ...batch].slice(-maxEntries);
+			await storage.set({ [LOGS_STORAGE_KEY]: next });
+		});
+	};
+	return {
+		append: (entries) => {
+			if (entries.length === 0) return;
+			pending.push(...entries);
+			timer ??= setTimeout(() => void flush().catch(() => undefined), LOG_STORE_FLUSH_MS);
+		},
+		read: async () => {
+			await flush().catch(() => undefined);
+			return enqueue(readStored);
+		},
+		clear: async () => {
+			if (timer !== undefined) clearTimeout(timer);
+			timer = undefined;
+			pending = [];
+			await enqueue(() => storage.remove(LOGS_STORAGE_KEY));
+		}
+	};
+}
+function requestUrl(input) {
+	if (typeof input === "string") return input;
+	if (input instanceof URL) return input.href;
+	return input.url;
+}
+/** "METHOD /path" with ID-like path segments collapsed and the GraphQL operation appended. */
+function requestEndpoint(input, init) {
+	const method = (init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET")).toUpperCase();
+	let path = requestUrl(input);
+	try {
+		path = new URL(path, "https://sellercentral.amazon.com").pathname;
+	} catch {
+		path = path.split("?")[0];
+	}
+	path = path.split("/").map((segment) => segment.length >= 6 && /\d/.test(segment) ? ":id" : segment).join("/");
+	const operation = typeof init?.body === "string" ? /"operationName":"([^"]+)"/.exec(init.body)?.[1] : undefined;
+	return `${method} ${path}${operation ? ` ${operation}` : ""}`;
+}
+/**
+* Wraps fetch to time each request by endpoint. Slow and failed requests are logged as they
+* happen; summary() reports counts, latency, and how much the requests overlapped.
+* Times run from sending the request to receiving the response headers.
+*/
+function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
+	const endpoints = new Map();
+	const statsFor = (key) => {
+		let stats = endpoints.get(key);
+		if (!stats) {
+			stats = {
+				n: 0,
+				failed: 0,
+				statuses: {},
+				totalMs: 0,
+				maxMs: 0,
+				firstStart: Number.POSITIVE_INFINITY,
+				lastEnd: 0,
+				inFlight: 0,
+				maxInFlight: 0,
+				loggedFailures: 0
+			};
+			endpoints.set(key, stats);
+		}
+		return stats;
+	};
+	const monitored = async (input, init) => {
+		const endpoint = requestEndpoint(input, init);
+		const stats = statsFor(endpoint);
+		const startedAt = logNow();
+		stats.n += 1;
+		stats.firstStart = Math.min(stats.firstStart, startedAt);
+		stats.inFlight += 1;
+		stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+		const finish = (status, failed) => {
+			const endedAt = logNow();
+			const elapsed = endedAt - startedAt;
+			stats.inFlight -= 1;
+			stats.totalMs += elapsed;
+			stats.maxMs = Math.max(stats.maxMs, elapsed);
+			stats.lastEnd = Math.max(stats.lastEnd, endedAt);
+			stats.statuses[status] = (stats.statuses[status] ?? 0) + 1;
+			const ms = Math.round(elapsed);
+			if (failed) {
+				stats.failed += 1;
+				if (stats.loggedFailures < REQUEST_FAILURE_LOG_LIMIT) {
+					stats.loggedFailures += 1;
+					logger?.warn("request.failed", {
+						endpoint,
+						status,
+						ms
+					});
+				}
+			} else if (elapsed >= slowMs) {
+				logger?.warn("request.slow", {
+					endpoint,
+					status,
+					ms
+				});
+			}
+			return ms;
+		};
+		try {
+			const response = await fetchImpl(input, init);
+			finish(String(response.status), !response.ok);
+			return response;
+		} catch (error) {
+			finish("network", true);
+			throw error;
+		}
+	};
+	return {
+		fetch: monitored,
+		summary: () => {
+			const summary = {};
+			for (const [endpoint, stats] of endpoints) {
+				const wallMs = Math.max(0, stats.lastEnd - stats.firstStart);
+				const statuses = Object.keys(stats.statuses).some((status) => status !== "200") ? stats.statuses : undefined;
+				summary[endpoint] = {
+					n: stats.n,
+					failed: stats.failed,
+					...statuses ? { statuses } : {},
+					avgMs: stats.n ? Math.round(stats.totalMs / stats.n) : 0,
+					maxMs: Math.round(stats.maxMs),
+					wallMs: Math.round(wallMs),
+					parallelism: wallMs > 0 ? Math.round(stats.totalMs / wallMs * 10) / 10 : 1,
+					maxInFlight: stats.maxInFlight
+				};
+			}
+			return summary;
+		}
+	};
+}
+
+const MONTH_ABBREVIATIONS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec"
+];
+function twoDigits(value) {
+	return String(value).padStart(2, "0");
+}
+/** dd-Mmm-yyyy in local time, such as 14-Aug-2026. */
+function formatDayMonthYear(date) {
+	return `${twoDigits(date.getDate())}-${MONTH_ABBREVIATIONS[date.getMonth()]}-${date.getFullYear()}`;
+}
+/** dd-Mmm-yyyy HH:mm:ss in UTC, such as 14-Aug-2026 09:05:00. */
+function formatUtcDateTime(date) {
+	const day = `${twoDigits(date.getUTCDate())}-${MONTH_ABBREVIATIONS[date.getUTCMonth()]}-${date.getUTCFullYear()}`;
+	return `${day} ${twoDigits(date.getUTCHours())}:${twoDigits(date.getUTCMinutes())}:${twoDigits(date.getUTCSeconds())}`;
+}
+
 function isPaletteShortcut(event) {
 	const isSlash = event.code === "Slash" || event.key === "/";
 	const hasPrimaryModifier = event.metaKey || event.ctrlKey;
@@ -33,81 +364,68 @@ const LOGIN_FORM_SELECTORS = [
 function visible(element) {
 	return element instanceof HTMLElement && element.offsetParent !== null;
 }
-function shellSelectorHits(root = document) {
-	return {
-		modernHits: MODERN_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector))),
-		classicHits: CLASSIC_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector)))
-	};
-}
 function hasAuthenticatedSellerUi(root = document) {
-	const { modernHits, classicHits } = shellSelectorHits(root);
-	if (modernHits.length > 0) return true;
-	return classicHits.length >= 2;
+	const isVisible = (selector) => visible(root.querySelector(selector));
+	if (MODERN_SHELL_SELECTORS.some(isVisible)) return true;
+	return CLASSIC_SHELL_SELECTORS.filter(isVisible).length >= 2;
 }
 function hasSellerCentralLoginForm(root = document) {
 	return LOGIN_FORM_SELECTORS.some((selector) => visible(root.querySelector(selector)));
 }
 function sellerCentralSessionStatus(pathname = location.pathname, root = document, readyState = typeof document !== "undefined" ? document.readyState : "loading") {
-	let result;
 	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
-		result = {
+		return {
 			loggedInToStore: false,
 			settled: true
-		};
-	} else if (hasAuthenticatedSellerUi(root)) {
-		result = {
-			loggedInToStore: true,
-			settled: true
-		};
-	} else if (hasSellerCentralLoginForm(root)) {
-		result = {
-			loggedInToStore: false,
-			settled: true
-		};
-	} else if (readyState === "complete") {
-		// Fully loaded page with no store shell and no login form → logged out (avoid 15s probe wait).
-		result = {
-			loggedInToStore: false,
-			settled: true
-		};
-	} else {
-		result = {
-			loggedInToStore: false,
-			settled: false
 		};
 	}
-	// #region agent log
-	{
-		const hits = shellSelectorHits(root);
-		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Debug-Session-Id": "f8f494"
-			},
-			body: JSON.stringify({
-				sessionId: "f8f494",
-				runId: "pre-fix",
-				hypothesisId: "A",
-				location: "sellerCentralSession.ts:sellerCentralSessionStatus",
-				message: "session status evaluated",
-				data: {
-					hostname: typeof location !== "undefined" ? location.hostname : "",
-					pathname,
-					...result,
-					modernHits: hits.modernHits,
-					classicHits: hits.classicHits
-				},
-				timestamp: Date.now()
-			})
-		}).catch(() => {});
-	}
-	// #endregion
-	return result;
+	if (hasAuthenticatedSellerUi(root)) return {
+		loggedInToStore: true,
+		settled: true
+	};
+	if (hasSellerCentralLoginForm(root)) return {
+		loggedInToStore: false,
+		settled: true
+	};
+	// A fully loaded page with no store shell and no login form is signed out; don't wait out the probe.
+	return {
+		loggedInToStore: false,
+		settled: readyState === "complete"
+	};
 }
 
 const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql";
 const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories";
+const REMOVAL_ORDER_REPORT_COLUMNS = [
+	"completed_qty",
+	"order_status",
+	"msku",
+	"fnsku",
+	"in_process_qty",
+	"cancelled_qty",
+	"request_qty",
+	"amazon_order_id",
+	"order_source",
+	"creation_date",
+	"order_type",
+	"removal_order_id"
+];
+const REMOVAL_ORDER_REPORT_URL = `https://sellercentral.amazon.com/reportcentral/api/v1/getOnlineReportRecords?${new URLSearchParams([
+	["type", "RemovalOrderDetail"],
+	["size", "50"],
+	["offset", "0"],
+	["sDate", ""],
+	["eDate", ""],
+	["days", "30"],
+	["sDateOff", "0"],
+	["eDateOff", "0"],
+	...REMOVAL_ORDER_REPORT_COLUMNS.map((column) => ["cols", column]),
+	["sort", JSON.stringify({
+		keyName: "creation_date",
+		sortingOrder: "DESC"
+	})]
+])}`;
+const REMOVAL_ORDER_ID_PATTERN = /S4E[A-Z]{2}\d{4}/;
 const INVENTORY_MANAGE_URL = "https://sellercentral.amazon.com/myinventory/inventory";
 const UNFULFILLABLE_PAGE_SIZE = 250;
 const UNFULFILLABLE_MAX_PAGES = 40;
@@ -249,7 +567,7 @@ function readAntiCsrfTokenFromHtml(html) {
 	const contentFirst = html.match(/<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']anti-csrftoken-a2z["'][^>]*>/i);
 	return contentFirst?.[1]?.trim();
 }
-async function fetchAntiCsrfTokenFromInventory(fetchImpl) {
+async function requestInventoryAntiCsrfToken(fetchImpl) {
 	const response = await fetchImpl(INVENTORY_MANAGE_URL, {
 		method: "GET",
 		credentials: "include",
@@ -263,6 +581,17 @@ async function fetchAntiCsrfTokenFromInventory(fetchImpl) {
 		return undefined;
 	}
 	return readAntiCsrfTokenFromHtml(html);
+}
+let inventoryAntiCsrfTokenRequest = null;
+/**
+* Reads the token from Manage Inventory's HTML when the current page has none. That page is
+* large, so reports that start at the same time share one request.
+*/
+function fetchAntiCsrfTokenFromInventory(fetchImpl) {
+	inventoryAntiCsrfTokenRequest ??= requestInventoryAntiCsrfToken(fetchImpl).finally(() => {
+		inventoryAntiCsrfTokenRequest = null;
+	});
+	return inventoryAntiCsrfTokenRequest;
 }
 function formatListingStatus(status) {
 	if (!status) return "";
@@ -377,6 +706,20 @@ function chunk(items, size) {
 	const batches = [];
 	for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size));
 	return batches;
+}
+/** Maps items with at most `limit` calls in flight, starting the next as soon as one finishes. */
+async function mapWithConcurrency(items, limit, mapper) {
+	const results = new Array(items.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < items.length) {
+			const index = next;
+			next += 1;
+			results[index] = await mapper(items[index], index);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+	return results;
 }
 function removalStatusLabel(code) {
 	if (!code || !(code in REMOVAL_STATUS_BY_CODE)) return REMOVAL_STATUS_UNKNOWN;
@@ -529,7 +872,7 @@ async function postInventoriesBatch(fetchImpl, token, pairs) {
 	}
 	return parseRecoveryInventories(payload);
 }
-async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
+async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress, log) {
 	const pairs = listings.map(listingSkuPair).filter((pair) => pair !== undefined);
 	if (pairs.length === 0) return {
 		lineItems: [],
@@ -548,7 +891,11 @@ async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
 	for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
 		try {
 			lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch));
-		} catch {
+		} catch (error) {
+			log?.warn("unfulfillable.removalBatchFailed", {
+				skus: batch.length,
+				error: describeError(error)
+			});
 			for (const pair of batch) failedPairKeys.add(skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku));
 		}
 		processed += batch.length;
@@ -565,13 +912,63 @@ async function fetchRemovalLineItems(fetchImpl, token, listings, onProgress) {
 		failedPairKeys
 	};
 }
+function removalOrderIdFromRow(row) {
+	if (!Array.isArray(row)) return null;
+	for (const cell of row) {
+		if (typeof cell !== "string") continue;
+		const match = REMOVAL_ORDER_ID_PATTERN.exec(cell.trim());
+		if (match) return match[0];
+	}
+	return null;
+}
+function latestRemovalOrderId(payload) {
+	if (!payload || typeof payload !== "object" || !("columnData" in payload)) return null;
+	const rows = payload.columnData;
+	if (!Array.isArray(rows)) return null;
+	for (const row of rows) {
+		const id = removalOrderIdFromRow(row);
+		if (id) return id;
+	}
+	return null;
+}
+function incrementRemovalOrderId(orderId) {
+	const match = /(S4E[A-Z]{2})(\d{4})/.exec(orderId);
+	if (!match) return null;
+	const number = Number.parseInt(match[2], 10) + 1;
+	return `${match[1]}${String(number).padStart(4, "0")}`;
+}
+async function fetchNextRemovalOrderId(fetchImpl = globalThis.fetch) {
+	try {
+		const response = await fetchImpl(REMOVAL_ORDER_REPORT_URL, {
+			method: "GET",
+			credentials: "include",
+			headers: { accept: "*/*" }
+		});
+		if (!response.ok) return null;
+		let payload;
+		try {
+			payload = await response.json();
+		} catch {
+			return null;
+		}
+		const lastId = latestRemovalOrderId(payload);
+		if (!lastId) return null;
+		return incrementRemovalOrderId(lastId);
+	} catch {
+		return null;
+	}
+}
 async function fetchUnfulfillableListings(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
 	const root = options.root ?? document;
 	const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "");
 	const onProgress = options.onProgress;
+	const log = options.log;
 	let token = readAntiCsrfToken(root, cookie);
-	if (!token) token = await fetchAntiCsrfTokenFromInventory(fetchImpl);
+	if (!token) {
+		log?.info("unfulfillable.tokenFromInventoryPage");
+		token = await fetchAntiCsrfTokenFromInventory(fetchImpl);
+	}
 	if (!token) throw new Error("Couldn’t read the Seller Central security token.");
 	onProgress?.({
 		source: "unfulfillable",
@@ -595,6 +992,7 @@ async function fetchUnfulfillableListings(options = {}) {
 			const willRetryWithoutCursor = page === 0 && query === GET_LISTINGS_V2_QUERY && isMissingCursorField([message]);
 			const willRetryWithoutPagination = page === 0 && includePagination && isInvalidPaginationInput([message]);
 			if (willRetryWithoutCursor) {
+				log?.warn("unfulfillable.schemaRetry", { without: "cursor" });
 				query = GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR;
 				cursor = undefined;
 				try {
@@ -602,13 +1000,20 @@ async function fetchUnfulfillableListings(options = {}) {
 				} catch (retryError) {
 					const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
 					if (!isInvalidPaginationInput([retryMessage])) throw retryError;
+					log?.warn("unfulfillable.schemaRetry", { without: "pagination" });
 					includePagination = false;
 					result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
 				}
 			} else if (willRetryWithoutPagination) {
+				log?.warn("unfulfillable.schemaRetry", { without: "pagination" });
 				includePagination = false;
 				result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
 			} else if (listings.length > 0) {
+				log?.warn("unfulfillable.listingsStopped", {
+					page,
+					loaded: listings.length,
+					error: describeError(error)
+				});
 				listingsIncomplete = true;
 				break;
 			} else {
@@ -633,8 +1038,14 @@ async function fetchUnfulfillableListings(options = {}) {
 		seenCursors.add(result.cursor);
 		cursor = result.cursor;
 	}
-	if (reportedCount > listings.length) listingsIncomplete = true;
-	const { lineItems, failedPairKeys } = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress);
+	if (reportedCount > listings.length) {
+		log?.warn("unfulfillable.listingsIncomplete", {
+			loaded: listings.length,
+			reported: reportedCount
+		});
+		listingsIncomplete = true;
+	}
+	const { lineItems, failedPairKeys } = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress, log);
 	const merged = mergeRemovalStatus(listings, lineItems, failedPairKeys).map((listing) => listingsIncomplete ? {
 		...listing,
 		listingsIncomplete: true
@@ -669,20 +1080,6 @@ const FEEDBACK_SHEET_HEADERS = [
 	"Suppress reason",
 	"Feedback ID"
 ];
-const MONTHS = [
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec"
-];
 const HTML_NAMED_ENTITIES = {
 	amp: "&",
 	lt: "<",
@@ -715,13 +1112,7 @@ function formatFeedbackDate(value) {
 	if (!value) return "";
 	const date = new Date(value);
 	if (Number.isNaN(date.getTime())) return value;
-	const day = String(date.getUTCDate()).padStart(2, "0");
-	const month = MONTHS[date.getUTCMonth()];
-	const year = date.getUTCFullYear();
-	const hours = String(date.getUTCHours()).padStart(2, "0");
-	const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-	const seconds = String(date.getUTCSeconds()).padStart(2, "0");
-	return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`;
+	return formatUtcDateTime(date);
 }
 function feedbackCell(value) {
 	if (value == null) return "";
@@ -755,46 +1146,43 @@ function feedbackSheetRow(feedback) {
 function feedbackSheetRows(feedbacks) {
 	return [[...FEEDBACK_SHEET_HEADERS], ...feedbacks.map(feedbackSheetRow)];
 }
-function stringField(value) {
-	if (value == null) return value;
-	return typeof value === "string" ? value : undefined;
+const FEEDBACK_STRING_FIELDS = [
+	"feedbackId",
+	"orderId",
+	"feedbackText",
+	"feedbackDate",
+	"responseText",
+	"responseDate",
+	"suppressReasonId"
+];
+const FEEDBACK_BOOLEAN_FIELDS = ["suppressed", "partiallySuppressed"];
+/** Keeps null and correctly typed values; drops anything else. */
+function typedField(value, isType) {
+	if (value === null) return null;
+	return isType(value) ? value : undefined;
 }
-function numberField(value) {
-	if (value == null) return value;
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-function booleanField(value) {
-	if (value == null) return value;
-	return typeof value === "boolean" ? value : undefined;
-}
+const isString = (value) => typeof value === "string";
+const isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+const isBoolean = (value) => typeof value === "boolean";
 function asFeedback(value) {
 	if (!value || typeof value !== "object") return undefined;
 	const record = value;
+	const feedback = {};
+	for (const field of FEEDBACK_STRING_FIELDS) {
+		const fieldValue = typedField(record[field], isString);
+		if (fieldValue !== undefined) feedback[field] = fieldValue;
+	}
+	const numericRating = typedField(record.numericRating, isFiniteNumber);
+	if (numericRating !== undefined) feedback.numericRating = numericRating;
+	for (const field of FEEDBACK_BOOLEAN_FIELDS) {
+		const fieldValue = typedField(record[field], isBoolean);
+		if (fieldValue !== undefined) feedback[field] = fieldValue;
+	}
 	const answerMap = record.answerMap && typeof record.answerMap === "object" ? record.answerMap : undefined;
 	const itemAsDescribedAnswer = answerMap?.ItemAsDescribed && typeof answerMap.ItemAsDescribed === "object" ? answerMap.ItemAsDescribed : undefined;
-	const feedback = {};
-	const feedbackId = stringField(record.feedbackId);
-	const orderId = stringField(record.orderId);
-	const numericRating = numberField(record.numericRating);
-	const feedbackText = stringField(record.feedbackText);
-	const feedbackDate = stringField(record.feedbackDate);
-	const responseText = stringField(record.responseText);
-	const responseDate = stringField(record.responseDate);
-	const suppressed = booleanField(record.suppressed);
-	const partiallySuppressed = booleanField(record.partiallySuppressed);
-	const suppressReasonId = stringField(record.suppressReasonId);
-	if (feedbackId !== undefined) feedback.feedbackId = feedbackId;
-	if (orderId !== undefined) feedback.orderId = orderId;
-	if (numericRating !== undefined) feedback.numericRating = numericRating;
-	if (feedbackText !== undefined) feedback.feedbackText = feedbackText;
-	if (feedbackDate !== undefined) feedback.feedbackDate = feedbackDate;
-	if (responseText !== undefined) feedback.responseText = responseText;
-	if (responseDate !== undefined) feedback.responseDate = responseDate;
-	if (suppressed !== undefined) feedback.suppressed = suppressed;
-	if (partiallySuppressed !== undefined) feedback.partiallySuppressed = partiallySuppressed;
-	if (suppressReasonId !== undefined) feedback.suppressReasonId = suppressReasonId;
 	if (itemAsDescribedAnswer) {
-		feedback.answerMap = { ItemAsDescribed: { booleanRating: booleanField(itemAsDescribedAnswer.booleanRating) } };
+		const booleanRating = typedField(itemAsDescribedAnswer.booleanRating, isBoolean);
+		feedback.answerMap = { ItemAsDescribed: { booleanRating } };
 	}
 	return feedback;
 }
@@ -922,10 +1310,6 @@ function strandedQuantity(value) {
 	const amount = strandedNumericCell(value);
 	return amount === "" ? 0 : amount;
 }
-function strandedStringField(value) {
-	if (typeof value !== "string") return undefined;
-	return value;
-}
 function formatStrandedDate(value) {
 	if (!value) return "";
 	const ms = Number(value);
@@ -969,56 +1353,40 @@ function parseFilterLabelMap(root) {
 	}
 	return labels;
 }
+/** String fields copied as-is from each row's data-row-data JSON. */
+const STRANDED_ROW_FIELDS = [
+	"SKU",
+	"ASIN",
+	"FNSKU",
+	"ProductName",
+	"Condition",
+	"Status",
+	"StatusSecondary",
+	"Price",
+	"PriceUnit",
+	"Available",
+	"TotalQuantity",
+	"Reserved",
+	"Inbound",
+	"Unfulfillable",
+	"DateAutoRemoval",
+	"AutoRemovalType",
+	"DateStranded",
+	"StrandedReason",
+	"StrandedReasonCode",
+	"ErrorMessage",
+	"FulfilledBy",
+	"Program",
+	"SupportedActions"
+];
 function asStrandedListing(value, labels) {
 	if (!value || typeof value !== "object") return undefined;
 	const record = value;
 	const listing = {};
-	const sku = strandedStringField(record.SKU);
-	const asin = strandedStringField(record.ASIN);
-	const fnsku = strandedStringField(record.FNSKU);
-	const productName = strandedStringField(record.ProductName);
-	const condition = strandedStringField(record.Condition);
-	const status = strandedStringField(record.Status);
-	const statusSecondary = strandedStringField(record.StatusSecondary);
-	const price = strandedStringField(record.Price);
-	const priceUnit = strandedStringField(record.PriceUnit);
-	const available = strandedStringField(record.Available);
-	const totalQuantity = strandedStringField(record.TotalQuantity);
-	const reserved = strandedStringField(record.Reserved);
-	const inbound = strandedStringField(record.Inbound);
-	const unfulfillable = strandedStringField(record.Unfulfillable);
-	const dateAutoRemoval = strandedStringField(record.DateAutoRemoval);
-	const autoRemovalType = strandedStringField(record.AutoRemovalType);
-	const dateStranded = strandedStringField(record.DateStranded);
-	const strandedReason = strandedStringField(record.StrandedReason);
-	const strandedReasonCode = strandedStringField(record.StrandedReasonCode);
-	const errorMessage = strandedStringField(record.ErrorMessage);
-	const fulfilledBy = strandedStringField(record.FulfilledBy);
-	const program = strandedStringField(record.Program);
-	const supportedActions = strandedStringField(record.SupportedActions);
-	if (sku !== undefined) listing.SKU = sku;
-	if (asin !== undefined) listing.ASIN = asin;
-	if (fnsku !== undefined) listing.FNSKU = fnsku;
-	if (productName !== undefined) listing.ProductName = productName;
-	if (condition !== undefined) listing.Condition = condition;
-	if (status !== undefined) listing.Status = status;
-	if (statusSecondary !== undefined) listing.StatusSecondary = statusSecondary;
-	if (price !== undefined) listing.Price = price;
-	if (priceUnit !== undefined) listing.PriceUnit = priceUnit;
-	if (available !== undefined) listing.Available = available;
-	if (totalQuantity !== undefined) listing.TotalQuantity = totalQuantity;
-	if (reserved !== undefined) listing.Reserved = reserved;
-	if (inbound !== undefined) listing.Inbound = inbound;
-	if (unfulfillable !== undefined) listing.Unfulfillable = unfulfillable;
-	if (dateAutoRemoval !== undefined) listing.DateAutoRemoval = dateAutoRemoval;
-	if (autoRemovalType !== undefined) listing.AutoRemovalType = autoRemovalType;
-	if (dateStranded !== undefined) listing.DateStranded = dateStranded;
-	if (strandedReason !== undefined) listing.StrandedReason = strandedReason;
-	if (strandedReasonCode !== undefined) listing.StrandedReasonCode = strandedReasonCode;
-	if (errorMessage !== undefined) listing.ErrorMessage = errorMessage;
-	if (fulfilledBy !== undefined) listing.FulfilledBy = fulfilledBy;
-	if (program !== undefined) listing.Program = program;
-	if (supportedActions !== undefined) listing.SupportedActions = supportedActions;
+	for (const field of STRANDED_ROW_FIELDS) {
+		const fieldValue = record[field];
+		if (typeof fieldValue === "string") listing[field] = fieldValue;
+	}
 	const reasonCode = (listing.StrandedReasonCode || listing.StrandedReason || "").trim();
 	const reasonLabel = reasonCode && labels.get(reasonCode) || listing.ErrorMessage?.trim() || reasonCode;
 	if (reasonLabel) listing.StrandedReasonLabel = reasonLabel;
@@ -1749,21 +2117,12 @@ function primaryOffer(listing) {
 	if (offers.length === 0) return undefined;
 	return offers.reduce((best, offer) => offerRichness(offer) > offerRichness(best) ? offer : best);
 }
-function suppressedGraphqlMessages(payload) {
-	if (!payload || typeof payload !== "object" || !("errors" in payload)) return [];
-	const errors = payload.errors;
-	if (!Array.isArray(errors)) return [];
-	return errors.map((error) => {
-		if (!error || typeof error !== "object" || !("message" in error)) return "";
-		return String(error.message ?? "");
-	}).filter(Boolean);
-}
 function asSuppressedListing(value) {
 	if (!value || typeof value !== "object") return undefined;
 	return value;
 }
 function parseSuppressedListingsPage(payload) {
-	const messages = suppressedGraphqlMessages(payload);
+	const messages = graphqlMessages(payload);
 	const data = payload && typeof payload === "object" && "data" in payload ? payload.data : undefined;
 	const listingsV2 = data && typeof data === "object" && "listingsV2" in data ? data.listingsV2 : undefined;
 	if (!listingsV2 || typeof listingsV2 !== "object") {
@@ -1941,13 +2300,8 @@ function suppressedIssueCells(listing) {
 		formatted.tags
 	];
 }
-function suppressedChunk(items, size) {
-	const batches = [];
-	for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size));
-	return batches;
-}
 function parseListingIssues(payload) {
-	const messages = suppressedGraphqlMessages(payload);
+	const messages = graphqlMessages(payload);
 	const data = payload && typeof payload === "object" && "data" in payload ? payload.data : undefined;
 	const listingIssuesActions = data && typeof data === "object" && "listingIssuesActions" in data ? data.listingIssuesActions : undefined;
 	if (!listingIssuesActions || typeof listingIssuesActions !== "object") {
@@ -2007,21 +2361,6 @@ function suppressedListingsVariables(from) {
 		]
 	};
 }
-async function fetchSuppressedAntiCsrfTokenFromInventory(fetchImpl) {
-	const response = await fetchImpl(INVENTORY_MANAGE_URL, {
-		method: "GET",
-		credentials: "include",
-		headers: { accept: "text/html" }
-	});
-	if (!response.ok) return undefined;
-	let html = "";
-	try {
-		html = await response.text();
-	} catch {
-		return undefined;
-	}
-	return readAntiCsrfTokenFromHtml(html);
-}
 async function postSuppressedListingsPage(fetchImpl, token, from) {
 	const response = await fetchImpl(SUPPRESSED_GQL_URL, {
 		method: "POST",
@@ -2073,47 +2412,57 @@ async function postListingIssues(fetchImpl, token, sku) {
 	}
 	return parseListingIssues(payload);
 }
-async function fetchListingIssues(fetchImpl, token, listings, onProgress) {
+/** Loads each SKU's suppression reasons, keeping SUPPRESSED_ISSUES_CONCURRENCY requests in flight. */
+async function fetchListingIssues(fetchImpl, token, listings, onProgress, log) {
 	if (listings.length === 0) return [];
+	const total = listings.length;
 	onProgress?.({
 		source: "suppressed",
 		status: "active",
 		loaded: 0,
-		total: listings.length,
+		total,
 		phase: "issues"
 	});
-	const withIssues = [];
 	let processed = 0;
-	for (const batch of suppressedChunk(listings, SUPPRESSED_ISSUES_CONCURRENCY)) {
-		const results = await Promise.all(batch.map(async (listing) => {
-			const sku = listingSku(listing);
-			if (!sku) return {
+	let failed = 0;
+	const withIssues = await mapWithConcurrency(listings, SUPPRESSED_ISSUES_CONCURRENCY, async (listing) => {
+		const sku = listingSku(listing);
+		let result;
+		if (!sku) {
+			result = {
 				...listing,
 				issues: []
 			};
+		} else {
 			try {
-				return {
+				result = {
 					...listing,
 					issues: await postListingIssues(fetchImpl, token, sku)
 				};
-			} catch {
-				return {
+			} catch (error) {
+				failed += 1;
+				if (failed === 1) log?.warn("suppressed.issuesFailed", { error: describeError(error) });
+				result = {
 					...listing,
 					issues: [],
 					issuesFetchFailed: true
 				};
 			}
-		}));
-		withIssues.push(...results);
-		processed += batch.length;
+		}
+		processed += 1;
 		onProgress?.({
 			source: "suppressed",
 			status: "active",
 			loaded: processed,
-			total: listings.length,
+			total,
 			phase: "issues"
 		});
-	}
+		return result;
+	});
+	if (failed > 0) log?.warn("suppressed.issuesIncomplete", {
+		failed,
+		total
+	});
 	return withIssues;
 }
 async function fetchSuppressedListings(options = {}) {
@@ -2121,8 +2470,12 @@ async function fetchSuppressedListings(options = {}) {
 	const root = options.root ?? document;
 	const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "");
 	const onProgress = options.onProgress;
+	const log = options.log;
 	let token = readAntiCsrfToken(root, cookie);
-	if (!token) token = await fetchSuppressedAntiCsrfTokenFromInventory(fetchImpl);
+	if (!token) {
+		log?.info("suppressed.tokenFromInventoryPage");
+		token = await fetchAntiCsrfTokenFromInventory(fetchImpl);
+	}
 	if (!token) throw new Error("Couldn’t read the Seller Central security token.");
 	onProgress?.({
 		source: "suppressed",
@@ -2141,6 +2494,11 @@ async function fetchSuppressedListings(options = {}) {
 			result = await postSuppressedListingsPage(fetchImpl, token, from);
 		} catch (error) {
 			if (listings.length > 0) {
+				log?.warn("suppressed.listingsStopped", {
+					page,
+					loaded: listings.length,
+					error: describeError(error)
+				});
 				listingsIncomplete = true;
 				break;
 			}
@@ -2166,13 +2524,19 @@ async function fetchSuppressedListings(options = {}) {
 		if (listings.length >= result.count) break;
 		if (result.listings.length === 0) break;
 	}
-	if (!stoppedAtZeroAvailable && reportedCount > listings.length) listingsIncomplete = true;
+	if (!stoppedAtZeroAvailable && reportedCount > listings.length) {
+		log?.warn("suppressed.listingsIncomplete", {
+			loaded: listings.length,
+			reported: reportedCount
+		});
+		listingsIncomplete = true;
+	}
 	const tagged = listingsIncomplete ? listings.map((listing) => ({
 		...listing,
 		listingsIncomplete: true
 	})) : listings;
 	const inStock = inStockSuppressedListings(tagged);
-	const merged = await fetchListingIssues(fetchImpl, token, inStock, onProgress);
+	const merged = await fetchListingIssues(fetchImpl, token, inStock, onProgress, log);
 	onProgress?.({
 		source: "suppressed",
 		status: "complete",
@@ -2189,7 +2553,19 @@ const SHIPPING_QUEUE_DEFAULT_PAGE_SIZE = 250;
 const SHIPPING_QUEUE_MAX_PAGES = 40;
 const SHIPPING_QUEUE_ORDER_BY = "SHIPMENT_UPDATE_DATE";
 const SHIPMENT_ELIGIBILITY_URL = "https://sellercentral.amazon.com/fba/wmsr/eligibilities";
+const SHIPMENT_DOCUMENTS_URL = "https://sellercentral.amazon.com/fba/wmsr/document-requirements";
 const SHIPMENT_CLAIM_PAGE_URL = "https://sellercentral.amazon.com/fba/wmsr";
+const SHIPPING_STATUS_OUTSIDE_WINDOW = "Shipment ID - Outside Reconciliation Window";
+const SHIPPING_STATUS_MONITORING = "Shipment ID - For Monitoring (Automatically Closed After 90 Days)";
+const SHIPPING_STATUS_INVESTIGATION_COMPLETED = "Shipment ID - Investigation Completed - Contents Counted and Confirmed";
+const SHIPPING_STATUS_UNITS_LOCATED = "Shipment ID - Units Located - No Further Action Required";
+const SHIPPING_STATUS_RECEIVED_IN_FULL = "Received in Full - No Discrepancies Found";
+const SHIPPING_STATUS_NEW = "Shipment ID - New (Send List)";
+const SHIPPING_STATUS_OVERAGED = "Shipment ID - Overaged";
+const SHIPPING_STATUS_REVIEW = "Review Needed";
+const SHIPPING_STATUS_UNAVAILABLE = "N/A";
+const REQUIRED_DOCUMENT_INVOICE = "Proof of Inventory Ownership";
+const REQUIRED_DOCUMENT_DELIVERY = "Delivery";
 const SHIPMENT_DETAILS_CONCURRENCY = 40;
 const SHIPMENT_DETAILS_MAX_ATTEMPTS = 3;
 const SHIPMENT_DETAILS_RETRY_DELAY_MS = 500;
@@ -2293,20 +2669,6 @@ const SHIPPING_QUEUE_SHEET_HEADERS = [
 	...SHIPPING_QUEUE_DETAIL_HEADERS,
 	...SHIPPING_QUEUE_ITEM_HEADERS
 ];
-const SHIPPING_QUEUE_MONTHS = [
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec"
-];
 function calculateShippingQueueCutoffDate(referenceDate = new Date()) {
 	const year = referenceDate.getUTCFullYear();
 	const month = referenceDate.getUTCMonth();
@@ -2333,13 +2695,7 @@ function formatShippingQueueDate(value) {
 	const ms = typeof value === "number" ? value : Number(value);
 	const date = Number.isFinite(ms) ? new Date(ms) : new Date(String(value));
 	if (Number.isNaN(date.getTime())) return String(value);
-	const day = String(date.getUTCDate()).padStart(2, "0");
-	const month = SHIPPING_QUEUE_MONTHS[date.getUTCMonth()];
-	const year = date.getUTCFullYear();
-	const hours = String(date.getUTCHours()).padStart(2, "0");
-	const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-	const seconds = String(date.getUTCSeconds()).padStart(2, "0");
-	return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`;
+	return formatUtcDateTime(date);
 }
 /** Amazon reports "no estimate" as 0; show those as blank rather than 01-Jan-1970. */
 function formatEligibilityDate(value) {
@@ -2732,6 +3088,47 @@ function shippingQueueUrl(pageSize = SHIPPING_QUEUE_DEFAULT_PAGE_SIZE, cursor) {
 function shipmentDetailsUrl(shipmentId) {
 	return `${SHIPMENT_ELIGIBILITY_URL}/${encodeURIComponent(shipmentId)}?withInquiry=true&withDiscrepancies=true`;
 }
+function shipmentDocumentsUrl(shipmentId) {
+	return `${SHIPMENT_DOCUMENTS_URL}/${encodeURIComponent(shipmentId)}?evaluateOption=DOCUMENT`;
+}
+function parseDocumentTypes(payload) {
+	if (!payload || typeof payload !== "object" || !("documents" in payload)) return [];
+	const documents = payload.documents;
+	if (!Array.isArray(documents)) return [];
+	const types = [];
+	for (const document of documents) {
+		if (!document || typeof document !== "object" || !("documentType" in document)) continue;
+		const type = document.documentType;
+		if (typeof type !== "string") continue;
+		const trimmed = type.trim();
+		if (trimmed) types.push(trimmed);
+	}
+	return types;
+}
+function shippingQueueLineStatus(input) {
+	if (input.detailsFailed) return SHIPPING_STATUS_UNAVAILABLE;
+	const shipmentReason = input.shipmentIneligibilityReason ?? "";
+	const itemReason = input.itemIneligibilityReason ?? "";
+	const discrepancy = input.discrepancy;
+	if (shipmentReason === "NINE_MONTH_STATUTE_OF_LIMITATIONS") return SHIPPING_STATUS_OUTSIDE_WINDOW;
+	if (shipmentReason === "NOT_ALL_SHIPPED") return SHIPPING_STATUS_MONITORING;
+	if (itemReason === "ITEM_LEVEL_AUTHORITATIVE_RECEIVE") return SHIPPING_STATUS_INVESTIGATION_COMPLETED;
+	if (itemReason === "RESEARCHED") return SHIPPING_STATUS_UNITS_LOCATED;
+	if (discrepancy === 0) return SHIPPING_STATUS_RECEIVED_IN_FULL;
+	if (input.eligible === true) {
+		if (typeof discrepancy === "number" && discrepancy < 0) return SHIPPING_STATUS_NEW;
+		if (typeof discrepancy === "number" && discrepancy > 0) return SHIPPING_STATUS_OVERAGED;
+	}
+	if (shipmentReason && shipmentReason !== "NONE") return shipmentReason;
+	return SHIPPING_STATUS_REVIEW;
+}
+function requiredDocumentLabel(documentTypes, status) {
+	if (status !== SHIPPING_STATUS_NEW) return SHIPPING_STATUS_UNAVAILABLE;
+	const documents = [];
+	if (documentTypes?.includes("INVOICE")) documents.push(REQUIRED_DOCUMENT_INVOICE);
+	if (documentTypes?.includes("POD")) documents.push(REQUIRED_DOCUMENT_DELIVERY);
+	return documents.length > 0 ? documents.join(" AND ") : SHIPPING_STATUS_UNAVAILABLE;
+}
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 class SessionInterrupted extends Error {
 	constructor() {
@@ -2803,7 +3200,39 @@ async function fetchShipmentDetails(fetchImpl, shipmentId, sleep, onSession) {
 	}
 	throw lastError;
 }
-async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress) {
+/**
+* Required documents only matter for lines that can be "Shipment ID - New (Send List)": an
+* eligible shipment with a negative discrepancy. Other shipments skip that request.
+*/
+function shipmentNeedsDocumentTypes(details) {
+	if (details.eligible !== true) return false;
+	return details.items.some((item) => typeof item.totalDiscrepancyQuantity === "number" && item.totalDiscrepancyQuantity < 0);
+}
+async function fetchShipmentDocumentTypes(fetchImpl, shipmentId) {
+	try {
+		const response = await fetchImpl(shipmentDocumentsUrl(shipmentId), {
+			method: "GET",
+			mode: "cors",
+			credentials: "include",
+			referrer: buildShipmentClaimUrl(shipmentId),
+			headers: {
+				accept: "*/*",
+				"accept-language": "en-US,en;q=0.9"
+			}
+		});
+		if (!response.ok || isSessionResponse(response)) return { documentsFetchFailed: true };
+		let payload;
+		try {
+			payload = await response.json();
+		} catch {
+			return { documentsFetchFailed: true };
+		}
+		return { documentTypes: parseDocumentTypes(payload) };
+	} catch {
+		return { documentsFetchFailed: true };
+	}
+}
+async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress, log) {
 	if (shipments.length === 0) return [];
 	onProgress?.({
 		source: "shippingQueue",
@@ -2821,6 +3250,8 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress) 
 	let holdLaunch = false;
 	let halt = false;
 	let abandoned = false;
+	let documentsSkipped = 0;
+	const failedSample = [];
 	function reportProgress() {
 		onProgress?.({
 			source: "shippingQueue",
@@ -2849,19 +3280,27 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress) 
 		if (pausePromise) return pausePromise;
 		if (pauseCount >= SHIPMENT_DETAILS_SESSION_PAUSES) {
 			halt = true;
-			console.error("[ShippingQueue] shipment details paused too many times; stopping");
+			log?.error("shippingQueue.detailsHalted", {
+				pauses: pauseCount,
+				processed,
+				total: shipments.length
+			});
 			return Promise.resolve(false);
 		}
 		pauseCount += 1;
 		let current;
 		current = (async () => {
-			console.warn("[ShippingQueue] detail session interrupted; pausing");
+			log?.warn("shippingQueue.sessionPause", {
+				pause: pauseCount,
+				waitMs: SHIPMENT_DETAILS_SESSION_WAIT_MS,
+				processed
+			});
 			try {
 				await sleep(SHIPMENT_DETAILS_SESSION_WAIT_MS);
 				await fetchShippingQueuePage(fetchImpl, shippingQueueUrl());
 				return true;
 			} catch (error) {
-				console.error("[ShippingQueue] shipment list check failed:", error);
+				log?.error("shippingQueue.sessionCheckFailed", { error: describeError(error) });
 				halt = true;
 				return false;
 			} finally {
@@ -2871,6 +3310,34 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress) 
 		})();
 		pausePromise = current;
 		return current;
+	}
+	function markFailed(shipment, id, error) {
+		if (failedSample.length < 3) {
+			failedSample.push(id);
+			log?.warn("shippingQueue.detailsFailed", {
+				shipmentId: id,
+				error: describeError(error)
+			});
+		}
+		return {
+			...shipment,
+			detailsFetchFailed: true
+		};
+	}
+	async function loadDetails(shipment, id, onSession) {
+		const details = await fetchShipmentDetails(fetchImpl, id, sleep, onSession);
+		if (!shipmentNeedsDocumentTypes(details)) {
+			documentsSkipped += 1;
+			return {
+				...shipment,
+				details
+			};
+		}
+		return {
+			...shipment,
+			details,
+			...await fetchShipmentDocumentTypes(fetchImpl, id)
+		};
 	}
 	async function loadOne(shipment) {
 		const id = shipment.shipmentId?.trim();
@@ -2882,34 +3349,18 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress) 
 			if (!halt) holdLaunch = true;
 		};
 		try {
-			return {
-				...shipment,
-				details: await fetchShipmentDetails(fetchImpl, id, sleep, onSession)
-			};
+			return await loadDetails(shipment, id, onSession);
 		} catch (error) {
-			if (!(error instanceof SessionInterrupted) || halt) {
-				console.error("[ShippingQueue] shipment details failed:", id, error);
-				return {
-					...shipment,
-					detailsFetchFailed: true
-				};
-			}
+			if (!(error instanceof SessionInterrupted) || halt) return markFailed(shipment, id, error);
 			const resumed = await startPause();
 			if (!resumed) return {
 				...shipment,
 				detailsFetchFailed: true
 			};
 			try {
-				return {
-					...shipment,
-					details: await fetchShipmentDetails(fetchImpl, id, sleep)
-				};
+				return await loadDetails(shipment, id);
 			} catch (retryError) {
-				console.error("[ShippingQueue] shipment details failed:", id, retryError);
-				return {
-					...shipment,
-					detailsFetchFailed: true
-				};
+				return markFailed(shipment, id, retryError);
 			}
 		}
 	}
@@ -2940,11 +3391,19 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress) 
 		};
 		pump();
 	});
+	log?.info("shippingQueue.details", {
+		shipments: shipments.length,
+		failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
+		documentsSkipped,
+		pauses: pauseCount,
+		...failedSample.length ? { failedSample } : {}
+	});
 	return results;
 }
 async function fetchShippingQueueShipments(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
 	const onProgress = options.onProgress;
+	const log = options.log;
 	const sleep = options.sleep ?? defaultSleep;
 	const pageSize = options.pageSize ?? SHIPPING_QUEUE_DEFAULT_PAGE_SIZE;
 	const cutoffTimestamp = options.cutoffDate != null ? options.cutoffDate instanceof Date ? options.cutoffDate.getTime() : Number(options.cutoffDate) : calculateShippingQueueCutoffDate(options.referenceDate).getTime();
@@ -2964,6 +3423,11 @@ async function fetchShippingQueueShipments(options = {}) {
 			pageShipments = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor));
 		} catch (error) {
 			if (page > 1) {
+				log?.warn("shippingQueue.listStopped", {
+					page,
+					loaded: shipments.length,
+					error: describeError(error)
+				});
 				listingsIncomplete = true;
 				break;
 			}
@@ -2997,7 +3461,7 @@ async function fetchShippingQueueShipments(options = {}) {
 		...shipment,
 		listingsIncomplete: true
 	})) : shipments;
-	const withDetails = await fetchAllShipmentDetails(fetchImpl, tagged, sleep, onProgress);
+	const withDetails = await fetchAllShipmentDetails(fetchImpl, tagged, sleep, onProgress, log);
 	onProgress?.({
 		source: "shippingQueue",
 		status: "complete",
@@ -3009,13 +3473,15 @@ async function fetchShippingQueueShipments(options = {}) {
 }
 
 const PALETTE_APP_FILE = "palette-app.js";
+const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated.";
+const contentLog = createLogger("content");
 let mounted = null;
 let pending = null;
 async function loadPalette() {
 	if (mounted) return mounted;
 	if (!pending) {
 		if (typeof chrome === "undefined" || !chrome.runtime?.id) {
-			throw new Error("Extension context invalidated.");
+			throw new Error(EXTENSION_CONTEXT_INVALIDATED);
 		}
 		pending = import(chrome.runtime.getURL(PALETTE_APP_FILE)).then((mod) => {
 			mounted = mod.mountCommandPalette();
@@ -3023,6 +3489,7 @@ async function loadPalette() {
 			return mounted;
 		}).catch((error) => {
 			pending = null;
+			contentLog.error("palette.loadFailed", { error: describeError(error) });
 			throw error;
 		});
 	}
@@ -3052,6 +3519,96 @@ function emitReportProgress(event) {
 		...event
 	}).then(() => undefined, () => undefined);
 }
+/** Report sources this content script loads from the signed-in Seller Central tab, by message type. */
+const REPORT_FETCHERS = {
+	REPORTS_FETCH_UNFULFILLABLE: {
+		source: "unfulfillable",
+		fallbackError: "Couldn’t load unfulfillable inventory.",
+		run: async (options) => {
+			const [listings, nextRemovalOrderId] = await Promise.all([fetchUnfulfillableListings(options), fetchNextRemovalOrderId(options.fetch)]);
+			return {
+				response: {
+					listings,
+					nextRemovalOrderId
+				},
+				count: listings.length
+			};
+		}
+	},
+	REPORTS_FETCH_FEEDBACK: {
+		source: "feedback",
+		fallbackError: "Couldn’t load seller feedback.",
+		run: async (options) => {
+			const feedbacks = await fetchNeutralNegativeFeedbacks(options);
+			return {
+				response: { feedbacks },
+				count: feedbacks.length
+			};
+		}
+	},
+	REPORTS_FETCH_STRANDED: {
+		source: "stranded",
+		fallbackError: "Couldn’t load stranded inventory.",
+		run: async (options) => {
+			const listings = await fetchStrandedListings(options);
+			return {
+				response: { listings },
+				count: listings.length
+			};
+		}
+	},
+	REPORTS_FETCH_SUPPRESSED: {
+		source: "suppressed",
+		fallbackError: "Couldn’t load search-suppressed inventory.",
+		run: async (options) => {
+			const listings = await fetchSuppressedListings(options);
+			return {
+				response: { listings },
+				count: listings.length
+			};
+		}
+	},
+	REPORTS_FETCH_SHIPPING_QUEUE: {
+		source: "shippingQueue",
+		fallbackError: "Couldn’t load shipping queue.",
+		run: async (options) => {
+			const shipments = await fetchShippingQueueShipments(options);
+			return {
+				response: { shipments },
+				count: shipments.length
+			};
+		}
+	}
+};
+async function runReportFetcher(fetcher, runId) {
+	const log = contentLog.withRun(runId);
+	const monitor = createRequestMonitor(globalThis.fetch, log);
+	const done = log.time("report.fetch", { source: fetcher.source });
+	try {
+		const { response, count } = await fetcher.run({
+			fetch: monitor.fetch,
+			onProgress: emitReportProgress,
+			log
+		});
+		done({
+			count,
+			requests: monitor.summary()
+		});
+		return {
+			ok: true,
+			...response
+		};
+	} catch (error) {
+		done({
+			error: describeError(error),
+			requests: monitor.summary()
+		}, "error");
+		return {
+			ok: false,
+			error: errorMessage(error, fetcher.fallbackError)
+		};
+	}
+}
 function handleContentMessage(message, _sender, sendResponse, load = loadPalette) {
 	if (!message || typeof message !== "object" || !("type" in message)) return undefined;
 	const record = message;
@@ -3068,68 +3625,22 @@ function handleContentMessage(message, _sender, sendResponse, load = loadPalette
 			palette.setOpen(true, mode);
 		}).then(() => sendResponse({ ok: true }), (error) => sendResponse({
 			ok: false,
-			error: error instanceof Error ? error.message : "Couldn’t open the command palette."
+			error: errorMessage(error, "Couldn’t open the command palette.")
 		}));
 		return true;
 	}
-	if (record.type === "REPORTS_FETCH_UNFULFILLABLE") {
-		void fetchUnfulfillableListings({ onProgress: emitReportProgress }).then((listings) => sendResponse({
-			ok: true,
-			listings
-		}), (error) => sendResponse({
-			ok: false,
-			error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory."
-		}));
-		return true;
-	}
-	if (record.type === "REPORTS_FETCH_FEEDBACK") {
-		void fetchNeutralNegativeFeedbacks({ onProgress: emitReportProgress }).then((feedbacks) => sendResponse({
-			ok: true,
-			feedbacks
-		}), (error) => sendResponse({
-			ok: false,
-			error: error instanceof Error ? error.message : "Couldn’t load seller feedback."
-		}));
-		return true;
-	}
-	if (record.type === "REPORTS_FETCH_STRANDED") {
-		void fetchStrandedListings({ onProgress: emitReportProgress }).then((listings) => sendResponse({
-			ok: true,
-			listings
-		}), (error) => sendResponse({
-			ok: false,
-			error: error instanceof Error ? error.message : "Couldn’t load stranded inventory."
-		}));
-		return true;
-	}
-	if (record.type === "REPORTS_FETCH_SUPPRESSED") {
-		void fetchSuppressedListings({ onProgress: emitReportProgress }).then((listings) => sendResponse({
-			ok: true,
-			listings
-		}), (error) => sendResponse({
-			ok: false,
-			error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory."
-		}));
-		return true;
-	}
-	if (record.type === "REPORTS_FETCH_SHIPPING_QUEUE") {
-		void fetchShippingQueueShipments({ onProgress: emitReportProgress }).then((shipments) => sendResponse({
-			ok: true,
-			shipments
-		}), (error) => {
-			console.error("[ShippingQueue Content] Fetch failed:", error);
-			sendResponse({
-				ok: false,
-				error: error instanceof Error ? error.message : "Couldn’t load shipping queue."
-			});
-		});
-		return true;
-	}
-	return undefined;
+	const fetcher = typeof record.type === "string" && Object.hasOwn(REPORT_FETCHERS, record.type) ? REPORT_FETCHERS[record.type] : undefined;
+	if (!fetcher) return undefined;
+	const runId = typeof record.runId === "string" ? record.runId : undefined;
+	void runReportFetcher(fetcher, runId).then(sendResponse);
+	return true;
 }
 if (typeof window !== "undefined" && window.top === window) {
 	window.addEventListener("keydown", onKeyDown, true);
-	if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.addListener(handleContentMessage);
+	if (typeof chrome !== "undefined") {
+		if (chrome.runtime?.id) setLogSink(forwardLogsToBackground());
+		chrome.runtime?.onMessage?.addListener(handleContentMessage);
+	}
 }
 
 })();

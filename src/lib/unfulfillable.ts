@@ -1,7 +1,36 @@
+import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 
 export const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql"
 export const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories"
+const REMOVAL_ORDER_REPORT_COLUMNS = [
+  "completed_qty",
+  "order_status",
+  "msku",
+  "fnsku",
+  "in_process_qty",
+  "cancelled_qty",
+  "request_qty",
+  "amazon_order_id",
+  "order_source",
+  "creation_date",
+  "order_type",
+  "removal_order_id",
+]
+export const REMOVAL_ORDER_REPORT_URL = `https://sellercentral.amazon.com/reportcentral/api/v1/getOnlineReportRecords?${new URLSearchParams([
+  ["type", "RemovalOrderDetail"],
+  ["size", "50"],
+  ["offset", "0"],
+  ["sDate", ""],
+  ["eDate", ""],
+  ["days", "30"],
+  ["sDateOff", "0"],
+  ["eDateOff", "0"],
+  ...REMOVAL_ORDER_REPORT_COLUMNS.map((column) => ["cols", column]),
+  ["sort", JSON.stringify({ keyName: "creation_date", sortingOrder: "DESC" })],
+])}`
+
+const REMOVAL_ORDER_ID_PATTERN = /S4E[A-Z]{2}\d{4}/
 export const INVENTORY_MANAGE_URL = "https://sellercentral.amazon.com/myinventory/inventory"
 export const UNFULFILLABLE_PAGE_SIZE = 250
 export const UNFULFILLABLE_MAX_PAGES = 40
@@ -200,6 +229,7 @@ export interface FetchUnfulfillableListingsOptions {
   root?: ParentNode
   cookie?: string
   onProgress?: (event: ReportProgressEvent) => void
+  log?: Logger
 }
 
 export function readAntiCsrfToken(root: ParentNode = document, cookie = typeof document !== "undefined" ? document.cookie : ""): string | undefined {
@@ -223,7 +253,7 @@ export function readAntiCsrfTokenFromHtml(html: string): string | undefined {
   return contentFirst?.[1]?.trim()
 }
 
-async function fetchAntiCsrfTokenFromInventory(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
+async function requestInventoryAntiCsrfToken(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
   const response = await fetchImpl(INVENTORY_MANAGE_URL, {
     method: "GET",
     credentials: "include",
@@ -237,6 +267,19 @@ async function fetchAntiCsrfTokenFromInventory(fetchImpl: typeof globalThis.fetc
     return undefined
   }
   return readAntiCsrfTokenFromHtml(html)
+}
+
+let inventoryAntiCsrfTokenRequest: Promise<string | undefined> | null = null
+
+/**
+ * Reads the token from Manage Inventory's HTML when the current page has none. That page is
+ * large, so reports that start at the same time share one request.
+ */
+export function fetchAntiCsrfTokenFromInventory(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
+  inventoryAntiCsrfTokenRequest ??= requestInventoryAntiCsrfToken(fetchImpl).finally(() => {
+    inventoryAntiCsrfTokenRequest = null
+  })
+  return inventoryAntiCsrfTokenRequest
 }
 
 export function formatListingStatus(status: string | null | undefined): string {
@@ -321,7 +364,7 @@ export function unfulfillableSheetRows(listings: readonly UnfulfillableListing[]
   return [...unfulfillableSheetNotes(listings), [...UNFULFILLABLE_SHEET_HEADERS], ...listings.map(unfulfillableSheetRow)]
 }
 
-function graphqlMessages(payload: unknown): string[] {
+export function graphqlMessages(payload: unknown): string[] {
   if (!payload || typeof payload !== "object" || !("errors" in payload)) return []
   const errors = (payload as { errors?: unknown }).errors
   if (!Array.isArray(errors)) return []
@@ -352,10 +395,29 @@ function skuPairKey(merchantSku: string, fulfillmentNetworkSku: string): string 
   return `${merchantSku}\0${fulfillmentNetworkSku}`
 }
 
-function chunk<T>(items: readonly T[], size: number): T[][] {
+export function chunk<T>(items: readonly T[], size: number): T[][] {
   const batches: T[][] = []
   for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size))
   return batches
+}
+
+/** Maps items with at most `limit` calls in flight, starting the next as soon as one finishes. */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next
+      next += 1
+      results[index] = await mapper(items[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker))
+  return results
 }
 
 function removalStatusLabel(code: string | null | undefined): string {
@@ -535,6 +597,7 @@ async function fetchRemovalLineItems(
   token: string | undefined,
   listings: readonly UnfulfillableListing[],
   onProgress?: (event: ReportProgressEvent) => void,
+  log?: Logger,
 ): Promise<{ lineItems: RecoveryLineItem[]; failedPairKeys: Set<string> }> {
   const pairs = listings.map(listingSkuPair).filter((pair): pair is { merchantSku: string; fulfillmentNetworkSku: string } => pair !== undefined)
   if (pairs.length === 0) return { lineItems: [], failedPairKeys: new Set() }
@@ -546,13 +609,66 @@ async function fetchRemovalLineItems(
   for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
     try {
       lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch))
-    } catch {
+    } catch (error) {
+      log?.warn("unfulfillable.removalBatchFailed", { skus: batch.length, error: describeError(error) })
       for (const pair of batch) failedPairKeys.add(skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku))
     }
     processed += batch.length
     onProgress?.({ source: "unfulfillable", status: "active", loaded: processed, total: pairs.length, phase: "removal" })
   }
   return { lineItems, failedPairKeys }
+}
+
+export function removalOrderIdFromRow(row: unknown): string | null {
+  if (!Array.isArray(row)) return null
+  for (const cell of row) {
+    if (typeof cell !== "string") continue
+    const match = REMOVAL_ORDER_ID_PATTERN.exec(cell.trim())
+    if (match) return match[0]
+  }
+  return null
+}
+
+export function latestRemovalOrderId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || !("columnData" in payload)) return null
+  const rows = (payload as { columnData?: unknown }).columnData
+  if (!Array.isArray(rows)) return null
+  for (const row of rows) {
+    const id = removalOrderIdFromRow(row)
+    if (id) return id
+  }
+  return null
+}
+
+export function incrementRemovalOrderId(orderId: string): string | null {
+  const match = /(S4E[A-Z]{2})(\d{4})/.exec(orderId)
+  if (!match) return null
+  const number = Number.parseInt(match[2], 10) + 1
+  return `${match[1]}${String(number).padStart(4, "0")}`
+}
+
+export async function fetchNextRemovalOrderId(
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<string | null> {
+  try {
+    const response = await fetchImpl(REMOVAL_ORDER_REPORT_URL, {
+      method: "GET",
+      credentials: "include",
+      headers: { accept: "*/*" },
+    })
+    if (!response.ok) return null
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      return null
+    }
+    const lastId = latestRemovalOrderId(payload)
+    if (!lastId) return null
+    return incrementRemovalOrderId(lastId)
+  } catch {
+    return null
+  }
 }
 
 export async function fetchUnfulfillableListings(
@@ -562,8 +678,12 @@ export async function fetchUnfulfillableListings(
   const root = options.root ?? document
   const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "")
   const onProgress = options.onProgress
+  const log = options.log
   let token = readAntiCsrfToken(root, cookie)
-  if (!token) token = await fetchAntiCsrfTokenFromInventory(fetchImpl)
+  if (!token) {
+    log?.info("unfulfillable.tokenFromInventoryPage")
+    token = await fetchAntiCsrfTokenFromInventory(fetchImpl)
+  }
   if (!token) throw new Error("Couldn’t read the Seller Central security token.")
 
   onProgress?.({ source: "unfulfillable", status: "active", loaded: 0, phase: "listings" })
@@ -585,6 +705,7 @@ export async function fetchUnfulfillableListings(
       const willRetryWithoutCursor = page === 0 && query === GET_LISTINGS_V2_QUERY && isMissingCursorField([message])
       const willRetryWithoutPagination = page === 0 && includePagination && isInvalidPaginationInput([message])
       if (willRetryWithoutCursor) {
+        log?.warn("unfulfillable.schemaRetry", { without: "cursor" })
         query = GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR
         cursor = undefined
         try {
@@ -592,13 +713,16 @@ export async function fetchUnfulfillableListings(
         } catch (retryError) {
           const retryMessage = retryError instanceof Error ? retryError.message : String(retryError)
           if (!isInvalidPaginationInput([retryMessage])) throw retryError
+          log?.warn("unfulfillable.schemaRetry", { without: "pagination" })
           includePagination = false
           result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
         }
       } else if (willRetryWithoutPagination) {
+        log?.warn("unfulfillable.schemaRetry", { without: "pagination" })
         includePagination = false
         result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
       } else if (listings.length > 0) {
+        log?.warn("unfulfillable.listingsStopped", { page, loaded: listings.length, error: describeError(error) })
         listingsIncomplete = true
         break
       } else {
@@ -625,9 +749,12 @@ export async function fetchUnfulfillableListings(
     cursor = result.cursor
   }
 
-  if (reportedCount > listings.length) listingsIncomplete = true
+  if (reportedCount > listings.length) {
+    log?.warn("unfulfillable.listingsIncomplete", { loaded: listings.length, reported: reportedCount })
+    listingsIncomplete = true
+  }
 
-  const { lineItems, failedPairKeys } = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress)
+  const { lineItems, failedPairKeys } = await fetchRemovalLineItems(fetchImpl, token, listings, onProgress, log)
   const merged = mergeRemovalStatus(listings, lineItems, failedPairKeys).map((listing) => (
     listingsIncomplete ? { ...listing, listingsIncomplete: true } : listing
   ))

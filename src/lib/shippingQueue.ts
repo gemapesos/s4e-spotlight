@@ -1,3 +1,5 @@
+import { formatUtcDateTime } from "./dates"
+import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 
 export const SHIPPING_QUEUE_URL = "https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments"
@@ -6,7 +8,19 @@ export const SHIPPING_QUEUE_DEFAULT_PAGE_SIZE = 250
 export const SHIPPING_QUEUE_MAX_PAGES = 40
 export const SHIPPING_QUEUE_ORDER_BY = "SHIPMENT_UPDATE_DATE"
 export const SHIPMENT_ELIGIBILITY_URL = "https://sellercentral.amazon.com/fba/wmsr/eligibilities"
+export const SHIPMENT_DOCUMENTS_URL = "https://sellercentral.amazon.com/fba/wmsr/document-requirements"
 export const SHIPMENT_CLAIM_PAGE_URL = "https://sellercentral.amazon.com/fba/wmsr"
+export const SHIPPING_STATUS_OUTSIDE_WINDOW = "Shipment ID - Outside Reconciliation Window"
+export const SHIPPING_STATUS_MONITORING = "Shipment ID - For Monitoring (Automatically Closed After 90 Days)"
+export const SHIPPING_STATUS_INVESTIGATION_COMPLETED = "Shipment ID - Investigation Completed - Contents Counted and Confirmed"
+export const SHIPPING_STATUS_UNITS_LOCATED = "Shipment ID - Units Located - No Further Action Required"
+export const SHIPPING_STATUS_RECEIVED_IN_FULL = "Received in Full - No Discrepancies Found"
+export const SHIPPING_STATUS_NEW = "Shipment ID - New (Send List)"
+export const SHIPPING_STATUS_OVERAGED = "Shipment ID - Overaged"
+export const SHIPPING_STATUS_REVIEW = "Review Needed"
+export const SHIPPING_STATUS_UNAVAILABLE = "N/A"
+export const REQUIRED_DOCUMENT_INVOICE = "Proof of Inventory Ownership"
+export const REQUIRED_DOCUMENT_DELIVERY = "Delivery"
 export const SHIPMENT_DETAILS_CONCURRENCY = 40
 export const SHIPMENT_DETAILS_MAX_ATTEMPTS = 3
 export const SHIPMENT_DETAILS_RETRY_DELAY_MS = 500
@@ -118,21 +132,6 @@ export const SHIPPING_QUEUE_SHEET_HEADERS = [
   ...SHIPPING_QUEUE_ITEM_HEADERS,
 ] as const
 
-const SHIPPING_QUEUE_MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-] as const
-
 type DateValue = number | string | null | undefined
 
 export interface ShipOrDeliveryWindow {
@@ -229,6 +228,8 @@ export interface ShippingQueueShipment {
   finalized?: boolean | null
   details?: ShipmentDetails
   detailsFetchFailed?: boolean
+  documentTypes?: string[]
+  documentsFetchFailed?: boolean
   listingsIncomplete?: boolean
 }
 
@@ -239,6 +240,7 @@ export interface FetchShippingQueueOptions {
   cutoffDate?: Date | number
   referenceDate?: Date
   sleep?: (ms: number) => Promise<void>
+  log?: Logger
 }
 
 interface ShipmentCursor {
@@ -277,13 +279,7 @@ export function formatShippingQueueDate(value: DateValue): string {
   const ms = typeof value === "number" ? value : Number(value)
   const date = Number.isFinite(ms) ? new Date(ms) : new Date(String(value))
   if (Number.isNaN(date.getTime())) return String(value)
-  const day = String(date.getUTCDate()).padStart(2, "0")
-  const month = SHIPPING_QUEUE_MONTHS[date.getUTCMonth()]
-  const year = date.getUTCFullYear()
-  const hours = String(date.getUTCHours()).padStart(2, "0")
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0")
-  const seconds = String(date.getUTCSeconds()).padStart(2, "0")
-  return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`
+  return formatUtcDateTime(date)
 }
 
 /** Amazon reports "no estimate" as 0; show those as blank rather than 01-Jan-1970. */
@@ -731,6 +727,60 @@ export function shipmentDetailsUrl(shipmentId: string): string {
   return `${SHIPMENT_ELIGIBILITY_URL}/${encodeURIComponent(shipmentId)}?withInquiry=true&withDiscrepancies=true`
 }
 
+export function shipmentDocumentsUrl(shipmentId: string): string {
+  return `${SHIPMENT_DOCUMENTS_URL}/${encodeURIComponent(shipmentId)}?evaluateOption=DOCUMENT`
+}
+
+export function parseDocumentTypes(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || !("documents" in payload)) return []
+  const documents = (payload as { documents?: unknown }).documents
+  if (!Array.isArray(documents)) return []
+  const types: string[] = []
+  for (const document of documents) {
+    if (!document || typeof document !== "object" || !("documentType" in document)) continue
+    const type = (document as { documentType?: unknown }).documentType
+    if (typeof type !== "string") continue
+    const trimmed = type.trim()
+    if (trimmed) types.push(trimmed)
+  }
+  return types
+}
+
+export function shippingQueueLineStatus(input: {
+  detailsFailed?: boolean
+  shipmentIneligibilityReason?: string | null
+  itemIneligibilityReason?: string | null
+  discrepancy?: number | null
+  eligible?: boolean | null
+}): string {
+  if (input.detailsFailed) return SHIPPING_STATUS_UNAVAILABLE
+  const shipmentReason = input.shipmentIneligibilityReason ?? ""
+  const itemReason = input.itemIneligibilityReason ?? ""
+  const discrepancy = input.discrepancy
+  if (shipmentReason === "NINE_MONTH_STATUTE_OF_LIMITATIONS") return SHIPPING_STATUS_OUTSIDE_WINDOW
+  if (shipmentReason === "NOT_ALL_SHIPPED") return SHIPPING_STATUS_MONITORING
+  if (itemReason === "ITEM_LEVEL_AUTHORITATIVE_RECEIVE") return SHIPPING_STATUS_INVESTIGATION_COMPLETED
+  if (itemReason === "RESEARCHED") return SHIPPING_STATUS_UNITS_LOCATED
+  if (discrepancy === 0) return SHIPPING_STATUS_RECEIVED_IN_FULL
+  if (input.eligible === true) {
+    if (typeof discrepancy === "number" && discrepancy < 0) return SHIPPING_STATUS_NEW
+    if (typeof discrepancy === "number" && discrepancy > 0) return SHIPPING_STATUS_OVERAGED
+  }
+  if (shipmentReason && shipmentReason !== "NONE") return shipmentReason
+  return SHIPPING_STATUS_REVIEW
+}
+
+export function requiredDocumentLabel(
+  documentTypes: readonly string[] | null | undefined,
+  status: string,
+): string {
+  if (status !== SHIPPING_STATUS_NEW) return SHIPPING_STATUS_UNAVAILABLE
+  const documents: string[] = []
+  if (documentTypes?.includes("INVOICE")) documents.push(REQUIRED_DOCUMENT_INVOICE)
+  if (documentTypes?.includes("POD")) documents.push(REQUIRED_DOCUMENT_DELIVERY)
+  return documents.length > 0 ? documents.join(" AND ") : SHIPPING_STATUS_UNAVAILABLE
+}
+
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 class SessionInterrupted extends Error {
@@ -820,11 +870,49 @@ async function fetchShipmentDetails(
   throw lastError
 }
 
+/**
+ * Required documents only matter for lines that can be "Shipment ID - New (Send List)": an
+ * eligible shipment with a negative discrepancy. Other shipments skip that request.
+ */
+export function shipmentNeedsDocumentTypes(details: ShipmentDetails): boolean {
+  if (details.eligible !== true) return false
+  return details.items.some((item) => typeof item.totalDiscrepancyQuantity === "number" && item.totalDiscrepancyQuantity < 0)
+}
+
+async function fetchShipmentDocumentTypes(
+  fetchImpl: typeof globalThis.fetch,
+  shipmentId: string,
+): Promise<Pick<ShippingQueueShipment, "documentTypes" | "documentsFetchFailed">> {
+  try {
+    const response = await fetchImpl(shipmentDocumentsUrl(shipmentId), {
+      method: "GET",
+      mode: "cors",
+      credentials: "include",
+      referrer: buildShipmentClaimUrl(shipmentId),
+      headers: {
+        accept: "*/*",
+        "accept-language": "en-US,en;q=0.9",
+      },
+    })
+    if (!response.ok || isSessionResponse(response)) return { documentsFetchFailed: true }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      return { documentsFetchFailed: true }
+    }
+    return { documentTypes: parseDocumentTypes(payload) }
+  } catch {
+    return { documentsFetchFailed: true }
+  }
+}
+
 async function fetchAllShipmentDetails(
   fetchImpl: typeof globalThis.fetch,
   shipments: readonly ShippingQueueShipment[],
   sleep: (ms: number) => Promise<void>,
   onProgress?: (event: ReportProgressEvent) => void,
+  log?: Logger,
 ): Promise<ShippingQueueShipment[]> {
   if (shipments.length === 0) return []
   onProgress?.({ source: "shippingQueue", status: "active", loaded: 0, total: shipments.length, phase: "details" })
@@ -837,6 +925,8 @@ async function fetchAllShipmentDetails(
   let holdLaunch = false
   let halt = false
   let abandoned = false
+  let documentsSkipped = 0
+  const failedSample: string[] = []
 
   function reportProgress() {
     onProgress?.({
@@ -865,19 +955,19 @@ async function fetchAllShipmentDetails(
     if (pausePromise) return pausePromise
     if (pauseCount >= SHIPMENT_DETAILS_SESSION_PAUSES) {
       halt = true
-      console.error("[ShippingQueue] shipment details paused too many times; stopping")
+      log?.error("shippingQueue.detailsHalted", { pauses: pauseCount, processed, total: shipments.length })
       return Promise.resolve(false)
     }
     pauseCount += 1
     let current!: Promise<boolean>
     current = (async () => {
-      console.warn("[ShippingQueue] detail session interrupted; pausing")
+      log?.warn("shippingQueue.sessionPause", { pause: pauseCount, waitMs: SHIPMENT_DETAILS_SESSION_WAIT_MS, processed })
       try {
         await sleep(SHIPMENT_DETAILS_SESSION_WAIT_MS)
         await fetchShippingQueuePage(fetchImpl, shippingQueueUrl())
         return true
       } catch (error) {
-        console.error("[ShippingQueue] shipment list check failed:", error)
+        log?.error("shippingQueue.sessionCheckFailed", { error: describeError(error) })
         halt = true
         return false
       } finally {
@@ -889,6 +979,23 @@ async function fetchAllShipmentDetails(
     return current
   }
 
+  function markFailed(shipment: ShippingQueueShipment, id: string, error: unknown): ShippingQueueShipment {
+    if (failedSample.length < 3) {
+      failedSample.push(id)
+      log?.warn("shippingQueue.detailsFailed", { shipmentId: id, error: describeError(error) })
+    }
+    return { ...shipment, detailsFetchFailed: true }
+  }
+
+  async function loadDetails(shipment: ShippingQueueShipment, id: string, onSession?: () => void) {
+    const details = await fetchShipmentDetails(fetchImpl, id, sleep, onSession)
+    if (!shipmentNeedsDocumentTypes(details)) {
+      documentsSkipped += 1
+      return { ...shipment, details }
+    }
+    return { ...shipment, details, ...await fetchShipmentDocumentTypes(fetchImpl, id) }
+  }
+
   async function loadOne(shipment: ShippingQueueShipment): Promise<ShippingQueueShipment> {
     const id = shipment.shipmentId?.trim()
     if (!id) return { ...shipment, detailsFetchFailed: true }
@@ -896,19 +1003,15 @@ async function fetchAllShipmentDetails(
       if (!halt) holdLaunch = true
     }
     try {
-      return { ...shipment, details: await fetchShipmentDetails(fetchImpl, id, sleep, onSession) }
+      return await loadDetails(shipment, id, onSession)
     } catch (error) {
-      if (!(error instanceof SessionInterrupted) || halt) {
-        console.error("[ShippingQueue] shipment details failed:", id, error)
-        return { ...shipment, detailsFetchFailed: true }
-      }
+      if (!(error instanceof SessionInterrupted) || halt) return markFailed(shipment, id, error)
       const resumed = await startPause()
       if (!resumed) return { ...shipment, detailsFetchFailed: true }
       try {
-        return { ...shipment, details: await fetchShipmentDetails(fetchImpl, id, sleep) }
+        return await loadDetails(shipment, id)
       } catch (retryError) {
-        console.error("[ShippingQueue] shipment details failed:", id, retryError)
-        return { ...shipment, detailsFetchFailed: true }
+        return markFailed(shipment, id, retryError)
       }
     }
   }
@@ -941,6 +1044,13 @@ async function fetchAllShipmentDetails(
     pump()
   })
 
+  log?.info("shippingQueue.details", {
+    shipments: shipments.length,
+    failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
+    documentsSkipped,
+    pauses: pauseCount,
+    ...(failedSample.length ? { failedSample } : {}),
+  })
   return results
 }
 
@@ -949,6 +1059,7 @@ export async function fetchShippingQueueShipments(
 ): Promise<ShippingQueueShipment[]> {
   const fetchImpl = options.fetch ?? globalThis.fetch
   const onProgress = options.onProgress
+  const log = options.log
   const sleep = options.sleep ?? defaultSleep
   const pageSize = options.pageSize ?? SHIPPING_QUEUE_DEFAULT_PAGE_SIZE
   const cutoffTimestamp =
@@ -969,6 +1080,7 @@ export async function fetchShippingQueueShipments(
       pageShipments = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor))
     } catch (error) {
       if (page > 1) {
+        log?.warn("shippingQueue.listStopped", { page, loaded: shipments.length, error: describeError(error) })
         listingsIncomplete = true
         break
       }
@@ -998,7 +1110,7 @@ export async function fetchShippingQueueShipments(
   }
 
   const tagged = listingsIncomplete ? shipments.map((shipment) => ({ ...shipment, listingsIncomplete: true })) : shipments
-  const withDetails = await fetchAllShipmentDetails(fetchImpl, tagged, sleep, onProgress)
+  const withDetails = await fetchAllShipmentDetails(fetchImpl, tagged, sleep, onProgress, log)
 
   onProgress?.({
     source: "shippingQueue",

@@ -1,8 +1,17 @@
 export type WorkbookCell = string | number
 
+export interface WorkbookFixedColumn {
+  index: number
+  widthPx: number
+  wrapHeader?: boolean
+}
+
 export interface WorkbookSheet {
   name: string
   rows?: readonly (readonly WorkbookCell[])[]
+  fixedColumns?: readonly WorkbookFixedColumn[]
+  /** Header row height in pixels. Stored in the workbook as points. */
+  headerRowHeightPx?: number
 }
 
 const CRC_TABLE = new Uint32Array(256)
@@ -55,8 +64,12 @@ function decodeUtf8(value: Uint8Array): string {
   return new TextDecoder().decode(value)
 }
 
+/** Control characters XML 1.0 forbids; one stray character makes Excel reject the whole file. */
+const INVALID_XML_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g
+
 function escapeXml(value: string): string {
   return value
+    .replace(INVALID_XML_CHARACTERS, "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -75,25 +88,192 @@ function columnName(index: number): string {
   return name
 }
 
-function cellXml(ref: string, value: WorkbookCell): string {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return `<c r="${ref}"><v>${String(value)}</v></c>`
+/** Calibri 11 max digit width. Excel's column tooltip is floor(width * 7 + 5); 600px is width 85. */
+const MAX_DIGIT_WIDTH_PX = 7
+const COLUMN_PADDING_PX = 5
+const AUTOFIT_SLACK_PX = MAX_DIGIT_WIDTH_PX
+const MAX_COLUMN_PIXELS = 600
+
+const NARROW_GLYPHS = new Set("ijl.,;:'!|`")
+const SLIM_GLYPHS = new Set("frtI()[]{}")
+
+function glyphPixels(char: string): number {
+  if (char === " " || char === "\t") return 4
+  if (char >= "0" && char <= "9") return MAX_DIGIT_WIDTH_PX
+  if (NARROW_GLYPHS.has(char)) return 4
+  if (SLIM_GLYPHS.has(char)) return 5
+  if (char >= "a" && char <= "z") return char === "m" || char === "w" ? 11 : 7
+  if (char >= "A" && char <= "Z") return char === "M" || char === "W" ? 12 : 8
+
+  const code = char.codePointAt(0) ?? 0
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe6f) ||
+    (code >= 0xff01 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    code >= 0x1f300
+  ) {
+    return 14
   }
-  return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(String(value))}</t></is></c>`
+  return 8
 }
 
-function worksheetXml(rows: readonly (readonly WorkbookCell[])[] = []): string {
-  if (rows.length === 0) {
-    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+function linePixels(line: string): number {
+  let pixels = 0
+  for (const char of line) pixels += glyphPixels(char)
+  return pixels
+}
+
+function cellContentPixels(value: WorkbookCell): number {
+  let max = 0
+  for (const line of String(value).split(/\r\n|\n|\r/)) {
+    max = Math.max(max, linePixels(line))
+  }
+  return max
+}
+
+function formatExcelWidthCents(cents: number): string {
+  const whole = Math.trunc(cents / 100)
+  const frac = cents % 100
+  if (frac === 0) return String(whole)
+  if (frac % 10 === 0) return `${whole}.${frac / 10}`
+  return `${whole}.${String(frac).padStart(2, "0")}`
+}
+
+/** Excel width attribute, floored to 2 decimals, for a column that displays at most 600px. */
+function excelWidthAttribute(displayedPixels: number): string {
+  const pixels = Math.min(displayedPixels, MAX_COLUMN_PIXELS)
+  const cents = Math.floor(((pixels - COLUMN_PADDING_PX) * 100) / MAX_DIGIT_WIDTH_PX)
+  return formatExcelWidthCents(cents)
+}
+
+/** Width whose tooltip is exactly the requested pixel count. */
+function excelWidthAttributeExact(targetPixels: number): string {
+  const pixels = Math.min(Math.max(targetPixels, COLUMN_PADDING_PX), MAX_COLUMN_PIXELS)
+  const cents = Math.ceil(((pixels - COLUMN_PADDING_PX) * 100) / MAX_DIGIT_WIDTH_PX)
+  return formatExcelWidthCents(cents)
+}
+
+function colsXml(
+  rows: readonly (readonly WorkbookCell[])[],
+  fixedWidths: ReadonlyMap<number, number>,
+): string {
+  let count = rows.reduce((max, row) => Math.max(max, row.length), 0)
+  for (const index of fixedWidths.keys()) count = Math.max(count, index + 1)
+  const contentPixels = new Array<number>(count).fill(0)
+  for (const row of rows) {
+    row.forEach((cell, index) => {
+      contentPixels[index] = Math.max(contentPixels[index], cellContentPixels(cell))
+    })
   }
 
+  const cols: string[] = []
+  contentPixels.forEach((pixels, index) => {
+    const fixed = fixedWidths.get(index)
+    if (fixed == null && pixels <= 0) return
+    const width = fixed == null
+      ? excelWidthAttribute(Math.min(pixels + COLUMN_PADDING_PX + AUTOFIT_SLACK_PX, MAX_COLUMN_PIXELS))
+      : excelWidthAttributeExact(fixed)
+    const column = index + 1
+    cols.push(`<col min="${column}" max="${column}" width="${width}" customWidth="1"/>`)
+  })
+  if (cols.length === 0) return ""
+  return `<cols>${cols.join("")}</cols>`
+}
+
+const CENTER_STYLE = 0
+const LEFT_STYLE = 1
+const CENTER_WRAP_STYLE = 2
+
+const LEFT_ALIGN_HEADERS = new Set([
+  "SKU",
+  "MSKU",
+  "MSKUs",
+  "Product Name",
+  "Title",
+  "Product",
+  "Other Actions",
+  "Additional Notes",
+])
+
+const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+const SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+const PACKAGE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+const OFFICE_RELATIONSHIPS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+const SPREADSHEET_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+
+const STYLES_XML = [
+  XML_DECLARATION,
+  `<styleSheet xmlns="${SPREADSHEET_NS}">`,
+  '<fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>',
+  '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>',
+  '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>',
+  '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>',
+  '<cellXfs count="3">',
+  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>',
+  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>',
+  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>',
+  "</cellXfs>",
+  '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>',
+  "</styleSheet>",
+].join("")
+
+function leftAlignedColumns(rows: readonly (readonly WorkbookCell[])[]): Set<number> {
+  const columns = new Set<number>()
+  for (const row of rows) {
+    row.forEach((cell, index) => {
+      if (typeof cell === "string" && LEFT_ALIGN_HEADERS.has(cell)) columns.add(index)
+    })
+  }
+  return columns
+}
+
+function isBlankCell(value: WorkbookCell): boolean {
+  return typeof value === "string" && value.trim() === ""
+}
+
+/** xlsx row height is points. 96dpi pixels convert at 72/96. */
+function rowHeightPoints(heightPx: number): string {
+  const points = Math.round((heightPx * 72 / 96) * 100) / 100
+  return String(points)
+}
+
+function cellXml(ref: string, value: WorkbookCell, style: number): string {
+  if (isBlankCell(value)) return ""
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `<c r="${ref}" s="${style}"><v>${String(value)}</v></c>`
+  }
+  return `<c r="${ref}" s="${style}" t="inlineStr"><is><t>${escapeXml(String(value))}</t></is></c>`
+}
+
+function worksheetXml(sheet: WorkbookSheet): string {
+  const rows = sheet.rows ?? []
+  const worksheetOpen = `${XML_DECLARATION}<worksheet xmlns="${SPREADSHEET_NS}">`
+  if (rows.length === 0) return `${worksheetOpen}<sheetData/></worksheet>`
+
+  const fixedWidths = new Map((sheet.fixedColumns ?? []).map((column) => [column.index, column.widthPx]))
+  const wrapHeaderColumns = new Set(
+    (sheet.fixedColumns ?? []).filter((column) => column.wrapHeader).map((column) => column.index),
+  )
+  const leftColumns = leftAlignedColumns(rows)
   const rowXml = rows.map((row, rowIndex) => {
     const r = rowIndex + 1
-    const cells = row.map((value, colIndex) => cellXml(`${columnName(colIndex)}${r}`, value)).join("")
-    return `<row r="${r}">${cells}</row>`
+    const cells = row.map((value, colIndex) => {
+      const style = rowIndex === 0
+        ? wrapHeaderColumns.has(colIndex) ? CENTER_WRAP_STYLE : CENTER_STYLE
+        : leftColumns.has(colIndex) ? LEFT_STYLE : CENTER_STYLE
+      return cellXml(`${columnName(colIndex)}${r}`, value, style)
+    }).join("")
+    const height = rowIndex === 0 && sheet.headerRowHeightPx != null
+      ? ` ht="${rowHeightPoints(sheet.headerRowHeightPx)}" customHeight="1"`
+      : ""
+    return `<row r="${r}"${height}>${cells}</row>`
   }).join("")
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowXml}</sheetData></worksheet>`
+  return `${worksheetOpen}${colsXml(rows, fixedWidths)}<sheetData>${rowXml}</sheetData></worksheet>`
 }
 
 export function buildStoredZip(files: ReadonlyArray<{ name: string; data: Uint8Array }>): Uint8Array {
@@ -190,27 +370,33 @@ export function buildWorkbook(sheets: readonly WorkbookSheet[]): Uint8Array {
       name: sheet.name,
       path: `xl/worksheets/sheet${id}.xml`,
       relId: `rId${id}`,
-      xml: worksheetXml(sheet.rows),
+      xml: worksheetXml(sheet),
     }
   })
 
   const contentTypes = [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    XML_DECLARATION,
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
     '<Default Extension="xml" ContentType="application/xml"/>',
-    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+    `<Override PartName="/xl/workbook.xml" ContentType="${SPREADSHEET_CONTENT_TYPE}.sheet.main+xml"/>`,
+    `<Override PartName="/xl/styles.xml" ContentType="${SPREADSHEET_CONTENT_TYPE}.styles+xml"/>`,
     ...sheetEntries.map((sheet) =>
-      `<Override PartName="/${sheet.path}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
+      `<Override PartName="/${sheet.path}" ContentType="${SPREADSHEET_CONTENT_TYPE}.worksheet+xml"/>`,
     ),
     "</Types>",
   ].join("")
 
-  const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+  const rootRels = [
+    XML_DECLARATION,
+    `<Relationships xmlns="${PACKAGE_RELATIONSHIPS_NS}">`,
+    `<Relationship Id="rId1" Type="${OFFICE_RELATIONSHIPS}/officeDocument" Target="xl/workbook.xml"/>`,
+    "</Relationships>",
+  ].join("")
 
   const workbook = [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+    XML_DECLARATION,
+    `<workbook xmlns="${SPREADSHEET_NS}" xmlns:r="${OFFICE_RELATIONSHIPS}">`,
     "<sheets>",
     ...sheetEntries.map((sheet) =>
       `<sheet name="${escapeXml(sheet.name)}" sheetId="${sheet.id}" r:id="${sheet.relId}"/>`,
@@ -219,12 +405,14 @@ export function buildWorkbook(sheets: readonly WorkbookSheet[]): Uint8Array {
     "</workbook>",
   ].join("")
 
+  const stylesRelId = `rId${sheetEntries.length + 1}`
   const workbookRels = [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    XML_DECLARATION,
+    `<Relationships xmlns="${PACKAGE_RELATIONSHIPS_NS}">`,
     ...sheetEntries.map((sheet) =>
-      `<Relationship Id="${sheet.relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheet.id}.xml"/>`,
+      `<Relationship Id="${sheet.relId}" Type="${OFFICE_RELATIONSHIPS}/worksheet" Target="worksheets/sheet${sheet.id}.xml"/>`,
     ),
+    `<Relationship Id="${stylesRelId}" Type="${OFFICE_RELATIONSHIPS}/styles" Target="styles.xml"/>`,
     "</Relationships>",
   ].join("")
 
@@ -233,6 +421,7 @@ export function buildWorkbook(sheets: readonly WorkbookSheet[]): Uint8Array {
     { name: "_rels/.rels", data: encodeUtf8(rootRels) },
     { name: "xl/workbook.xml", data: encodeUtf8(workbook) },
     { name: "xl/_rels/workbook.xml.rels", data: encodeUtf8(workbookRels) },
+    { name: "xl/styles.xml", data: encodeUtf8(STYLES_XML) },
     ...sheetEntries.map((sheet) => ({ name: sheet.path, data: encodeUtf8(sheet.xml) })),
   ])
 }

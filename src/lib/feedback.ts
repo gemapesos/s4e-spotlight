@@ -1,3 +1,4 @@
+import { formatUtcDateTime } from "./dates"
 import type { ReportProgressEvent } from "./reportProgress"
 
 export const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks"
@@ -20,21 +21,6 @@ export const FEEDBACK_SHEET_HEADERS = [
   "Partially suppressed",
   "Suppress reason",
   "Feedback ID",
-] as const
-
-const MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
 ] as const
 
 const HTML_NAMED_ENTITIES: Record<string, string> = {
@@ -102,13 +88,7 @@ export function formatFeedbackDate(value: string | null | undefined): string {
   if (!value) return ""
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  const day = String(date.getUTCDate()).padStart(2, "0")
-  const month = MONTHS[date.getUTCMonth()]
-  const year = date.getUTCFullYear()
-  const hours = String(date.getUTCHours()).padStart(2, "0")
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0")
-  const seconds = String(date.getUTCSeconds()).padStart(2, "0")
-  return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`
+  return formatUtcDateTime(date)
 }
 
 function feedbackCell(value: string | number | boolean | null | undefined): string {
@@ -150,53 +130,50 @@ export function feedbackSheetRows(feedbacks: readonly SellerFeedback[]): Array<A
   return [[...FEEDBACK_SHEET_HEADERS], ...feedbacks.map(feedbackSheetRow)]
 }
 
-function stringField(value: unknown): string | null | undefined {
-  if (value == null) return value as null | undefined
-  return typeof value === "string" ? value : undefined
+const FEEDBACK_STRING_FIELDS = [
+  "feedbackId",
+  "orderId",
+  "feedbackText",
+  "feedbackDate",
+  "responseText",
+  "responseDate",
+  "suppressReasonId",
+] as const satisfies ReadonlyArray<keyof SellerFeedback>
+const FEEDBACK_BOOLEAN_FIELDS = ["suppressed", "partiallySuppressed"] as const satisfies ReadonlyArray<keyof SellerFeedback>
+
+/** Keeps null and correctly typed values; drops anything else. */
+function typedField<T>(value: unknown, isType: (value: unknown) => value is T): T | null | undefined {
+  if (value === null) return null
+  return isType(value) ? value : undefined
 }
 
-function numberField(value: unknown): number | null | undefined {
-  if (value == null) return value as null | undefined
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined
-}
-
-function booleanField(value: unknown): boolean | null | undefined {
-  if (value == null) return value as null | undefined
-  return typeof value === "boolean" ? value : undefined
-}
+const isString = (value: unknown): value is string => typeof value === "string"
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
+const isBoolean = (value: unknown): value is boolean => typeof value === "boolean"
 
 function asFeedback(value: unknown): SellerFeedback | undefined {
   if (!value || typeof value !== "object") return undefined
   const record = value as Record<string, unknown>
+  const feedback: SellerFeedback = {}
+  for (const field of FEEDBACK_STRING_FIELDS) {
+    const fieldValue = typedField(record[field], isString)
+    if (fieldValue !== undefined) feedback[field] = fieldValue
+  }
+  const numericRating = typedField(record.numericRating, isFiniteNumber)
+  if (numericRating !== undefined) feedback.numericRating = numericRating
+  for (const field of FEEDBACK_BOOLEAN_FIELDS) {
+    const fieldValue = typedField(record[field], isBoolean)
+    if (fieldValue !== undefined) feedback[field] = fieldValue
+  }
   const answerMap = record.answerMap && typeof record.answerMap === "object"
     ? record.answerMap as Record<string, unknown>
     : undefined
   const itemAsDescribedAnswer = answerMap?.ItemAsDescribed && typeof answerMap.ItemAsDescribed === "object"
     ? answerMap.ItemAsDescribed as Record<string, unknown>
     : undefined
-  const feedback: SellerFeedback = {}
-  const feedbackId = stringField(record.feedbackId)
-  const orderId = stringField(record.orderId)
-  const numericRating = numberField(record.numericRating)
-  const feedbackText = stringField(record.feedbackText)
-  const feedbackDate = stringField(record.feedbackDate)
-  const responseText = stringField(record.responseText)
-  const responseDate = stringField(record.responseDate)
-  const suppressed = booleanField(record.suppressed)
-  const partiallySuppressed = booleanField(record.partiallySuppressed)
-  const suppressReasonId = stringField(record.suppressReasonId)
-  if (feedbackId !== undefined) feedback.feedbackId = feedbackId
-  if (orderId !== undefined) feedback.orderId = orderId
-  if (numericRating !== undefined) feedback.numericRating = numericRating
-  if (feedbackText !== undefined) feedback.feedbackText = feedbackText
-  if (feedbackDate !== undefined) feedback.feedbackDate = feedbackDate
-  if (responseText !== undefined) feedback.responseText = responseText
-  if (responseDate !== undefined) feedback.responseDate = responseDate
-  if (suppressed !== undefined) feedback.suppressed = suppressed
-  if (partiallySuppressed !== undefined) feedback.partiallySuppressed = partiallySuppressed
-  if (suppressReasonId !== undefined) feedback.suppressReasonId = suppressReasonId
   if (itemAsDescribedAnswer) {
-    feedback.answerMap = { ItemAsDescribed: { booleanRating: booleanField(itemAsDescribedAnswer.booleanRating) } }
+    const booleanRating = typedField(itemAsDescribedAnswer.booleanRating, isBoolean)
+    feedback.answerMap = { ItemAsDescribed: { booleanRating } }
   }
   return feedback
 }

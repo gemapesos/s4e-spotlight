@@ -4,8 +4,10 @@ import { createRoot } from "react-dom/client"
 import "@fontsource-variable/geist"
 import "@/styles.css"
 import { applyPrefersColorScheme } from "@/lib/colorScheme"
+import { forwardLogsToBackground, setLogSink } from "@/lib/log"
 import { OptionsApp } from "@/options/OptionsApp"
 
+setLogSink(forwardLogsToBackground())
 applyPrefersColorScheme(document.documentElement)
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -1,4 +1,5 @@
-import { hasAuthenticatedSellerUi, shellSelectorHits, visible } from "./lib/sellerCentralSession"
+import { createLogger, errorMessage, forwardLogsToBackground, setLogSink } from "./lib/log"
+import { hasAuthenticatedSellerUi, visible } from "./lib/sellerCentralSession"
 
 const STATUS_ID = "s4e-account-switch-status"
 const documentStartedAt = Date.now()
@@ -7,14 +8,43 @@ let inFlight: { stage: string; startedAt: number } | null = null
 let leavingLogout = false
 const RETRY_DELAY_MS = 5_000
 const MAX_ATTEMPTS = 2
+const STEP_TIMEOUT_MS = 90_000
 const CAPTCHA_TEXT_SCAN_INTERVAL_MS = 3_000
 let lastCaptchaTextScanAt = 0
 let lastCaptchaTextScanResult = false
+let runTimer: number | undefined
+let waitingForLoad = false
+let reportedWaitingPath: string | null = null
+const automationLog = createLogger("automation")
 
-type AutomationResponse = { ok: boolean; error?: string; value?: string; waitMs?: number; job?: { id: string; stage: string } | null }
+const EMAIL_INPUT_SELECTORS = ["#ap_email", 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]']
+const PASSWORD_INPUT_SELECTORS = ["#ap_password", 'input[name="password"]', 'input[type="password"]']
+const OTP_INPUT_SELECTORS = [
+  "#auth-mfa-otpcode",
+  'input[name="otpCode"]',
+  'input[autocomplete="one-time-code"]',
+  'input[inputmode="numeric"]',
+]
+
+type AutomationResponse = {
+  ok: boolean
+  error?: string
+  value?: string
+  waitMs?: number
+  job?: { id: string; stage: string } | null
+}
 
 async function send(message: Record<string, unknown>): Promise<AutomationResponse> {
   return chrome.runtime.sendMessage(message) as Promise<AutomationResponse>
+}
+
+/** Runs the workflow again after `delayMs`, replacing any run already scheduled so only one loop polls. */
+function scheduleRun(delayMs: number): void {
+  if (runTimer !== undefined) window.clearTimeout(runTimer)
+  runTimer = window.setTimeout(() => {
+    runTimer = undefined
+    void run()
+  }, delayMs)
 }
 
 function setWorkflowStatus(text: string, tone: "normal" | "error" = "normal"): void {
@@ -36,7 +66,7 @@ function setWorkflowStatus(text: string, tone: "normal" | "error" = "normal"): v
   element.textContent = text
 }
 
-function input(selectors: string[]): HTMLInputElement | null {
+function input(selectors: readonly string[]): HTMLInputElement | null {
   for (const selector of selectors) {
     const element = document.querySelector(selector)
     if (element instanceof HTMLInputElement && visible(element)) return element
@@ -44,7 +74,7 @@ function input(selectors: string[]): HTMLInputElement | null {
   return null
 }
 
-function button(selectors: string[], names: RegExp): HTMLElement | null {
+function button(selectors: readonly string[], names: RegExp): HTMLElement | null {
   for (const selector of selectors) {
     const element = document.querySelector(selector)
     if (visible(element)) return element
@@ -71,14 +101,8 @@ async function activate(
   if (!element) throw new Error(missingMessage)
   if (!visible(element)) throw new Error(`${missingMessage} The control is not visible.`)
   const rect = element.getBoundingClientRect()
-  if (
-    !Number.isFinite(rect.left) ||
-    !Number.isFinite(rect.top) ||
-    !Number.isFinite(rect.width) ||
-    !Number.isFinite(rect.height) ||
-    rect.width <= 0 ||
-    rect.height <= 0
-  ) {
+  const finite = [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)
+  if (!finite || rect.width <= 0 || rect.height <= 0) {
     throw new Error(`${missingMessage} The control has invalid click coordinates.`)
   }
   const response = await send({
@@ -98,7 +122,7 @@ function prepareStage(stage: string, failureMessage: string): boolean {
   }
   const elapsed = Date.now() - inFlight.startedAt
   if (elapsed < RETRY_DELAY_MS) {
-    window.setTimeout(() => void run(), RETRY_DELAY_MS - elapsed)
+    scheduleRun(RETRY_DELAY_MS - elapsed)
     return false
   }
   if ((attempts.get(stage) ?? 0) >= MAX_ATTEMPTS) throw new Error(failureMessage)
@@ -109,7 +133,7 @@ function prepareStage(stage: string, failureMessage: string): boolean {
 function markStageSubmitted(stage: string): void {
   attempts.set(stage, (attempts.get(stage) ?? 0) + 1)
   inFlight = { stage, startedAt: Date.now() }
-  window.setTimeout(() => void run(), RETRY_DELAY_MS)
+  scheduleRun(RETRY_DELAY_MS)
 }
 
 function hasCaptcha(): boolean {
@@ -146,10 +170,10 @@ function shouldCompleteAuthenticatedSession(stage: string): boolean {
 
 async function requestSecret(jobId: string, kind: "email" | "password" | "otp"): Promise<string | null> {
   const response = await send({ type: "ACCOUNT_AUTOMATION_SECRET", jobId, kind })
-  if (!response.ok) throw new Error(response.error)
+  if (!response.ok) throw new Error(response.error ?? "The saved account details are unavailable.")
   if (response.waitMs) {
     setWorkflowStatus("Waiting for a fresh verification code…")
-    window.setTimeout(() => void run(), response.waitMs)
+    scheduleRun(response.waitMs)
     return null
   }
   return response.value ?? null
@@ -164,6 +188,19 @@ async function leaveLogout(jobId: string): Promise<void> {
   }
 }
 
+/** Ends the switch with a visible error; the background worker logs the reason. */
+async function failWorkflow(jobId: string, error: unknown): Promise<void> {
+  const message = errorMessage(error, "Account switching failed.")
+  setWorkflowStatus(message, "error")
+  await send({ type: "ACCOUNT_AUTOMATION_ERROR", jobId, error: message })
+}
+
+function onLogoutIntercept(): boolean {
+  return location.pathname.startsWith("/ap/")
+    || location.pathname.includes("signin")
+    || Boolean(input(EMAIL_INPUT_SELECTORS) || input(PASSWORD_INPUT_SELECTORS) || input(OTP_INPUT_SELECTORS))
+}
+
 async function run(): Promise<void> {
   const response = await send({ type: "ACCOUNT_AUTOMATION_GET_JOB" })
   const job = response.job
@@ -176,151 +213,88 @@ async function run(): Promise<void> {
         attempts.set("captcha", 1)
         await send({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId: job.id })
       }
-      window.setTimeout(() => void run(), 1500)
+      scheduleRun(1500)
       return
     }
     if (hasAuthError()) {
-      setWorkflowStatus("Amazon rejected the login details. Review the page or edit the saved account.", "error")
-      await send({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: job.id })
+      await failWorkflow(job.id, "Amazon rejected the login details. Review the page or edit the saved account.")
       return
     }
 
     // Never fill credentials on Amazon's logout re-auth (return_to=sign-out); wait for canonical sign-in navigation.
     if (job.stage === "logout" || leavingLogout) {
-      if (Date.now() - documentStartedAt > 90_000) throw new Error("Amazon did not finish signing out. Cancel the switch and try again.")
+      if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) {
+        throw new Error("Amazon did not finish signing out. Cancel the switch and try again.")
+      }
       setWorkflowStatus("Signing out of the current Seller Central account…")
-      const onLogoutIntercept =
-        location.pathname.startsWith("/ap/") ||
-        location.pathname.includes("signin") ||
-        Boolean(input(["#ap_email", 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]'])) ||
-        Boolean(input(["#ap_password", 'input[name="password"]', 'input[type="password"]'])) ||
-        Boolean(input(["#auth-mfa-otpcode", 'input[name="otpCode"]', 'input[autocomplete="one-time-code"]', 'input[inputmode="numeric"]']))
-      const leaveReason = !leavingLogout && onLogoutIntercept
-        ? "intercept"
-        : !leavingLogout && document.readyState === "complete"
-          ? "ready-complete"
-          : document.readyState !== "complete"
-            ? "wait-load"
-            : "poll"
-      // #region agent log
-      {
-        const hits = shellSelectorHits()
-        fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-          body: JSON.stringify({
-            sessionId: "f8f494",
-            runId: "pre-fix",
-            hypothesisId: "C",
-            location: "accountAutomation.ts:logout-branch",
-            message: "logout stage tick",
-            data: {
-              stage: job.stage,
-              leavingLogout,
-              leaveReason,
-              pathname: location.pathname,
-              readyState: document.readyState,
-              onLogoutIntercept,
-              authenticatedUi: hasAuthenticatedSellerUi(),
-              modernHits: hits.modernHits,
-              classicHits: hits.classicHits,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {})
-      }
-      // #endregion
-      if (!leavingLogout && onLogoutIntercept) {
+      if (!leavingLogout && (onLogoutIntercept() || document.readyState === "complete")) {
         await leaveLogout(job.id)
-      } else if (!leavingLogout && document.readyState === "complete") {
-        await leaveLogout(job.id)
-      } else if (document.readyState !== "complete") {
-        window.addEventListener("load", () => void run(), { once: true })
+      } else if (document.readyState !== "complete" && !waitingForLoad) {
+        waitingForLoad = true
+        window.addEventListener("load", () => scheduleRun(0), { once: true })
       }
-      window.setTimeout(() => void run(), 1000)
+      scheduleRun(1000)
       return
     }
 
-    const email = input(["#ap_email", 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]'])
+    const email = input(EMAIL_INPUT_SELECTORS)
     if (email) {
       if (!prepareStage("email", "Amazon’s Continue button did not advance the login.")) return
       setWorkflowStatus("Entering the saved account email…")
       const value = await requestSecret(job.id, "email")
       if (!value) return
       fill(email, value)
-      await activate(job.id, button(["#continue", 'input[name="continue"]'], /continue/iu), "continue", "Amazon’s Continue button was not found.")
+      const next = button(["#continue", 'input[name="continue"]'], /continue/iu)
+      await activate(job.id, next, "continue", "Amazon’s Continue button was not found.")
       markStageSubmitted("email")
       return
     }
 
-    const password = input(["#ap_password", 'input[name="password"]', 'input[type="password"]'])
+    const password = input(PASSWORD_INPUT_SELECTORS)
     if (password) {
       if (!prepareStage("password", "Amazon’s password button did not advance the login.")) return
       setWorkflowStatus("Entering the saved password…")
       const value = await requestSecret(job.id, "password")
       if (!value) return
       fill(password, value)
-      await activate(job.id, button(["#signInSubmit", 'input[name="signIn"]', 'button[type="submit"]'], /sign in|next|continue/iu), "password-submit", "Amazon’s password submit button was not found.")
+      const submit = button(["#signInSubmit", 'input[name="signIn"]', 'button[type="submit"]'], /sign in|next|continue/iu)
+      await activate(job.id, submit, "password-submit", "Amazon’s password submit button was not found.")
       markStageSubmitted("password")
       return
     }
 
-    const otp = input(["#auth-mfa-otpcode", 'input[name="otpCode"]', 'input[autocomplete="one-time-code"]', 'input[inputmode="numeric"]'])
+    const otp = input(OTP_INPUT_SELECTORS)
     if (otp) {
       if (!prepareStage("otp", "Amazon’s verification-code button did not advance the login.")) return
       setWorkflowStatus("Generating and entering a fresh verification code…")
       const value = await requestSecret(job.id, "otp")
       if (!value) return
       fill(otp, value)
-      await activate(job.id, button(["#auth-signin-button", 'input[type="submit"]', 'button[type="submit"]'], /sign in|submit|continue/iu), "otp-submit", "Amazon’s verification-code submit button was not found.")
+      const submit = button(["#auth-signin-button", 'input[type="submit"]', 'button[type="submit"]'], /sign in|submit|continue/iu)
+      await activate(job.id, submit, "otp-submit", "Amazon’s verification-code submit button was not found.")
       markStageSubmitted("otp")
       return
     }
 
-    {
-      const ready = isReadyForStoreNavigation()
-      const allowed = shouldCompleteAuthenticatedSession(job.stage)
-      // #region agent log
-      {
-        const hits = shellSelectorHits()
-        fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-          body: JSON.stringify({
-            sessionId: "f8f494",
-            runId: "pre-fix",
-            hypothesisId: "A",
-            location: "accountAutomation.ts:complete-gate",
-            message: "complete gate evaluated",
-            data: {
-              stage: job.stage,
-              pathname: location.pathname,
-              ready,
-              allowed,
-              willComplete: ready && allowed,
-              modernHits: hits.modernHits,
-              classicHits: hits.classicHits,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {})
-      }
-      // #endregion
-      if (ready && allowed) {
-        setWorkflowStatus("Signed in. Opening the selected store…")
-        const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
-        if (!completed.ok) throw new Error(completed.error)
-        return
-      }
+    if (isReadyForStoreNavigation() && shouldCompleteAuthenticatedSession(job.stage)) {
+      setWorkflowStatus("Signed in. Opening the selected store…")
+      const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
+      if (!completed.ok) throw new Error(completed.error ?? "Couldn’t open the selected store.")
+      return
     }
 
-    if (Date.now() - documentStartedAt > 90_000) throw new Error("Amazon’s login page did not match a supported step.")
+    if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) throw new Error("Amazon’s login page did not match a supported step.")
+    if (reportedWaitingPath !== location.pathname) {
+      // An unrecognized page is the first sign that Amazon changed its login flow.
+      reportedWaitingPath = location.pathname
+      automationLog.withRun(job.id).info("automation.waiting", { stage: job.stage, path: location.pathname, title: document.title })
+    }
     setWorkflowStatus("Waiting for Amazon’s next login step…")
-    window.setTimeout(() => void run(), 1000)
+    scheduleRun(1000)
   } catch (error) {
-    setWorkflowStatus(error instanceof Error ? error.message : "Account switching failed.", "error")
-    await send({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: job.id })
+    await failWorkflow(job.id, error)
   }
 }
 
+if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground())
 void run()

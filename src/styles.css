@@ -47,16 +47,21 @@
   --radius-4xl: calc(var(--radius) * 2.6);
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-quad: cubic-bezier(0.4, 0, 1, 1);
-  --animate-dialog-in: s4e-dialog-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
-  --animate-dialog-out: s4e-dialog-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
-  --animate-overlay-in: s4e-overlay-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
-  --animate-overlay-out: s4e-overlay-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
-  --animate-surface-in: s4e-surface-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-dialog-in: s4e-dialog-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-dialog-out: s4e-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  --animate-overlay-in: s4e-overlay-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-overlay-out: s4e-overlay-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  --animate-surface-in: s4e-surface-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-download-in: s4e-surface-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
 
+  /*
+   * Animate transform, not translate: Tailwind's -translate-x-1/2 and -translate-y-1/2 set the
+   * separate translate property, so transform composes with whichever centering a dialog uses.
+   */
   @keyframes s4e-dialog-in {
     from {
       opacity: 0;
-      transform: translateY(-4px) scale(0.97);
+      transform: translateY(10px) scale(0.96);
     }
   }
 
@@ -82,7 +87,7 @@
   @keyframes s4e-surface-in {
     from {
       opacity: 0;
-      transform: translateY(2px);
+      transform: translateY(6px);
     }
   }
 }
@@ -199,15 +204,20 @@
   }
 }
 
-[data-slot="progress"][data-indeterminate] [data-slot="progress-indicator"] {
+[data-slot="progress-indeterminate"] {
   animation: s4e-progress-indeterminate 1.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   [data-slot="dialog-overlay"],
   [data-slot="dialog-content"],
-  [data-slot="command"].animate-surface-in {
+  [data-slot="command"].animate-surface-in,
+  [data-slot="progress-indeterminate"] {
     animation: none !important;
+  }
+
+  [data-slot="progress-indicator"] {
+    transition: none !important;
   }
 }
 

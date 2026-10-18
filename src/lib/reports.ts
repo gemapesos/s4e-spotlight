@@ -1,4 +1,5 @@
 import { dailyTasksSheetRows } from "./dailyTasks"
+import { formatDayMonthYear } from "./dates"
 import type { SellerFeedback } from "./feedback"
 import { shippingQueueSheetRows, type ShippingQueueShipment } from "./shippingQueue"
 import { strandedSheetRows, type StrandedListing } from "./stranded"
@@ -14,27 +15,10 @@ export const REPORT_SHEETS = [
   "Shipping Queue",
 ] as const
 
-const MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-] as const
-
 const UNSAFE_FILENAME_CHARS = /[/\\:*?"<>|]/g
 
 export function formatReportDate(date: Date): string {
-  const day = String(date.getDate()).padStart(2, "0")
-  const month = MONTHS[date.getMonth()]
-  return `${day}-${month}-${date.getFullYear()}`
+  return formatDayMonthYear(date)
 }
 
 export function sanitizeStoreName(storeName: string): string {
@@ -46,21 +30,35 @@ export function reportFileName(storeName: string, date: Date = new Date()): stri
   return `${sanitizeStoreName(storeName)} - ${formatReportDate(date)}.xlsx`
 }
 
-export function reportWorkbookSheets(
-  unfulfillableListings: readonly UnfulfillableListing[] = [],
-  feedbacks: readonly SellerFeedback[] = [],
-  strandedListings: readonly StrandedListing[] = [],
-  suppressedListings: readonly SuppressedListing[] = [],
-  shipments: readonly ShippingQueueShipment[] = [],
-): WorkbookSheet[] {
-  return REPORT_SHEETS.map((name) => {
-    if (name === "Daily Tasks") return { name, rows: dailyTasksSheetRows(feedbacks) }
-    if (name === "Unfulfillable") return { name, rows: unfulfillableSheetRows(unfulfillableListings) }
-    if (name === "Stranded") return { name, rows: strandedSheetRows(strandedListings) }
-    if (name === "Suppressed") return { name, rows: suppressedSheetRows(suppressedListings) }
-    if (name === "Shipping Queue") return { name, rows: shippingQueueSheetRows(shipments) }
-    return { name }
-  })
+export function sheetsReportFileName(storeName: string, date: Date = new Date()): string {
+  return `${sanitizeStoreName(storeName)} - ${formatReportDate(date)} - Sheets.xlsx`
+}
+
+export interface GeneratedReport {
+  storeName: string
+  generatedAt: Date
+  unfulfillableListings: readonly UnfulfillableListing[]
+  nextRemovalOrderId?: string | null
+  feedbacks: readonly SellerFeedback[]
+  strandedListings: readonly StrandedListing[]
+  suppressedListings: readonly SuppressedListing[]
+  shipments: readonly ShippingQueueShipment[]
+}
+
+export type ReportDownloadFormat = "raw" | "sheets"
+
+export function reportWorkbookSheets(report: Partial<Pick<
+  GeneratedReport,
+  "unfulfillableListings" | "feedbacks" | "strandedListings" | "suppressedListings" | "shipments"
+>> = {}): WorkbookSheet[] {
+  const rowsBySheet: Record<(typeof REPORT_SHEETS)[number], () => WorkbookSheet["rows"]> = {
+    "Daily Tasks": () => dailyTasksSheetRows(report.feedbacks ?? []),
+    Unfulfillable: () => unfulfillableSheetRows(report.unfulfillableListings ?? []),
+    Stranded: () => strandedSheetRows(report.strandedListings ?? []),
+    Suppressed: () => suppressedSheetRows(report.suppressedListings ?? []),
+    "Shipping Queue": () => shippingQueueSheetRows(report.shipments ?? []),
+  }
+  return REPORT_SHEETS.map((name) => ({ name, rows: rowsBySheet[name]() }))
 }
 
 export function buildReportWorkbook(sheets: readonly WorkbookSheet[] = REPORT_SHEETS.map((name) => ({ name }))): Uint8Array {
@@ -81,6 +79,11 @@ export function downloadBytes(
   const anchor = targetDocument.createElement("a")
   anchor.href = url
   anchor.download = filename
+  anchor.tabIndex = -1
+  anchor.setAttribute("aria-hidden", "true")
+  anchor.style.position = "fixed"
+  anchor.style.left = "-9999px"
+  anchor.style.top = "0"
   targetDocument.body.append(anchor)
   anchor.click()
   anchor.remove()

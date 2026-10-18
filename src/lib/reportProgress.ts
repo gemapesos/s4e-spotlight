@@ -11,6 +11,8 @@ export type ReportProgressEvent = {
   loaded?: number
   total?: number
   phase?: ReportProgressPhase
+  /** Why the source failed, when status is "error". */
+  error?: string
 }
 
 export type ReportSourceState = {
@@ -18,6 +20,7 @@ export type ReportSourceState = {
   loaded?: number
   total?: number
   phase?: ReportProgressPhase
+  error?: string
 }
 
 export type ReportProgressState = {
@@ -27,13 +30,11 @@ export type ReportProgressState = {
 }
 
 export const REPORT_PROGRESS_ROWS = [
-  { id: "prepare", label: "Opening Seller Central" },
   { id: "unfulfillable", label: "Unfulfillable listings" },
   { id: "feedback", label: "Seller feedback" },
   { id: "stranded", label: "Stranded inventory" },
   { id: "suppressed", label: "Search suppressed listings" },
   { id: "shippingQueue", label: "Shipping queue" },
-  { id: "workbook", label: "Building spreadsheet" },
 ] as const
 
 export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
@@ -49,7 +50,7 @@ export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
 }
 
 export function isReportSource(value: unknown): value is ReportSource {
-  return value === "unfulfillable" || value === "feedback" || value === "stranded" || value === "suppressed" || value === "shippingQueue"
+  return (REPORT_SOURCES as readonly unknown[]).includes(value)
 }
 
 export function isReportProgressEvent(value: unknown): value is ReportProgressEvent {
@@ -88,6 +89,7 @@ export function applyReportProgressEvent(
         loaded: event.loaded,
         total: event.total,
         phase: event.phase,
+        error: event.error,
       },
     },
   }
@@ -116,56 +118,49 @@ export function reportSourcePercent(event: Pick<ReportProgressEvent, "source" | 
   return null
 }
 
-export function unfulfillableProgressPercent(
-  event: Pick<ReportProgressEvent, "loaded" | "total" | "phase" | "status">,
-): number | null {
-  if (event.status === "complete") return 100
-  if (event.phase === "removal") {
-    const total = event.total ?? 0
-    if (total <= 0) return 100
-    return 80 + Math.round(20 * Math.min(1, (event.loaded ?? 0) / total))
-  }
-  const total = event.total ?? 0
-  if (total <= 0) return event.loaded ? 80 : 0
-  return Math.round(80 * Math.min(1, (event.loaded ?? 0) / total))
+type PercentInput = Pick<ReportProgressEvent, "loaded" | "total" | "phase" | "status">
+
+function fraction(loaded: number | undefined, total: number): number {
+  return Math.min(1, (loaded ?? 0) / total)
 }
 
-export function suppressedProgressPercent(
-  event: Pick<ReportProgressEvent, "loaded" | "total" | "phase" | "status">,
-): number | null {
+/** Listings fill the first 80%; the per-item follow-up phase fills the rest. */
+function twoPhasePercent(event: PercentInput, followUpPhase: ReportProgressPhase): number {
   if (event.status === "complete") return 100
-  if (event.phase === "issues") {
-    const total = event.total ?? 0
-    if (total <= 0) return 100
-    return 80 + Math.round(20 * Math.min(1, (event.loaded ?? 0) / total))
-  }
   const total = event.total ?? 0
+  if (event.phase === followUpPhase) return total <= 0 ? 100 : 80 + Math.round(20 * fraction(event.loaded, total))
   if (total <= 0) return event.loaded ? 80 : 0
-  return Math.round(80 * Math.min(1, (event.loaded ?? 0) / total))
+  return Math.round(80 * fraction(event.loaded, total))
 }
 
-export function feedbackProgressPercent(
-  event: Pick<ReportProgressEvent, "loaded" | "total" | "status">,
-): number | null {
+/** Loaded over total, or null (indeterminate) until a total is known. */
+function countedPercent(event: Omit<PercentInput, "phase">): number | null {
   if (event.status === "complete") return 100
   const total = event.total
   if (total == null || total <= 0) return null
-  return Math.round(100 * Math.min(1, (event.loaded ?? 0) / total))
+  return Math.round(100 * fraction(event.loaded, total))
 }
 
-export function shippingQueueProgressPercent(
-  event: Pick<ReportProgressEvent, "loaded" | "total" | "status">,
-): number | null {
-  if (event.status === "complete") return 100
-  const total = event.total
-  if (total == null || total <= 0) return null
-  return Math.round(100 * Math.min(1, (event.loaded ?? 0) / total))
+export function unfulfillableProgressPercent(event: PercentInput): number | null {
+  return twoPhasePercent(event, "removal")
+}
+
+export function suppressedProgressPercent(event: PercentInput): number | null {
+  return twoPhasePercent(event, "issues")
+}
+
+export function feedbackProgressPercent(event: Omit<PercentInput, "phase">): number | null {
+  return countedPercent(event)
+}
+
+export function shippingQueueProgressPercent(event: Omit<PercentInput, "phase">): number | null {
+  return countedPercent(event)
 }
 
 export function reportSourceDetail(source: ReportSource, state: ReportSourceState): string {
   if (state.status === "pending") return "Waiting"
   if (state.status === "complete") return "Done"
-  if (state.status === "error") return "Failed"
+  if (state.status === "error") return state.error ? `Failed: ${state.error}` : "Failed"
   if (source === "unfulfillable") {
     if (state.phase === "removal") {
       if (state.total) return `Removal status ${state.loaded ?? 0} of ${state.total}`
