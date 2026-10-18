@@ -534,7 +534,7 @@ export function parseShipmentDetails(payload: unknown): ShipmentDetails {
   return details
 }
 
-function shipmentDetailsIncomplete(details: ShipmentDetails | undefined): boolean {
+export function shipmentDetailsIncomplete(details: ShipmentDetails | undefined): boolean {
   const total = details?.discrepancyTotalRecords
   return typeof total === "number" && total > (details?.items.length ?? 0)
 }
@@ -907,28 +907,42 @@ async function fetchShipmentDocumentTypes(
   }
 }
 
-async function fetchAllShipmentDetails(
+interface ShipmentDetailsLoader {
+  /** Queues shipments from a list page; their details start loading right away. */
+  add: (shipments: readonly ShippingQueueShipment[]) => void
+  /** Call after the last list page. Resolves with every shipment, in list order. */
+  finish: () => Promise<ShippingQueueShipment[]>
+}
+
+/**
+ * Loads eligibility details SHIPMENT_DETAILS_CONCURRENCY at a time while list pages are still
+ * arriving. A session response stops new requests, waits, checks that the list still loads, and
+ * resumes; after SHIPMENT_DETAILS_SESSION_PAUSES pauses the remaining shipments are marked failed.
+ */
+function createShipmentDetailsLoader(
   fetchImpl: typeof globalThis.fetch,
-  shipments: readonly ShippingQueueShipment[],
   sleep: (ms: number) => Promise<void>,
   onProgress?: (event: ReportProgressEvent) => void,
   log?: Logger,
-): Promise<ShippingQueueShipment[]> {
-  if (shipments.length === 0) return []
-  onProgress?.({ source: "shippingQueue", status: "active", loaded: 0, total: shipments.length, phase: "details" })
-  const results = new Array<ShippingQueueShipment>(shipments.length)
+): ShipmentDetailsLoader {
+  const shipments: ShippingQueueShipment[] = []
+  const results: ShippingQueueShipment[] = []
   let next = 0
   let inFlight = 0
   let processed = 0
+  let listDone = false
   let pausePromise: Promise<boolean> | null = null
   let pauseCount = 0
   let holdLaunch = false
   let halt = false
-  let abandoned = false
   let documentsSkipped = 0
   const failedSample: string[] = []
+  let settle: () => void = () => undefined
+  const settled = new Promise<void>((resolve) => { settle = resolve })
 
+  /** Details progress starts once the list is complete, so its total never shrinks the bar. */
   function reportProgress() {
+    if (!listDone) return
     onProgress?.({
       source: "shippingQueue",
       status: "active",
@@ -938,16 +952,14 @@ async function fetchAllShipmentDetails(
     })
   }
 
-  function abandonRest() {
-    if (abandoned) return
-    abandoned = true
-    halt = true
+  function abandonQueued() {
+    if (next >= shipments.length) return
     while (next < shipments.length) {
       results[next] = { ...shipments[next], detailsFetchFailed: true }
       next += 1
       processed += 1
-      reportProgress()
     }
+    reportProgress()
   }
 
   function startPause(): Promise<boolean> {
@@ -1016,42 +1028,48 @@ async function fetchAllShipmentDetails(
     }
   }
 
-  await new Promise<void>((resolve) => {
-    const pump = () => {
-      if (halt && inFlight === 0) {
-        abandonRest()
-        resolve()
-        return
-      }
-      if (next >= shipments.length && inFlight === 0) {
-        resolve()
-        return
-      }
-      if (holdLaunch || pausePromise || halt) return
-      while (inFlight < SHIPMENT_DETAILS_CONCURRENCY && next < shipments.length) {
-        const index = next
-        next += 1
-        inFlight += 1
-        void loadOne(shipments[index]).then((shipment) => {
-          results[index] = shipment
-          inFlight -= 1
-          processed += 1
-          reportProgress()
-          pump()
-        })
-      }
+  function pump() {
+    if (halt && inFlight === 0) abandonQueued()
+    if (listDone && next >= shipments.length && inFlight === 0) {
+      settle()
+      return
     }
-    pump()
-  })
+    if (holdLaunch || pausePromise || halt) return
+    while (inFlight < SHIPMENT_DETAILS_CONCURRENCY && next < shipments.length) {
+      const index = next
+      next += 1
+      inFlight += 1
+      void loadOne(shipments[index]).then((shipment) => {
+        results[index] = shipment
+        inFlight -= 1
+        processed += 1
+        reportProgress()
+        pump()
+      })
+    }
+  }
 
-  log?.info("shippingQueue.details", {
-    shipments: shipments.length,
-    failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
-    documentsSkipped,
-    pauses: pauseCount,
-    ...(failedSample.length ? { failedSample } : {}),
-  })
-  return results
+  return {
+    add: (batch) => {
+      shipments.push(...batch)
+      pump()
+    },
+    finish: async () => {
+      listDone = true
+      if (shipments.length === 0) return []
+      reportProgress()
+      pump()
+      await settled
+      log?.info("shippingQueue.details", {
+        shipments: shipments.length,
+        failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
+        documentsSkipped,
+        pauses: pauseCount,
+        ...(failedSample.length ? { failedSample } : {}),
+      })
+      return results
+    },
+  }
 }
 
 export async function fetchShippingQueueShipments(
@@ -1069,29 +1087,30 @@ export async function fetchShippingQueueShipments(
 
   onProgress?.({ source: "shippingQueue", status: "active", loaded: 0, phase: "listings" })
 
-  const shipments: ShippingQueueShipment[] = []
+  const details = createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log)
   const seenIds = new Set<string>()
+  let listed = 0
   let cursor: ShipmentCursor | undefined
   let listingsIncomplete = false
 
   for (let page = 1; page <= SHIPPING_QUEUE_MAX_PAGES; page += 1) {
+    const pageDone = log?.time("shippingQueue.listPage", { page })
     let pageShipments: ShippingQueueShipment[]
     try {
       pageShipments = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor))
     } catch (error) {
       if (page > 1) {
-        log?.warn("shippingQueue.listStopped", { page, loaded: shipments.length, error: describeError(error) })
+        log?.warn("shippingQueue.listStopped", { page, loaded: listed, error: describeError(error) })
         listingsIncomplete = true
         break
       }
       throw error
     }
-    if (pageShipments.length === 0) break
 
     // Amazon orders by an index that can lag the real update time, so an older-looking
     // row may still be recent. Only stop once a whole page falls before the cutoff.
     let inWindow = 0
-    let added = 0
+    const added: ShippingQueueShipment[] = []
     for (const shipment of pageShipments) {
       const updatedMs = getShipmentLastUpdatedMs(shipment)
       if (updatedMs != null && updatedMs < cutoffTimestamp) continue
@@ -1099,18 +1118,21 @@ export async function fetchShippingQueueShipments(
       const id = shipment.shipmentId?.trim()
       if (id && seenIds.has(id)) continue
       if (id) seenIds.add(id)
-      shipments.push(shipment)
-      added += 1
+      added.push(shipment)
     }
+    pageDone?.({ rows: pageShipments.length, inWindow, added: added.length })
+    if (pageShipments.length === 0) break
 
-    onProgress?.({ source: "shippingQueue", status: "active", loaded: shipments.length, phase: "listings" })
+    details.add(added)
+    listed += added.length
+    onProgress?.({ source: "shippingQueue", status: "active", loaded: listed, phase: "listings" })
 
     cursor = shippingQueueCursor(pageShipments[pageShipments.length - 1])
-    if (inWindow === 0 || added === 0 || pageShipments.length < pageSize || !cursor) break
+    if (inWindow === 0 || added.length === 0 || pageShipments.length < pageSize || !cursor) break
   }
 
-  const tagged = listingsIncomplete ? shipments.map((shipment) => ({ ...shipment, listingsIncomplete: true })) : shipments
-  const withDetails = await fetchAllShipmentDetails(fetchImpl, tagged, sleep, onProgress, log)
+  const loaded = await details.finish()
+  const withDetails = listingsIncomplete ? loaded.map((shipment) => ({ ...shipment, listingsIncomplete: true })) : loaded
 
   onProgress?.({
     source: "shippingQueue",

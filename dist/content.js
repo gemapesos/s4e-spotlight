@@ -493,7 +493,7 @@ const LISTING_FIELDS = `listings {
       }
       __typename
     }`;
-const GET_LISTINGS_V2_PREFIX = `query GetListingsV2($pagination: PaginationInput, $usecase: UsecaseInput!, $sortRequest: SortRequest!, $searchTerm: SearchTerm, $multiSelectFilters: [MultiSelectFilter!], $multiSKUList: [String!]) {
+const GET_LISTINGS_V2_QUERY = `query GetListingsV2($pagination: PaginationInput, $usecase: UsecaseInput!, $sortRequest: SortRequest!, $searchTerm: SearchTerm, $multiSelectFilters: [MultiSelectFilter!], $multiSKUList: [String!]) {
   listingsV2(
     usecase: $usecase
     pagination: $pagination
@@ -503,14 +503,7 @@ const GET_LISTINGS_V2_PREFIX = `query GetListingsV2($pagination: PaginationInput
     multiSKUList: $multiSKUList
   ) {
     ${LISTING_FIELDS}
-    count`;
-const GET_LISTINGS_V2_QUERY = `${GET_LISTINGS_V2_PREFIX}
-    cursor
-    debugInfo
-    __typename
-  }
-}`;
-const GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR = `${GET_LISTINGS_V2_PREFIX}
+    count
     debugInfo
     __typename
   }
@@ -684,9 +677,6 @@ function graphqlMessages(payload) {
 		return String(error.message ?? "");
 	}).filter(Boolean);
 }
-function isMissingCursorField(messages) {
-	return messages.some((message) => /cursor/i.test(message) && /undefined|unknown field|cannot query field/i.test(message));
-}
 function isInvalidPaginationInput(messages) {
 	return messages.some((message) => /paginationinput/i.test(message) && /not defined|undefined|unknown field/i.test(message));
 }
@@ -793,17 +783,18 @@ function parseListingsPage(payload) {
 		throw new Error("Couldn’t load unfulfillable inventory.");
 	}
 	const record = listingsV2;
-	const listings = Array.isArray(record.listings) ? record.listings.map(asListing).filter((listing) => listing !== undefined) : [];
+	const rows = Array.isArray(record.listings) ? record.listings : [];
+	const listings = rows.map(asListing).filter((listing) => listing !== undefined);
 	const count = typeof record.count === "number" && Number.isFinite(record.count) ? record.count : listings.length;
-	const cursor = typeof record.cursor === "string" && record.cursor.trim() ? record.cursor : undefined;
 	return {
 		listings,
 		count,
-		cursor
+		rows: rows.length
 	};
 }
-function listingsVariables(cursor, includePagination = true) {
-	const variables = {
+/** Offset pagination, as Manage Inventory uses; omit `from` to request Amazon's default first page. */
+function listingsVariables(from) {
+	return {
 		usecase: "INVENTORY_UNFULFILLABLE",
 		sortRequest: {
 			key: "QUANTITY_UNFULFILLABLE",
@@ -812,16 +803,18 @@ function listingsVariables(cursor, includePagination = true) {
 		multiSelectFilters: [{
 			key: "LISTING_STATUS",
 			values: ["InventoryUnfulfillable"]
-		}]
+		}],
+		...from === undefined ? {} : { pagination: {
+			from,
+			size: UNFULFILLABLE_PAGE_SIZE
+		} }
 	};
-	if (!includePagination) return variables;
-	variables.pagination = cursor ? {
-		pageSize: UNFULFILLABLE_PAGE_SIZE,
-		cursor
-	} : { pageSize: UNFULFILLABLE_PAGE_SIZE };
-	return variables;
 }
-async function postListingsPage(fetchImpl, token, query, cursor, includePagination = true) {
+function listingKey(listing) {
+	const pair = listingSkuPair(listing);
+	return pair ? skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku) : JSON.stringify(listing.coreListingFields ?? listing);
+}
+async function postListingsPage(fetchImpl, token, from) {
 	const response = await fetchImpl(UNFULFILLABLE_GQL_URL, {
 		method: "POST",
 		credentials: "include",
@@ -832,8 +825,8 @@ async function postListingsPage(fetchImpl, token, query, cursor, includePaginati
 		},
 		body: JSON.stringify({
 			operationName: "GetListingsV2",
-			variables: listingsVariables(cursor, includePagination),
-			query
+			variables: listingsVariables(from),
+			query: GET_LISTINGS_V2_QUERY
 		})
 	});
 	if (!response.ok) throw new Error(`Couldn’t load unfulfillable inventory (${response.status}).`);
@@ -843,8 +836,6 @@ async function postListingsPage(fetchImpl, token, query, cursor, includePaginati
 	} catch {
 		throw new Error("Couldn’t load unfulfillable inventory.");
 	}
-	const messages = graphqlMessages(payload);
-	if (messages.length && isMissingCursorField(messages)) throw new Error(messages.join(" "));
 	return parseListingsPage(payload);
 }
 async function postInventoriesBatch(fetchImpl, token, pairs) {
@@ -976,38 +967,26 @@ async function fetchUnfulfillableListings(options = {}) {
 		loaded: 0,
 		phase: "listings"
 	});
-	let query = GET_LISTINGS_V2_QUERY;
-	let cursor;
-	let includePagination = true;
 	const listings = [];
-	const seenCursors = new Set();
+	const seen = new Set();
+	let paginate = true;
+	let offset = 0;
 	let reportedCount = 0;
 	let listingsIncomplete = false;
 	for (let page = 0; page < UNFULFILLABLE_MAX_PAGES; page += 1) {
+		const pageDone = log?.time("unfulfillable.page", {
+			page,
+			from: offset
+		});
 		let result;
 		try {
-			result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
+			result = await postListingsPage(fetchImpl, token, paginate ? offset : undefined);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const willRetryWithoutCursor = page === 0 && query === GET_LISTINGS_V2_QUERY && isMissingCursorField([message]);
-			const willRetryWithoutPagination = page === 0 && includePagination && isInvalidPaginationInput([message]);
-			if (willRetryWithoutCursor) {
-				log?.warn("unfulfillable.schemaRetry", { without: "cursor" });
-				query = GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR;
-				cursor = undefined;
-				try {
-					result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
-				} catch (retryError) {
-					const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
-					if (!isInvalidPaginationInput([retryMessage])) throw retryError;
-					log?.warn("unfulfillable.schemaRetry", { without: "pagination" });
-					includePagination = false;
-					result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
-				}
-			} else if (willRetryWithoutPagination) {
+			if (page === 0 && paginate && isInvalidPaginationInput([errorMessage(error)])) {
+				// Without paging Amazon returns only its default first page; the count check below flags the rest.
 				log?.warn("unfulfillable.schemaRetry", { without: "pagination" });
-				includePagination = false;
-				result = await postListingsPage(fetchImpl, token, query, cursor, includePagination);
+				paginate = false;
+				result = await postListingsPage(fetchImpl, token);
 			} else if (listings.length > 0) {
 				log?.warn("unfulfillable.listingsStopped", {
 					page,
@@ -1020,8 +999,20 @@ async function fetchUnfulfillableListings(options = {}) {
 				throw error;
 			}
 		}
-		listings.push(...result.listings);
+		const added = result.listings.filter((listing) => {
+			const key = listingKey(listing);
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+		listings.push(...added);
+		offset += result.rows;
 		reportedCount = result.count;
+		pageDone?.({
+			rows: result.rows,
+			added: added.length,
+			reported: result.count
+		});
 		onProgress?.({
 			source: "unfulfillable",
 			status: "active",
@@ -1029,14 +1020,16 @@ async function fetchUnfulfillableListings(options = {}) {
 			total: result.count,
 			phase: "listings"
 		});
-		if (listings.length >= result.count) break;
-		const emptyPage = result.listings.length === 0;
-		const canSkipEmptyPage = emptyPage && result.count > listings.length && Boolean(result.cursor) && query !== GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR;
-		if (emptyPage && !canSkipEmptyPage) break;
-		if (!emptyPage && (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor)) break;
-		if (!result.cursor || seenCursors.has(result.cursor)) break;
-		seenCursors.add(result.cursor);
-		cursor = result.cursor;
+		if (!paginate || result.rows === 0 || offset >= result.count) break;
+		if (added.length === 0) {
+			// Amazon ignored the offset and sent listings already loaded.
+			log?.warn("unfulfillable.pagingIgnored", {
+				page,
+				loaded: listings.length,
+				reported: result.count
+			});
+			break;
+		}
 	}
 	if (reportedCount > listings.length) {
 		log?.warn("unfulfillable.listingsIncomplete", {
@@ -1062,10 +1055,12 @@ async function fetchUnfulfillableListings(options = {}) {
 
 const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks";
 const FEEDBACK_PAGE_SIZE = 20;
-const FEEDBACK_MAX_PAGES = 40;
+/** Lifetime 1–3 star entries, newest first; stores with more than this many pages are flagged. */
+const FEEDBACK_MAX_PAGES = 200;
 const FEEDBACK_PAGE_CONCURRENCY = 5;
 const FEEDBACK_FROM_RATING = 1;
 const FEEDBACK_TO_RATING = 3;
+const FEEDBACK_INCOMPLETE_NOTE = `Only the newest ${FEEDBACK_MAX_PAGES * FEEDBACK_PAGE_SIZE} feedback entries were loaded. Seller Central has more.`;
 const FEEDBACK_SHEET_HEADERS = [
 	"Date",
 	"Rating",
@@ -1245,7 +1240,6 @@ async function fetchNeutralNegativeFeedbacks(options = {}) {
 	for (let start = 0; start < FEEDBACK_MAX_PAGES; start += FEEDBACK_PAGE_CONCURRENCY) {
 		const batchSize = Math.min(FEEDBACK_PAGE_CONCURRENCY, FEEDBACK_MAX_PAGES - start);
 		const results = await Promise.allSettled(Array.from({ length: batchSize }, (_, offset) => getFeedbacksPage(fetchImpl, start + offset)));
-		let foundLast = false;
 		for (let offset = 0; offset < results.length; offset += 1) {
 			const result = results[offset];
 			if (result.status === "rejected") throw result.reason;
@@ -1259,14 +1253,17 @@ async function fetchNeutralNegativeFeedbacks(options = {}) {
 				loaded,
 				total: lastPage ? loaded : undefined
 			});
-			if (lastPage) {
-				foundLast = true;
-				break;
-			}
+			if (lastPage) return feedbacks;
 		}
-		if (foundLast) break;
 	}
-	return feedbacks;
+	options.log?.warn("feedback.pageLimit", {
+		pages: FEEDBACK_MAX_PAGES,
+		entries: feedbacks.length
+	});
+	return feedbacks.map((feedback) => ({
+		...feedback,
+		feedbackIncomplete: true
+	}));
 }
 
 const STRANDED_INVENTORY_URL = "https://sellercentral.amazon.com/inventoryplanning/stranded-inventory";
@@ -1473,6 +1470,11 @@ async function fetchStrandedListings(options = {}) {
 
 const SUPPRESSED_GQL_URL = UNFULFILLABLE_GQL_URL;
 const SUPPRESSED_PAGE_SIZE = 250;
+/**
+* Listings arrive sorted by available quantity and the scan stops at the first one out of stock,
+* so a small first page usually holds every in-stock listing without Amazon pricing 250 rows.
+*/
+const SUPPRESSED_FIRST_PAGE_SIZE = 50;
 const SUPPRESSED_MAX_PAGES = 40;
 const SUPPRESSED_LISTINGS_INCOMPLETE_NOTE = "Some search-suppressed listings could not be loaded. This sheet includes only the listings that were obtainable.";
 const SUPPRESSED_ISSUES_INCOMPLETE_NOTE = "Suppression reasons could not be loaded for some SKUs. Those rows are marked “Couldn’t load suppression reason”.";
@@ -2130,11 +2132,13 @@ function parseSuppressedListingsPage(payload) {
 		throw new Error("Couldn’t load search-suppressed inventory.");
 	}
 	const record = listingsV2;
-	const listings = Array.isArray(record.listings) ? record.listings.map(asSuppressedListing).filter((listing) => listing !== undefined) : [];
+	const rows = Array.isArray(record.listings) ? record.listings : [];
+	const listings = rows.map(asSuppressedListing).filter((listing) => listing !== undefined);
 	const count = typeof record.count === "number" && Number.isFinite(record.count) ? record.count : listings.length;
 	return {
 		listings,
-		count
+		count,
+		rows: rows.length
 	};
 }
 function suppressedSheetRow(listing) {
@@ -2335,11 +2339,11 @@ function suppressedSheetRows(listings) {
 		...rows.map(suppressedSheetRow)
 	];
 }
-function suppressedListingsVariables(from) {
+function suppressedListingsVariables(from, size) {
 	return {
 		pagination: {
 			from,
-			size: SUPPRESSED_PAGE_SIZE
+			size
 		},
 		sortRequest: {
 			key: "QUANTITY_AVAILABLE",
@@ -2361,7 +2365,7 @@ function suppressedListingsVariables(from) {
 		]
 	};
 }
-async function postSuppressedListingsPage(fetchImpl, token, from) {
+async function postSuppressedListingsPage(fetchImpl, token, from, size) {
 	const response = await fetchImpl(SUPPRESSED_GQL_URL, {
 		method: "POST",
 		credentials: "include",
@@ -2372,7 +2376,7 @@ async function postSuppressedListingsPage(fetchImpl, token, from) {
 		},
 		body: JSON.stringify({
 			operationName: "getListingsV2",
-			variables: suppressedListingsVariables(from),
+			variables: suppressedListingsVariables(from, size),
 			query: GET_SUPPRESSED_LISTINGS_QUERY
 		})
 	});
@@ -2484,14 +2488,20 @@ async function fetchSuppressedListings(options = {}) {
 		phase: "listings"
 	});
 	const listings = [];
+	let offset = 0;
 	let reportedCount = 0;
 	let listingsIncomplete = false;
 	let stoppedAtZeroAvailable = false;
 	for (let page = 0; page < SUPPRESSED_MAX_PAGES; page += 1) {
-		const from = page * SUPPRESSED_PAGE_SIZE;
+		const size = page === 0 ? SUPPRESSED_FIRST_PAGE_SIZE : SUPPRESSED_PAGE_SIZE;
+		const pageDone = log?.time("suppressed.page", {
+			page,
+			from: offset,
+			size
+		});
 		let result;
 		try {
-			result = await postSuppressedListingsPage(fetchImpl, token, from);
+			result = await postSuppressedListingsPage(fetchImpl, token, offset, size);
 		} catch (error) {
 			if (listings.length > 0) {
 				log?.warn("suppressed.listingsStopped", {
@@ -2506,13 +2516,16 @@ async function fetchSuppressedListings(options = {}) {
 		}
 		// Available quantity is descending, so the first out-of-stock row ends the scan.
 		const cutoff = result.listings.findIndex((listing) => !hasNonZeroQuantity(listing));
-		if (cutoff === -1) {
-			listings.push(...result.listings);
-		} else {
-			listings.push(...result.listings.slice(0, cutoff));
-			stoppedAtZeroAvailable = true;
-		}
+		const inStock = cutoff === -1 ? result.listings : result.listings.slice(0, cutoff);
+		listings.push(...inStock);
+		stoppedAtZeroAvailable = cutoff !== -1;
+		offset += result.rows;
 		reportedCount = result.count;
+		pageDone?.({
+			rows: result.rows,
+			inStock: inStock.length,
+			reported: result.count
+		});
 		onProgress?.({
 			source: "suppressed",
 			status: "active",
@@ -2520,13 +2533,11 @@ async function fetchSuppressedListings(options = {}) {
 			total: result.count,
 			phase: "listings"
 		});
-		if (stoppedAtZeroAvailable) break;
-		if (listings.length >= result.count) break;
-		if (result.listings.length === 0) break;
+		if (stoppedAtZeroAvailable || result.rows === 0 || offset >= result.count) break;
 	}
-	if (!stoppedAtZeroAvailable && reportedCount > listings.length) {
+	if (!stoppedAtZeroAvailable && reportedCount > offset) {
 		log?.warn("suppressed.listingsIncomplete", {
-			loaded: listings.length,
+			scanned: offset,
 			reported: reportedCount
 		});
 		listingsIncomplete = true;
@@ -3232,27 +3243,31 @@ async function fetchShipmentDocumentTypes(fetchImpl, shipmentId) {
 		return { documentsFetchFailed: true };
 	}
 }
-async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress, log) {
-	if (shipments.length === 0) return [];
-	onProgress?.({
-		source: "shippingQueue",
-		status: "active",
-		loaded: 0,
-		total: shipments.length,
-		phase: "details"
-	});
-	const results = new Array(shipments.length);
+/**
+* Loads eligibility details SHIPMENT_DETAILS_CONCURRENCY at a time while list pages are still
+* arriving. A session response stops new requests, waits, checks that the list still loads, and
+* resumes; after SHIPMENT_DETAILS_SESSION_PAUSES pauses the remaining shipments are marked failed.
+*/
+function createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log) {
+	const shipments = [];
+	const results = [];
 	let next = 0;
 	let inFlight = 0;
 	let processed = 0;
+	let listDone = false;
 	let pausePromise = null;
 	let pauseCount = 0;
 	let holdLaunch = false;
 	let halt = false;
-	let abandoned = false;
 	let documentsSkipped = 0;
 	const failedSample = [];
+	let settle = () => undefined;
+	const settled = new Promise((resolve) => {
+		settle = resolve;
+	});
+	/** Details progress starts once the list is complete, so its total never shrinks the bar. */
 	function reportProgress() {
+		if (!listDone) return;
 		onProgress?.({
 			source: "shippingQueue",
 			status: "active",
@@ -3261,10 +3276,8 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress, 
 			phase: "details"
 		});
 	}
-	function abandonRest() {
-		if (abandoned) return;
-		abandoned = true;
-		halt = true;
+	function abandonQueued() {
+		if (next >= shipments.length) return;
 		while (next < shipments.length) {
 			results[next] = {
 				...shipments[next],
@@ -3272,8 +3285,8 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress, 
 			};
 			next += 1;
 			processed += 1;
-			reportProgress();
 		}
+		reportProgress();
 	}
 	function startPause() {
 		if (halt) return Promise.resolve(false);
@@ -3364,41 +3377,47 @@ async function fetchAllShipmentDetails(fetchImpl, shipments, sleep, onProgress, 
 			}
 		}
 	}
-	await new Promise((resolve) => {
-		const pump = () => {
-			if (halt && inFlight === 0) {
-				abandonRest();
-				resolve();
-				return;
-			}
-			if (next >= shipments.length && inFlight === 0) {
-				resolve();
-				return;
-			}
-			if (holdLaunch || pausePromise || halt) return;
-			while (inFlight < SHIPMENT_DETAILS_CONCURRENCY && next < shipments.length) {
-				const index = next;
-				next += 1;
-				inFlight += 1;
-				void loadOne(shipments[index]).then((shipment) => {
-					results[index] = shipment;
-					inFlight -= 1;
-					processed += 1;
-					reportProgress();
-					pump();
-				});
-			}
-		};
-		pump();
-	});
-	log?.info("shippingQueue.details", {
-		shipments: shipments.length,
-		failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
-		documentsSkipped,
-		pauses: pauseCount,
-		...failedSample.length ? { failedSample } : {}
-	});
-	return results;
+	function pump() {
+		if (halt && inFlight === 0) abandonQueued();
+		if (listDone && next >= shipments.length && inFlight === 0) {
+			settle();
+			return;
+		}
+		if (holdLaunch || pausePromise || halt) return;
+		while (inFlight < SHIPMENT_DETAILS_CONCURRENCY && next < shipments.length) {
+			const index = next;
+			next += 1;
+			inFlight += 1;
+			void loadOne(shipments[index]).then((shipment) => {
+				results[index] = shipment;
+				inFlight -= 1;
+				processed += 1;
+				reportProgress();
+				pump();
+			});
+		}
+	}
+	return {
+		add: (batch) => {
+			shipments.push(...batch);
+			pump();
+		},
+		finish: async () => {
+			listDone = true;
+			if (shipments.length === 0) return [];
+			reportProgress();
+			pump();
+			await settled;
+			log?.info("shippingQueue.details", {
+				shipments: shipments.length,
+				failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
+				documentsSkipped,
+				pauses: pauseCount,
+				...failedSample.length ? { failedSample } : {}
+			});
+			return results;
+		}
+	};
 }
 async function fetchShippingQueueShipments(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
@@ -3413,11 +3432,13 @@ async function fetchShippingQueueShipments(options = {}) {
 		loaded: 0,
 		phase: "listings"
 	});
-	const shipments = [];
+	const details = createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log);
 	const seenIds = new Set();
+	let listed = 0;
 	let cursor;
 	let listingsIncomplete = false;
 	for (let page = 1; page <= SHIPPING_QUEUE_MAX_PAGES; page += 1) {
+		const pageDone = log?.time("shippingQueue.listPage", { page });
 		let pageShipments;
 		try {
 			pageShipments = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor));
@@ -3425,7 +3446,7 @@ async function fetchShippingQueueShipments(options = {}) {
 			if (page > 1) {
 				log?.warn("shippingQueue.listStopped", {
 					page,
-					loaded: shipments.length,
+					loaded: listed,
 					error: describeError(error)
 				});
 				listingsIncomplete = true;
@@ -3433,11 +3454,10 @@ async function fetchShippingQueueShipments(options = {}) {
 			}
 			throw error;
 		}
-		if (pageShipments.length === 0) break;
 		// Amazon orders by an index that can lag the real update time, so an older-looking
 		// row may still be recent. Only stop once a whole page falls before the cutoff.
 		let inWindow = 0;
-		let added = 0;
+		const added = [];
 		for (const shipment of pageShipments) {
 			const updatedMs = getShipmentLastUpdatedMs(shipment);
 			if (updatedMs != null && updatedMs < cutoffTimestamp) continue;
@@ -3445,23 +3465,30 @@ async function fetchShippingQueueShipments(options = {}) {
 			const id = shipment.shipmentId?.trim();
 			if (id && seenIds.has(id)) continue;
 			if (id) seenIds.add(id);
-			shipments.push(shipment);
-			added += 1;
+			added.push(shipment);
 		}
+		pageDone?.({
+			rows: pageShipments.length,
+			inWindow,
+			added: added.length
+		});
+		if (pageShipments.length === 0) break;
+		details.add(added);
+		listed += added.length;
 		onProgress?.({
 			source: "shippingQueue",
 			status: "active",
-			loaded: shipments.length,
+			loaded: listed,
 			phase: "listings"
 		});
 		cursor = shippingQueueCursor(pageShipments[pageShipments.length - 1]);
-		if (inWindow === 0 || added === 0 || pageShipments.length < pageSize || !cursor) break;
+		if (inWindow === 0 || added.length === 0 || pageShipments.length < pageSize || !cursor) break;
 	}
-	const tagged = listingsIncomplete ? shipments.map((shipment) => ({
+	const loaded = await details.finish();
+	const withDetails = listingsIncomplete ? loaded.map((shipment) => ({
 		...shipment,
 		listingsIncomplete: true
-	})) : shipments;
-	const withDetails = await fetchAllShipmentDetails(fetchImpl, tagged, sleep, onProgress, log);
+	})) : loaded;
 	onProgress?.({
 		source: "shippingQueue",
 		status: "complete",

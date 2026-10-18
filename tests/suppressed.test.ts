@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { createLogger, setLogSink, type LogEntry } from "../src/lib/log"
 import { INVENTORY_MANAGE_URL } from "../src/lib/unfulfillable"
 import {
   GET_LISTING_ISSUES_QUERY,
@@ -7,6 +8,7 @@ import {
   SUPPRESSED_GQL_URL,
   SUPPRESSED_ISSUE_UNAVAILABLE,
   SUPPRESSED_ISSUES_INCOMPLETE_NOTE,
+  SUPPRESSED_FIRST_PAGE_SIZE,
   SUPPRESSED_LISTINGS_INCOMPLETE_NOTE,
   SUPPRESSED_PAGE_SIZE,
   SUPPRESSED_SHEET_HEADERS,
@@ -264,6 +266,7 @@ describe("getListingsV2 suppressed parsing", () => {
     expect(parseSuppressedListingsPage(listingsPayload([zeroQuantityListing, secondInStockListing], 2))).toEqual({
       listings: [zeroQuantityListing, secondInStockListing],
       count: 2,
+      rows: 2,
     })
   })
 
@@ -278,6 +281,7 @@ describe("getListingsV2 suppressed parsing", () => {
     })).toEqual({
       listings: [inStockListing],
       count: 2,
+      rows: 2,
     })
   })
 })
@@ -332,7 +336,7 @@ describe("fetchSuppressedListings", () => {
     expect(firstBody.query).toBe(GET_SUPPRESSED_LISTINGS_QUERY)
     expect(firstBody.query).toContain("MANAGE_INVENTORY_VIEW")
     expect(firstBody.query).toContain("EML_CDQ_ENABLED")
-    expect(firstBody.variables.pagination).toEqual({ from: 0, size: SUPPRESSED_PAGE_SIZE })
+    expect(firstBody.variables.pagination).toEqual({ from: 0, size: SUPPRESSED_FIRST_PAGE_SIZE })
     expect(firstBody.variables.sortRequest).toEqual({ key: "QUANTITY_AVAILABLE", order: "DESCENDING" })
     expect(firstBody.variables.multiSelectFilters).toEqual([
       { key: "LISTING_STATUS", values: ["SearchSuppressed"] },
@@ -342,7 +346,7 @@ describe("fetchSuppressedListings", () => {
     const secondBody = JSON.parse((fetchImpl.mock.calls[1][1] as RequestInit).body as string) as {
       variables: { pagination: { from: number; size: number } }
     }
-    expect(secondBody.variables.pagination).toEqual({ from: SUPPRESSED_PAGE_SIZE, size: SUPPRESSED_PAGE_SIZE })
+    expect(secondBody.variables.pagination).toEqual({ from: 1, size: SUPPRESSED_PAGE_SIZE })
     const issueBodies = fetchImpl.mock.calls.slice(2).map((call) => JSON.parse((call[1] as RequestInit).body as string) as {
       operationName: string
       query: string
@@ -375,7 +379,7 @@ describe("fetchSuppressedListings", () => {
       { ...secondInStockListing, issues: [missingDescriptionIssue] },
     ])
     expect(listingRequestBodies(fetchImpl).map((body) => body.variables?.pagination)).toEqual([
-      { from: 0, size: SUPPRESSED_PAGE_SIZE },
+      { from: 0, size: SUPPRESSED_FIRST_PAGE_SIZE },
     ])
   })
 
@@ -391,10 +395,7 @@ describe("fetchSuppressedListings", () => {
     await expect(fetchSuppressedListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
       { ...inStockListing, issues: [missingDescriptionIssue] },
     ])
-    expect(listingRequestBodies(fetchImpl).map((body) => body.variables?.pagination?.from)).toEqual([
-      0,
-      SUPPRESSED_PAGE_SIZE,
-    ])
+    expect(listingRequestBodies(fetchImpl).map((body) => body.variables?.pagination?.from)).toEqual([0, 1])
   })
 
   it("reports listing count and issue-fetch progress", async () => {
@@ -511,5 +512,27 @@ describe("fetchSuppressedListings", () => {
     await expect(fetchSuppressedListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
       { ...inStockListing, issues: [], issuesFetchFailed: true },
     ])
+  })
+
+  it("logs each listings page with rows, in-stock count, and Seller Central's total", async () => {
+    const fetchImpl = fetchByOperation([listingsPayload([inStockListing, zeroQuantityListing], 7)])
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+
+    try {
+      await fetchSuppressedListings({ fetch: fetchImpl as unknown as typeof fetch, root, log: createLogger("content") })
+      expect(entries.find((entry) => entry.event === "suppressed.page")?.data).toEqual({
+        page: 0,
+        from: 0,
+        size: SUPPRESSED_FIRST_PAGE_SIZE,
+        rows: 2,
+        inStock: 1,
+        reported: 7,
+      })
+    } finally {
+      setLogSink(null)
+    }
   })
 })

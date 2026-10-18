@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest"
 
 import {
   GET_LISTINGS_V2_QUERY,
-  GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR,
   INVENTORY_MANAGE_URL,
   REMOVAL_STATUS_BY_CODE,
   REMOVAL_STATUS_ELIGIBLE,
@@ -20,7 +19,6 @@ import {
   formatListingStatus,
   formatRemovalStatus,
   isInvalidPaginationInput,
-  isMissingCursorField,
   mergeRemovalStatus,
   incrementRemovalOrderId,
   latestRemovalOrderId,
@@ -97,17 +95,24 @@ function jsonResponse(payload: unknown, status = 200) {
   }
 }
 
-function listingsPayload(listings: Array<UnfulfillableListing | null>, count = listings.filter(Boolean).length, cursor?: string | null) {
+function listingsPayload(listings: Array<UnfulfillableListing | null>, count = listings.filter(Boolean).length) {
   return {
     data: {
       listingsV2: {
         listings,
         count,
-        ...(cursor === undefined ? {} : { cursor }),
         debugInfo: null,
       },
     },
   }
+}
+
+function paginationOf(fetchImpl: { mock: { calls: unknown[][] } }, call: number) {
+  const body = JSON.parse((fetchImpl.mock.calls[call][1] as RequestInit).body as string) as {
+    query: string
+    variables: { pagination?: { from: number; size: number } }
+  }
+  return body.variables.pagination
 }
 
 function listingWithSkus(sku: string, fnSku: string): UnfulfillableListing {
@@ -199,11 +204,11 @@ describe("anti-csrf token", () => {
 })
 
 describe("GetListingsV2 parsing", () => {
-  it("reads listings, count, and cursor", () => {
-    expect(parseListingsPage(listingsPayload([expiredListing], 12, "page-2"))).toEqual({
+  it("reads listings, count, and how many rows Amazon returned", () => {
+    expect(parseListingsPage(listingsPayload([expiredListing], 12))).toEqual({
       listings: [expiredListing],
       count: 12,
-      cursor: "page-2",
+      rows: 1,
     })
   })
 
@@ -218,14 +223,8 @@ describe("GetListingsV2 parsing", () => {
     })).toEqual({
       listings: [expiredListing],
       count: 2,
-      cursor: undefined,
+      rows: 2,
     })
-  })
-
-  it("detects an unknown cursor field", () => {
-    expect(isMissingCursorField(['Cannot query field "cursor" on type "ListingsV2".'])).toBe(true)
-    expect(isMissingCursorField(["Validation error of type FieldUndefined: Field 'cursor' in type 'ListingsV2' is undefined @ 'listingsV2/cursor'"])).toBe(true)
-    expect(isMissingCursorField(["Not authorized"])).toBe(false)
   })
 
   it("detects an invalid PaginationInput field", () => {
@@ -354,10 +353,10 @@ describe("recovery inventories mapping", () => {
 })
 
 describe("fetchUnfulfillableListings", () => {
-  it("paginates until count is reached", async () => {
+  it("pages with from/size until count is reached", async () => {
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2, "page-2")))
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 2, null)))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2)))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 2)))
       .mockResolvedValue(jsonResponse({ lineItems: [] }))
     const root = document.implementation.createHTMLDocument()
     root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
@@ -372,23 +371,33 @@ describe("fetchUnfulfillableListings", () => {
       credentials: "include",
       headers: expect.objectContaining({ "anti-csrftoken-a2z": "csrf-token" }),
     }))
-    const firstBody = JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string) as {
-      query: string
-      variables: { pagination: { pageSize: number; cursor?: string } }
-    }
-    expect(firstBody.query).toContain("cursor")
-    expect(firstBody.variables.pagination).toEqual({ pageSize: UNFULFILLABLE_PAGE_SIZE })
-    const secondBody = JSON.parse((fetchImpl.mock.calls[1][1] as RequestInit).body as string) as {
-      variables: { pagination: { pageSize: number; cursor?: string } }
-    }
-    expect(secondBody.variables.pagination).toEqual({ pageSize: UNFULFILLABLE_PAGE_SIZE, cursor: "page-2" })
+    const firstBody = JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string) as { query: string }
+    expect(firstBody.query).toBe(GET_LISTINGS_V2_QUERY)
+    expect(GET_LISTINGS_V2_QUERY).not.toContain("cursor")
+    expect(paginationOf(fetchImpl, 0)).toEqual({ from: 0, size: UNFULFILLABLE_PAGE_SIZE })
+    expect(paginationOf(fetchImpl, 1)).toEqual({ from: 1, size: UNFULFILLABLE_PAGE_SIZE })
+  })
+
+  it("loads every listing past Amazon's default first page", async () => {
+    const listings = Array.from({ length: 15 }, (_, index) => listingWithSkus(`SKU-${index}`, `FN-${index}`))
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload(listings, 15)))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    const result = await fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })
+
+    expect(result).toHaveLength(15)
+    expect(result.some((listing) => listing.listingsIncomplete)).toBe(false)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 
   it("reports listing count and removal-batch progress", async () => {
     const onProgress = vi.fn()
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2, "page-2")))
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 2, null)))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2)))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 2)))
       .mockResolvedValue(jsonResponse({ lineItems: [] }))
     const root = document.implementation.createHTMLDocument()
     root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
@@ -420,54 +429,31 @@ describe("fetchUnfulfillableListings", () => {
     }))
   })
 
-  it("retries without cursor when the schema rejects that field", async () => {
+  it("falls back to Amazon's default page when PaginationInput rejects from/size", async () => {
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "Validation error of type FieldUndefined: Field 'cursor' in type 'ListingsV2' is undefined @ 'listingsV2/cursor'" }] }))
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 1)))
-      .mockResolvedValue(jsonResponse({ lineItems: [] }))
-    const root = document.implementation.createHTMLDocument()
-    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
-
-    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
-      { ...expiredListing, removal: [] },
-    ])
-    const retryBody = JSON.parse((fetchImpl.mock.calls[1][1] as RequestInit).body as string) as { query: string }
-    expect(retryBody.query).toBe(GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR)
-    expect(retryBody.query).not.toContain("\n    cursor\n")
-    expect(GET_LISTINGS_V2_QUERY).toContain("\n    cursor\n")
-  })
-
-  it("retries without pagination when PaginationInput rejects pageSize", async () => {
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "Validation error of type FieldUndefined: Field 'cursor' in type 'ListingsV2' is undefined @ 'listingsV2/cursor'" }] }))
       .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "The variables input contains a field that is not defined for input object type 'PaginationInput' " }] }))
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 1)))
-      .mockResolvedValue(jsonResponse({ lineItems: [] }))
-    const root = document.implementation.createHTMLDocument()
-    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
-
-    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
-      { ...expiredListing, removal: [] },
-    ])
-    expect(fetchImpl).toHaveBeenCalledTimes(4)
-    const omitted = JSON.parse((fetchImpl.mock.calls[2][1] as RequestInit).body as string) as {
-      query: string
-      variables: { pagination?: unknown }
-    }
-    expect(omitted.query).toBe(GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR)
-    expect(omitted.variables.pagination).toBeUndefined()
-  })
-
-  it("stops when a cursor repeats", async () => {
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 4, "loop")))
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 4, "loop")))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 3)))
       .mockResolvedValue(jsonResponse({ lineItems: [] }))
     const root = document.implementation.createHTMLDocument()
     root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
 
     await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
       { ...expiredListing, removal: [], listingsIncomplete: true },
+    ])
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(paginationOf(fetchImpl, 0)).toEqual({ from: 0, size: UNFULFILLABLE_PAGE_SIZE })
+    expect(paginationOf(fetchImpl, 1)).toBeUndefined()
+  })
+
+  it("stops when Amazon ignores the offset and repeats listings", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 4)))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 4)))
+      .mockResolvedValue(jsonResponse({ lineItems: [] }))
+    const root = document.implementation.createHTMLDocument()
+    root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
+
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
       { ...expiredListing, removal: [], listingsIncomplete: true },
     ])
     expect(fetchImpl).toHaveBeenCalledTimes(3)
@@ -563,7 +549,7 @@ describe("fetchUnfulfillableListings", () => {
 
   it("keeps page-1 listings when a later GraphQL page fails", async () => {
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2, "page-2")))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([expiredListing], 2)))
       .mockResolvedValueOnce(jsonResponse({}, 403))
       .mockResolvedValue(jsonResponse({ lineItems: [] }))
     const root = document.implementation.createHTMLDocument()
@@ -589,18 +575,15 @@ describe("fetchUnfulfillableListings", () => {
     ])
   })
 
-  it("continues paging when an empty page still reports remaining listings", async () => {
+  it("stops at an empty page instead of requesting the same offset again", async () => {
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([], 1, "page-2")))
-      .mockResolvedValueOnce(jsonResponse(listingsPayload([mixedListing], 1, null)))
+      .mockResolvedValueOnce(jsonResponse(listingsPayload([], 1)))
       .mockResolvedValue(jsonResponse({ lineItems: [] }))
     const root = document.implementation.createHTMLDocument()
     root.head.innerHTML = '<meta name="anti-csrftoken-a2z" content="csrf-token">'
 
-    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([
-      { ...mixedListing, removal: [] },
-    ])
-    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    await expect(fetchUnfulfillableListings({ fetch: fetchImpl as unknown as typeof fetch, root })).resolves.toEqual([])
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it("keeps listings when a removal-status batch fails", async () => {

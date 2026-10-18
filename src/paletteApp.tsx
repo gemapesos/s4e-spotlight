@@ -14,7 +14,7 @@ import {
   type LogData,
 } from "./lib/log"
 import { downloadGeneratedReport } from "./lib/reportDownload"
-import type { GeneratedReport, ReportDownloadFormat } from "./lib/reports"
+import { reportWarnings, type GeneratedReport, type ReportDownloadFormat } from "./lib/reports"
 import {
   DEFAULT_ENABLED_FEATURES,
   enabledFeaturesEqual,
@@ -332,12 +332,7 @@ export async function generateReports(
       (best, entry) => (!best || Number(entry[1].ms) > Number(best[1].ms) ? entry : best),
       undefined,
     )
-    done({
-      sources,
-      slowest: slowest?.[0],
-      failed: timed.filter(([, data]) => data.error).map(([source]) => source),
-    })
-    return {
+    const report: GeneratedReport = {
       storeName,
       generatedAt: now,
       unfulfillableListings: unfulfillable.listings,
@@ -347,6 +342,14 @@ export async function generateReports(
       suppressedListings,
       shipments,
     }
+    const warnings = reportWarnings(report)
+    done({
+      sources,
+      slowest: slowest?.[0],
+      failed: timed.filter(([, data]) => data.error).map(([source]) => source),
+      ...(warnings.length ? { warnings: warnings.map(({ source, text }) => `${source}: ${text}`) } : {}),
+    })
+    return report
   } catch (error) {
     done({ error: describeError(error), sources }, "error")
     throw error

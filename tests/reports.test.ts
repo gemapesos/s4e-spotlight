@@ -7,6 +7,7 @@ import {
   downloadBytes,
   formatReportDate,
   reportFileName,
+  reportWarnings,
   reportWorkbookSheets,
   sheetsReportFileName,
   sanitizeStoreName,
@@ -285,5 +286,38 @@ describe("downloadBytes", () => {
       click.mockRestore()
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe("report warnings", () => {
+  const empty = {
+    storeName: "Cherrylane Enterprises",
+    generatedAt: new Date(2026, 9, 18),
+    unfulfillableListings: [],
+    feedbacks: [],
+    strandedListings: [],
+    suppressedListings: [],
+    shipments: [],
+  }
+
+  it("names each section that loaded only partly", () => {
+    expect(reportWarnings({
+      ...empty,
+      unfulfillableListings: [{ listingsIncomplete: true, removalFetchFailed: true }, { listingsIncomplete: true }],
+      feedbacks: [{ feedbackIncomplete: true }, { feedbackIncomplete: true }],
+      suppressedListings: [{ issuesFetchFailed: true }],
+      shipments: [{ detailsFetchFailed: true }, { details: { items: [{}], discrepancyTotalRecords: 3 } }],
+    })).toEqual([
+      { source: "unfulfillable", text: "Only 2 unfulfillable listings loaded; Seller Central lists more." },
+      { source: "unfulfillable", text: "Removal status is missing for 1 SKU." },
+      { source: "feedback", text: "Only the newest 2 feedback entries loaded." },
+      { source: "suppressed", text: "Suppression reasons are missing for 1 SKU." },
+      { source: "shippingQueue", text: "Details are missing for 1 shipment." },
+      { source: "shippingQueue", text: "SKU lines are incomplete for 1 shipment." },
+    ])
+  })
+
+  it("has nothing to say about a complete report", () => {
+    expect(reportWarnings(empty)).toEqual([])
   })
 })

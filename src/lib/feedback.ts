@@ -1,12 +1,17 @@
 import { formatUtcDateTime } from "./dates"
+import type { Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 
 export const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks"
 export const FEEDBACK_PAGE_SIZE = 20
-export const FEEDBACK_MAX_PAGES = 40
+/** Lifetime 1–3 star entries, newest first; stores with more than this many pages are flagged. */
+export const FEEDBACK_MAX_PAGES = 200
 export const FEEDBACK_PAGE_CONCURRENCY = 5
 export const FEEDBACK_FROM_RATING = 1
 export const FEEDBACK_TO_RATING = 3
+
+export const FEEDBACK_INCOMPLETE_NOTE =
+  `Only the newest ${FEEDBACK_MAX_PAGES * FEEDBACK_PAGE_SIZE} feedback entries were loaded. Seller Central has more.`
 
 export const FEEDBACK_SHEET_HEADERS = [
   "Date",
@@ -48,6 +53,8 @@ export interface SellerFeedback {
       booleanRating?: boolean | null
     } | null
   } | null
+  /** Set on every entry when the page limit stopped loading before the last page. */
+  feedbackIncomplete?: boolean
 }
 
 export interface FeedbacksPage {
@@ -59,6 +66,7 @@ export interface FeedbacksPage {
 export interface FetchSellerFeedbacksOptions {
   fetch?: typeof globalThis.fetch
   onProgress?: (event: ReportProgressEvent) => void
+  log?: Logger
 }
 
 export function isNeutralOrNegativeRating(rating: number | null | undefined): rating is number {
@@ -251,7 +259,6 @@ export async function fetchNeutralNegativeFeedbacks(
       Array.from({ length: batchSize }, (_, offset) => getFeedbacksPage(fetchImpl, start + offset)),
     )
 
-    let foundLast = false
     for (let offset = 0; offset < results.length; offset += 1) {
       const result = results[offset]
       if (result.status === "rejected") throw result.reason
@@ -265,13 +272,10 @@ export async function fetchNeutralNegativeFeedbacks(
         loaded,
         total: lastPage ? loaded : undefined,
       })
-      if (lastPage) {
-        foundLast = true
-        break
-      }
+      if (lastPage) return feedbacks
     }
-    if (foundLast) break
   }
 
-  return feedbacks
+  options.log?.warn("feedback.pageLimit", { pages: FEEDBACK_MAX_PAGES, entries: feedbacks.length })
+  return feedbacks.map((feedback) => ({ ...feedback, feedbackIncomplete: true }))
 }

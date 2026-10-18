@@ -1,4 +1,4 @@
-import { describeError, type Logger } from "./log"
+import { describeError, errorMessage, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 
 export const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql"
@@ -101,7 +101,7 @@ const LISTING_FIELDS = `listings {
       __typename
     }`
 
-const GET_LISTINGS_V2_PREFIX = `query GetListingsV2($pagination: PaginationInput, $usecase: UsecaseInput!, $sortRequest: SortRequest!, $searchTerm: SearchTerm, $multiSelectFilters: [MultiSelectFilter!], $multiSKUList: [String!]) {
+export const GET_LISTINGS_V2_QUERY = `query GetListingsV2($pagination: PaginationInput, $usecase: UsecaseInput!, $sortRequest: SortRequest!, $searchTerm: SearchTerm, $multiSelectFilters: [MultiSelectFilter!], $multiSKUList: [String!]) {
   listingsV2(
     usecase: $usecase
     pagination: $pagination
@@ -111,16 +111,7 @@ const GET_LISTINGS_V2_PREFIX = `query GetListingsV2($pagination: PaginationInput
     multiSKUList: $multiSKUList
   ) {
     ${LISTING_FIELDS}
-    count`
-
-export const GET_LISTINGS_V2_QUERY = `${GET_LISTINGS_V2_PREFIX}
-    cursor
-    debugInfo
-    __typename
-  }
-}`
-
-export const GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR = `${GET_LISTINGS_V2_PREFIX}
+    count
     debugInfo
     __typename
   }
@@ -221,7 +212,8 @@ export interface RecoveryLineItem {
 interface ListingsPage {
   listings: UnfulfillableListing[]
   count: number
-  cursor?: string
+  /** Rows Amazon returned, including unreadable ones; the next page starts after them. */
+  rows: number
 }
 
 export interface FetchUnfulfillableListingsOptions {
@@ -376,10 +368,6 @@ export function graphqlMessages(payload: unknown): string[] {
     .filter(Boolean)
 }
 
-export function isMissingCursorField(messages: readonly string[]): boolean {
-  return messages.some((message) => /cursor/i.test(message) && /undefined|unknown field|cannot query field/i.test(message))
-}
-
 export function isInvalidPaginationInput(messages: readonly string[]): boolean {
   return messages.some((message) => /paginationinput/i.test(message) && /not defined|undefined|unknown field/i.test(message))
 }
@@ -501,34 +489,32 @@ export function parseListingsPage(payload: unknown): ListingsPage {
     throw new Error("Couldn’t load unfulfillable inventory.")
   }
 
-  const record = listingsV2 as { listings?: unknown; count?: unknown; cursor?: unknown }
-  const listings = Array.isArray(record.listings)
-    ? record.listings.map(asListing).filter((listing): listing is UnfulfillableListing => listing !== undefined)
-    : []
+  const record = listingsV2 as { listings?: unknown; count?: unknown }
+  const rows = Array.isArray(record.listings) ? record.listings : []
+  const listings = rows.map(asListing).filter((listing): listing is UnfulfillableListing => listing !== undefined)
   const count = typeof record.count === "number" && Number.isFinite(record.count) ? record.count : listings.length
-  const cursor = typeof record.cursor === "string" && record.cursor.trim() ? record.cursor : undefined
-  return { listings, count, cursor }
+  return { listings, count, rows: rows.length }
 }
 
-function listingsVariables(cursor?: string, includePagination = true): Record<string, unknown> {
-  const variables: Record<string, unknown> = {
+/** Offset pagination, as Manage Inventory uses; omit `from` to request Amazon's default first page. */
+function listingsVariables(from?: number): Record<string, unknown> {
+  return {
     usecase: "INVENTORY_UNFULFILLABLE",
     sortRequest: { key: "QUANTITY_UNFULFILLABLE", order: "DESCENDING" },
     multiSelectFilters: [{ key: "LISTING_STATUS", values: ["InventoryUnfulfillable"] }],
+    ...(from === undefined ? {} : { pagination: { from, size: UNFULFILLABLE_PAGE_SIZE } }),
   }
-  if (!includePagination) return variables
-  variables.pagination = cursor
-    ? { pageSize: UNFULFILLABLE_PAGE_SIZE, cursor }
-    : { pageSize: UNFULFILLABLE_PAGE_SIZE }
-  return variables
+}
+
+function listingKey(listing: UnfulfillableListing): string {
+  const pair = listingSkuPair(listing)
+  return pair ? skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku) : JSON.stringify(listing.coreListingFields ?? listing)
 }
 
 async function postListingsPage(
   fetchImpl: typeof globalThis.fetch,
   token: string,
-  query: string,
-  cursor?: string,
-  includePagination = true,
+  from?: number,
 ): Promise<ListingsPage> {
   const response = await fetchImpl(UNFULFILLABLE_GQL_URL, {
     method: "POST",
@@ -540,8 +526,8 @@ async function postListingsPage(
     },
     body: JSON.stringify({
       operationName: "GetListingsV2",
-      variables: listingsVariables(cursor, includePagination),
-      query,
+      variables: listingsVariables(from),
+      query: GET_LISTINGS_V2_QUERY,
     }),
   })
 
@@ -553,9 +539,6 @@ async function postListingsPage(
   } catch {
     throw new Error("Couldn’t load unfulfillable inventory.")
   }
-
-  const messages = graphqlMessages(payload)
-  if (messages.length && isMissingCursorField(messages)) throw new Error(messages.join(" "))
   return parseListingsPage(payload)
 }
 
@@ -688,39 +671,24 @@ export async function fetchUnfulfillableListings(
 
   onProgress?.({ source: "unfulfillable", status: "active", loaded: 0, phase: "listings" })
 
-  let query = GET_LISTINGS_V2_QUERY
-  let cursor: string | undefined
-  let includePagination = true
   const listings: UnfulfillableListing[] = []
-  const seenCursors = new Set<string>()
+  const seen = new Set<string>()
+  let paginate = true
+  let offset = 0
   let reportedCount = 0
   let listingsIncomplete = false
 
   for (let page = 0; page < UNFULFILLABLE_MAX_PAGES; page += 1) {
+    const pageDone = log?.time("unfulfillable.page", { page, from: offset })
     let result: ListingsPage
     try {
-      result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
+      result = await postListingsPage(fetchImpl, token, paginate ? offset : undefined)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const willRetryWithoutCursor = page === 0 && query === GET_LISTINGS_V2_QUERY && isMissingCursorField([message])
-      const willRetryWithoutPagination = page === 0 && includePagination && isInvalidPaginationInput([message])
-      if (willRetryWithoutCursor) {
-        log?.warn("unfulfillable.schemaRetry", { without: "cursor" })
-        query = GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR
-        cursor = undefined
-        try {
-          result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
-        } catch (retryError) {
-          const retryMessage = retryError instanceof Error ? retryError.message : String(retryError)
-          if (!isInvalidPaginationInput([retryMessage])) throw retryError
-          log?.warn("unfulfillable.schemaRetry", { without: "pagination" })
-          includePagination = false
-          result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
-        }
-      } else if (willRetryWithoutPagination) {
+      if (page === 0 && paginate && isInvalidPaginationInput([errorMessage(error)])) {
+        // Without paging Amazon returns only its default first page; the count check below flags the rest.
         log?.warn("unfulfillable.schemaRetry", { without: "pagination" })
-        includePagination = false
-        result = await postListingsPage(fetchImpl, token, query, cursor, includePagination)
+        paginate = false
+        result = await postListingsPage(fetchImpl, token)
       } else if (listings.length > 0) {
         log?.warn("unfulfillable.listingsStopped", { page, loaded: listings.length, error: describeError(error) })
         listingsIncomplete = true
@@ -730,8 +698,16 @@ export async function fetchUnfulfillableListings(
       }
     }
 
-    listings.push(...result.listings)
+    const added = result.listings.filter((listing) => {
+      const key = listingKey(listing)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    listings.push(...added)
+    offset += result.rows
     reportedCount = result.count
+    pageDone?.({ rows: result.rows, added: added.length, reported: result.count })
     onProgress?.({
       source: "unfulfillable",
       status: "active",
@@ -739,14 +715,12 @@ export async function fetchUnfulfillableListings(
       total: result.count,
       phase: "listings",
     })
-    if (listings.length >= result.count) break
-    const emptyPage = result.listings.length === 0
-    const canSkipEmptyPage = emptyPage && result.count > listings.length && Boolean(result.cursor) && query !== GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR
-    if (emptyPage && !canSkipEmptyPage) break
-    if (!emptyPage && (query === GET_LISTINGS_V2_QUERY_WITHOUT_CURSOR || !result.cursor)) break
-    if (!result.cursor || seenCursors.has(result.cursor)) break
-    seenCursors.add(result.cursor)
-    cursor = result.cursor
+    if (!paginate || result.rows === 0 || offset >= result.count) break
+    if (added.length === 0) {
+      // Amazon ignored the offset and sent listings already loaded.
+      log?.warn("unfulfillable.pagingIgnored", { page, loaded: listings.length, reported: result.count })
+      break
+    }
   }
 
   if (reportedCount > listings.length) {
