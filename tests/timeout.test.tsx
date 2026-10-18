@@ -91,4 +91,19 @@ describe("Time Out form settings", () => {
       })
     })
   })
+
+  it("keeps a select change made while a text edit is waiting to save", async () => {
+    const user = userEvent.setup()
+    const store = mockChrome()
+    render(<TimeoutApp />)
+
+    await user.type(await screen.findByLabelText("Short Daily Update"), "Busy day")
+    await user.click(screen.getByLabelText("Follow-up needed?"))
+    await user.click(await screen.findByRole("option", { name: "Yes" }))
+    await new Promise((resolve) => setTimeout(resolve, 500))
+
+    expect(store[SETTINGS_STORAGE_KEY]).toMatchObject({
+      timeOutForm: { shortDailyUpdate: "Busy day", followUpNeeded: "Yes" },
+    })
+  })
 })

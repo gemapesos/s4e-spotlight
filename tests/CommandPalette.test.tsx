@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { CommandPalette, type CommandPaletteProps } from "../src/CommandPalette"
+import type { ReportProgressEvent } from "../src/lib/reportProgress"
 import { DEFAULT_ENABLED_FEATURES, type EnabledFeatures } from "../src/lib/settings"
 
 function renderPalette(
@@ -80,7 +81,7 @@ describe("CommandPalette", () => {
     expect(screen.getByText("Reports", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByText("Configuration", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByRole("option", { name: /Open Case ID\/s/ })).toHaveAttribute("aria-selected", "true")
-    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Open Shipment ID\/s/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Generate Reports/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Search SKU\/s/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Time Out/ })).toBeVisible()
@@ -134,7 +135,7 @@ describe("CommandPalette", () => {
     const input = screen.getByRole("combobox", { name: "Search commands" })
 
     await user.type(input, "shipment")
-    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Open Shipment ID\/s/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Open Case ID/ })).not.toBeInTheDocument()
 
     await user.clear(input)
@@ -159,16 +160,16 @@ describe("CommandPalette", () => {
     const input = screen.getByRole("combobox", { name: "Search commands" })
 
     await user.type(input, "shipmnet")
-    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Open Shipment ID\/s/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Open Case ID/ })).not.toBeInTheDocument()
 
     await user.clear(input)
     await user.type(input, "fba")
-    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Open Shipment ID\/s/ })).toBeVisible()
 
     await user.clear(input)
     await user.type(input, "osi")
-    expect(screen.getByRole("option", { name: /Open Shipment IDs/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /Open Shipment ID\/s/ })).toBeVisible()
   })
 
   it("offers a detected Case ID action that opens the extracted ID", async () => {
@@ -232,7 +233,7 @@ describe("CommandPalette", () => {
   it("updates Shipment ID fades after typing without changing the input", async () => {
     const user = userEvent.setup()
     renderPalette()
-    await user.click(screen.getByRole("option", { name: /Open Shipment IDs/ }))
+    await user.click(screen.getByRole("option", { name: /Open Shipment ID\/s/ }))
     const input = screen.getByRole("textbox", { name: "Shipment IDs" }) as HTMLTextAreaElement
 
     setTextareaLayout(input, { clientHeight: 128, scrollHeight: 300, scrollTop: 0 })
@@ -398,7 +399,7 @@ describe("CommandPalette", () => {
       openShipmentIds,
     )
 
-    await user.click(screen.getByRole("option", { name: /Open Shipment IDs/ }))
+    await user.click(screen.getByRole("option", { name: /Open Shipment ID\/s/ }))
     const input = screen.getByRole("textbox", { name: "Shipment IDs" })
     fireEvent.change(input, {
       target: {
@@ -426,7 +427,7 @@ describe("CommandPalette", () => {
       openShipmentIds,
     )
 
-    await user.click(screen.getByRole("option", { name: /Open Shipment IDs/ }))
+    await user.click(screen.getByRole("option", { name: /Open Shipment ID\/s/ }))
     await user.type(
       screen.getByRole("textbox", { name: "Shipment IDs" }),
       "FBA123",
@@ -623,9 +624,18 @@ describe("CommandPalette", () => {
     expect(list).toHaveAttribute("data-fade-mask", "top")
   })
 
-  it("generates a report and closes the palette", async () => {
+  it("keeps the palette open and downloads Raw or Sheets", async () => {
     const user = userEvent.setup()
-    const onGenerateReports = vi.fn<() => Promise<void>>().mockResolvedValue()
+    const report = {
+      storeName: "JMG Outdoors",
+      generatedAt: new Date(2026, 7, 14),
+      unfulfillableListings: [],
+      feedbacks: [],
+      strandedListings: [],
+      suppressedListings: [],
+      shipments: [],
+    }
+    const onGenerateReports = vi.fn().mockResolvedValue(report)
     const onPrepareReports = vi.fn().mockResolvedValue({ loggedInToStore: true })
     const { onOpenChange } = renderPalette(
       true,
@@ -637,12 +647,43 @@ describe("CommandPalette", () => {
       undefined,
       { onPrepareReports },
     )
+    const createObjectURL = vi.fn().mockReturnValue("blob:report")
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
+    const clicked: { download?: string } = {}
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.download = this.download
+    })
 
-    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    try {
+      await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
 
-    await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledOnce())
-    expect(onPrepareReports).toHaveBeenCalledOnce()
-    expect(onOpenChange).toHaveBeenCalledWith(false)
+      expect(await screen.findByRole("button", { name: "Raw" })).toBeVisible()
+      expect(screen.getByRole("button", { name: "Sheets" })).toBeVisible()
+      expect(screen.getByRole("button", { name: "Raw" })).toHaveClass("translate-x-0")
+      expect(screen.getByRole("button", { name: "Sheets" })).toHaveClass("translate-x-0")
+      expect(screen.getByRole("button", { name: "Back" })).toBeVisible()
+      expect(screen.getByRole("dialog", { name: "Generate Reports" })).toBeVisible()
+      expect(onPrepareReports).toHaveBeenCalledOnce()
+      expect(onOpenChange).not.toHaveBeenCalled()
+
+      await user.click(screen.getByRole("button", { name: "Raw" }))
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
+      await user.click(screen.getByRole("button", { name: "Sheets" }))
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026 - Sheets.xlsx")
+      expect(screen.getByRole("dialog", { name: "Generate Reports" })).toBeVisible()
+
+      await user.keyboard("{Escape}")
+      expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
+
+      await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+      await user.click(await screen.findByRole("button", { name: "Back" }))
+      expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
+      expect(screen.getByRole("option", { name: /Generate Reports/ })).toBeVisible()
+    } finally {
+      click.mockRestore()
+    }
   })
 
   it("replaces the command list with per-source report progress", async () => {
@@ -670,7 +711,8 @@ describe("CommandPalette", () => {
 
     expect(await screen.findByRole("dialog", { name: "Generate Reports" })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Time Out/ })).not.toBeInTheDocument()
-    expect(screen.getByText("Opening Seller Central")).toBeVisible()
+    expect(screen.queryByText("Opening Seller Central")).not.toBeInTheDocument()
+    expect(screen.queryByText("Building spreadsheet")).not.toBeInTheDocument()
     expect(screen.getByText("Unfulfillable listings")).toBeVisible()
     expect(screen.getByText("Seller feedback")).toBeVisible()
     expect(screen.getByText("Stranded inventory")).toBeVisible()
@@ -875,5 +917,65 @@ describe("CommandPalette", () => {
     const second = renderPalette()
     await user.click(document.querySelector("[data-slot=dialog-overlay]") as HTMLElement)
     expect(second.onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("ignores a report run abandoned by closing the palette", async () => {
+    const user = userEvent.setup()
+    const report = {
+      storeName: "JMG Outdoors",
+      generatedAt: new Date(2026, 7, 14),
+      unfulfillableListings: [],
+      feedbacks: [],
+      strandedListings: [],
+      suppressedListings: [],
+      shipments: [],
+    }
+    type Progress = (event: ReportProgressEvent) => void
+    const runs: Array<{ finish: (value: typeof report) => void; progress?: Progress }> = []
+    const onGenerateReports = vi.fn((_store?: string, progress?: Progress) => new Promise<typeof report>((finish) => {
+      runs.push({ finish, progress })
+    }))
+    const { rerenderPalette } = renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      onGenerateReports,
+      onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: true }),
+    })
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledTimes(1))
+    rerenderPalette(false)
+    rerenderPalette(true)
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledTimes(2))
+
+    await act(async () => {
+      runs[0].progress?.({ source: "unfulfillable", status: "active", loaded: 5, total: 10, phase: "listings" })
+      runs[0].finish(report)
+    })
+    expect(screen.queryByText("5 of 10 listings")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Raw" })).not.toBeInTheDocument()
+
+    await act(async () => { runs[1].finish(report) })
+    expect(await screen.findByRole("button", { name: "Raw" })).toBeVisible()
+  })
+
+  it("shows why a report source failed", async () => {
+    const user = userEvent.setup()
+    let onProgress: ((event: ReportProgressEvent) => void) | undefined
+    const onGenerateReports = vi.fn((_store?: string, progress?: typeof onProgress) => {
+      onProgress = progress
+      return new Promise<void>(() => undefined)
+    })
+    renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      onGenerateReports,
+      onPrepareReports: vi.fn().mockResolvedValue({ loggedInToStore: true }),
+    })
+
+    await user.click(screen.getByRole("option", { name: /Generate Reports/ }))
+    await vi.waitFor(() => expect(onGenerateReports).toHaveBeenCalledOnce())
+    await act(async () => {
+      onProgress?.({ source: "shippingQueue", status: "error", error: "Couldn’t load shipping queue (503)." })
+    })
+
+    expect(screen.getByText("Couldn’t load shipping queue (503).")).toBeVisible()
   })
 })

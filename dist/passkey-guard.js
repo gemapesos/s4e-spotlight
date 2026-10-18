@@ -1,3 +1,4 @@
+(function () {
 const PASSKEY_GUARD_KEY = "__s4eSpotlightPasskeyGuard";
 const SELLER_CENTRAL_ORIGIN = "https://sellercentral.amazon.com";
 function isPublicKeyRequest(options) {
@@ -59,3 +60,5 @@ if (isSameOriginSellerCentralFrame()) {
 	passkeyGuardWindow[PASSKEY_GUARD_KEY]?.destroy();
 	passkeyGuardWindow[PASSKEY_GUARD_KEY] = installPasskeyGuard(window);
 }
+
+})();

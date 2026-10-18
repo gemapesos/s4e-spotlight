@@ -8,6 +8,7 @@ import {
   formatReportDate,
   reportFileName,
   reportWorkbookSheets,
+  sheetsReportFileName,
   sanitizeStoreName,
 } from "../src/lib/reports"
 import { listWorkbookSheetNames, readStoredZip } from "../src/lib/xlsxWorkbook"
@@ -27,6 +28,9 @@ describe("report filenames", () => {
     expect(reportFileName("JMG Outdoors", new Date(2026, 7, 14))).toBe(
       "JMG Outdoors - 14-Aug-2026.xlsx",
     )
+    expect(sheetsReportFileName("JMG Outdoors", new Date(2026, 7, 14))).toBe(
+      "JMG Outdoors - 14-Aug-2026 - Sheets.xlsx",
+    )
   })
 
   it("replaces filesystem-unsafe characters in the store name", () => {
@@ -45,6 +49,7 @@ describe("report workbook", () => {
     for (const index of REPORT_SHEETS.keys()) {
       const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
       expect(sheet).toContain("<sheetData/>")
+      expect(sheet).not.toContain("<cols")
       expect(sheet).not.toContain("<row")
     }
   })
@@ -84,8 +89,8 @@ describe("report workbook", () => {
   })
 
   it("fills Unfulfillable, Stranded, and in-stock Suppressed rows and stacks Daily Tasks sections", () => {
-    const bytes = buildReportWorkbook(reportWorkbookSheets(
-      [
+    const bytes = buildReportWorkbook(reportWorkbookSheets({
+      unfulfillableListings: [
         {
           coreListingFields: { sku: "20231103_9.00_Sephora_67493", asin: "B00JJPVVYQ", fnSku: "X004110PZF" },
           listingData: { title: "Sephora Collection Colorful Waterproof Eyeliner", lastUpdated: "11/15/2024 15:18:56" },
@@ -97,7 +102,7 @@ describe("report workbook", () => {
           offers: [{ price: { price: { amount: "21.75", currencyUnit: "USD" } } }],
         },
       ],
-      [
+      feedbacks: [
         {
           feedbackId: "A1JYWNJI6O4TQ1",
           orderId: "112-6224287-0679468",
@@ -108,7 +113,7 @@ describe("report workbook", () => {
           partiallySuppressed: false,
         },
       ],
-      [
+      strandedListings: [
         {
           SKU: "2026-07-24-B0F2KGX1K3-15700",
           ASIN: "B0F2KGX1K3",
@@ -133,7 +138,7 @@ describe("report workbook", () => {
           SupportedActions: "EditListing#RemovalOrder#RefreshSIRC#PostponeAutoRemoval",
         },
       ],
-      [
+      suppressedListings: [
         {
           coreListingFields: { sku: "STOCK-SKU", asin: "B0STOCK", fnSku: "X00STOCK", fulfillmentChannel: "AFN" },
           listingData: { title: "In-stock suppressed towel" },
@@ -157,7 +162,7 @@ describe("report workbook", () => {
           availability: { quantity: 0 },
         },
       ],
-      [
+      shipments: [
         {
           shipmentName: "FBA STA (09/29/2026 15:25)-HGR6",
           shipmentId: "FBA19RKC646S",
@@ -181,7 +186,7 @@ describe("report workbook", () => {
           finalized: false,
         },
       ],
-    ))
+    }))
     expect(listWorkbookSheetNames(bytes)).toEqual([...REPORT_SHEETS])
 
     const files = readStoredZip(bytes)
@@ -205,8 +210,8 @@ describe("report workbook", () => {
     expect(unfulfillable).toContain("Unfulfillable")
     expect(unfulfillable).not.toContain("Eligible for Removal")
     expect(unfulfillable).toContain("20231103_9.00_Sephora_67493")
-    expect(unfulfillable).toContain('<c r="F2"><v>21.75</v></c>')
-    expect(unfulfillable).toContain('<c r="H2"><v>2</v></c>')
+    expect(unfulfillable).toContain('<c r="F2" s="0"><v>21.75</v></c>')
+    expect(unfulfillable).toContain('<c r="H2" s="0"><v>2</v></c>')
     expect(unfulfillable).not.toContain('<c r="F2" t="inlineStr">')
     expect(unfulfillable).not.toContain('<c r="H2" t="inlineStr">')
 
@@ -219,8 +224,8 @@ describe("report workbook", () => {
     expect(stranded).toContain("Missing price")
     expect(stranded).toContain("08/11/2026")
     expect(stranded).toContain("Return to seller")
-    expect(stranded).toContain('<c r="H2"><v>0</v></c>')
-    expect(stranded).toContain('<c r="J2"><v>1</v></c>')
+    expect(stranded).toContain('<c r="H2" s="0"><v>0</v></c>')
+    expect(stranded).toContain('<c r="J2" s="0"><v>1</v></c>')
     expect(stranded).not.toContain('<c r="H2" t="inlineStr">')
 
     const suppressed = new TextDecoder().decode(files.get("xl/worksheets/sheet4.xml"))
@@ -245,6 +250,16 @@ describe("report workbook", () => {
     expect(shippingQueue).toContain("<v>26</v>")
     expect(shippingQueue).toContain("<v>24</v>")
     expect(shippingQueue).toContain("<v>-2</v>")
+
+    for (const index of REPORT_SHEETS.keys()) {
+      const sheet = new TextDecoder().decode(files.get(`xl/worksheets/sheet${index + 1}.xml`))
+      expect(sheet.indexOf("<cols>")).toBeGreaterThan(-1)
+      expect(sheet.indexOf("<cols>")).toBeLessThan(sheet.indexOf("<sheetData>"))
+      expect(sheet).not.toContain("bestFit")
+      const widths = [...sheet.matchAll(/width="([0-9.]+)"/g)].map((match) => Number(match[1]))
+      expect(widths.length).toBeGreaterThan(0)
+      for (const width of widths) expect(width).toBeLessThanOrEqual(85)
+    }
   })
 })
 

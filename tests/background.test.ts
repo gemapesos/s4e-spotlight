@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import {
+  handleLogMessage,
   buildCaseUrl,
   buildShipmentUrl,
   buildSkuUrl,
@@ -15,6 +16,7 @@ import {
   openTimeOutTabs,
   TIME_OUT_SHEET_URL,
 } from "../src/background"
+import { createLogStore, type LogEntry } from "../src/lib/log"
 import { DEFAULT_TIME_OUT_FORM_VALUES } from "../src/lib/settings"
 
 const senderTab = {
@@ -427,5 +429,51 @@ describe("background Time Out handling", () => {
     expect(openCases).not.toHaveBeenCalled()
     expect(openShipments).not.toHaveBeenCalled()
     expect(openSkus).not.toHaveBeenCalled()
+  })
+})
+
+describe("diagnostics log messages", () => {
+  function setup() {
+    const values: Record<string, unknown> = {}
+    const store = createLogStore({
+      get: vi.fn(async (key: string) => ({ [key]: values[key] })),
+      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(values, items) }),
+      remove: vi.fn(async (key: string) => { delete values[key] }),
+    })
+    vi.stubGlobal("chrome", {
+      runtime: { id: "extension-id", getURL: (path: string) => `chrome-extension://extension-id/${path}` },
+    })
+    return store
+  }
+  const entry: LogEntry = { t: 1, level: "info", ctx: "content", event: "report.fetch" }
+  const extensionPage = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" }
+
+  it("stores forwarded entries with the sending tab", async () => {
+    const store = setup()
+    const sendResponse = vi.fn()
+
+    handleLogMessage("LOG_ENTRIES", { entries: [entry, { bad: true }] }, { id: "extension-id", tab: { id: 22 } as chrome.tabs.Tab }, store, sendResponse)
+
+    expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+    expect(await store.read()).toEqual([{ ...entry, tab: 22 }])
+    vi.unstubAllGlobals()
+  })
+
+  it("only lets extension pages read or clear logs", async () => {
+    const store = setup()
+    store.append([entry])
+    const fromPage = vi.fn()
+    const fromPopup = vi.fn()
+
+    handleLogMessage("LOGS_GET", {}, { id: "extension-id", url: "https://sellercentral.amazon.com/home" }, store, fromPage)
+    expect(handleLogMessage("LOGS_GET", {}, extensionPage, store, fromPopup)).toBe(true)
+
+    expect(fromPage).toHaveBeenCalledWith({ ok: false, error: "Logs are only available to extension pages." })
+    await vi.waitFor(() => expect(fromPopup).toHaveBeenCalledWith({ ok: true, entries: [entry] }))
+    const cleared = vi.fn()
+    handleLogMessage("LOGS_CLEAR", {}, extensionPage, store, cleared)
+    await vi.waitFor(() => expect(cleared).toHaveBeenCalledWith({ ok: true }))
+    expect(await store.read()).toEqual([])
+    vi.unstubAllGlobals()
   })
 })

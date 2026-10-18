@@ -13,7 +13,7 @@ export type FeatureId = (typeof FEATURE_IDS)[number]
 
 export const FEATURES: ReadonlyArray<{ id: FeatureId; label: string }> = [
   { id: "open-case-ids", label: "Open Case ID/s" },
-  { id: "open-shipment-ids", label: "Open Shipment IDs" },
+  { id: "open-shipment-ids", label: "Open Shipment ID/s" },
   { id: "search-skus", label: "Search SKU/s" },
   { id: "time-out", label: "Time Out" },
   { id: "generate-reports", label: "Generate Reports" },
@@ -134,72 +134,26 @@ export const TIME_OUT_WAITING_ON_OPTIONS = [
   "Karen",
 ] as const
 
-function asBoolean(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {}
 }
 
-function asString(value: unknown, fallback: string): string {
-  return typeof value === "string" ? value : fallback
-}
-
+/** Reads stored settings, keeping each value only when it has the expected type. */
 export function parseSettings(value: unknown): ExtensionSettings {
-  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {}
-  const featuresRecord =
-    record.features && typeof record.features === "object"
-      ? (record.features as Record<string, unknown>)
-      : {}
-  const formRecord =
-    record.timeOutForm && typeof record.timeOutForm === "object"
-      ? (record.timeOutForm as Record<string, unknown>)
-      : {}
-
-  return {
-    features: {
-      "open-case-ids": asBoolean(featuresRecord["open-case-ids"], true),
-      "open-shipment-ids": asBoolean(featuresRecord["open-shipment-ids"], true),
-      "search-skus": asBoolean(featuresRecord["search-skus"], true),
-      "time-out": asBoolean(featuresRecord["time-out"], true),
-      "generate-reports": asBoolean(featuresRecord["generate-reports"], true),
-      accounts: asBoolean(featuresRecord.accounts, true),
-    },
-    timeOutForm: {
-      staffName: asString(formRecord.staffName, DEFAULT_TIME_OUT_FORM_VALUES.staffName),
-      business: asString(formRecord.business, DEFAULT_TIME_OUT_FORM_VALUES.business),
-      supervisor: asString(formRecord.supervisor, DEFAULT_TIME_OUT_FORM_VALUES.supervisor),
-      hoursWorked: asString(formRecord.hoursWorked, DEFAULT_TIME_OUT_FORM_VALUES.hoursWorked),
-      scheduledAccountsCompleted: asString(
-        formRecord.scheduledAccountsCompleted,
-        DEFAULT_TIME_OUT_FORM_VALUES.scheduledAccountsCompleted,
-      ),
-      shortDailyUpdate: asString(
-        formRecord.shortDailyUpdate,
-        DEFAULT_TIME_OUT_FORM_VALUES.shortDailyUpdate,
-      ),
-      blockersOrRedFlags: asString(
-        formRecord.blockersOrRedFlags,
-        DEFAULT_TIME_OUT_FORM_VALUES.blockersOrRedFlags,
-      ),
-      clientAccountName: asString(
-        formRecord.clientAccountName,
-        DEFAULT_TIME_OUT_FORM_VALUES.clientAccountName,
-      ),
-      issueType: asString(formRecord.issueType, DEFAULT_TIME_OUT_FORM_VALUES.issueType),
-      waitingOnWhom: asString(formRecord.waitingOnWhom, DEFAULT_TIME_OUT_FORM_VALUES.waitingOnWhom),
-      followUpNeeded: asString(formRecord.followUpNeeded, DEFAULT_TIME_OUT_FORM_VALUES.followUpNeeded),
-      escalatedToSupervisor: asString(
-        formRecord.escalatedToSupervisor,
-        DEFAULT_TIME_OUT_FORM_VALUES.escalatedToSupervisor,
-      ),
-      supervisorReviewNeeded: asString(
-        formRecord.supervisorReviewNeeded,
-        DEFAULT_TIME_OUT_FORM_VALUES.supervisorReviewNeeded,
-      ),
-      karenReviewNeeded: asString(
-        formRecord.karenReviewNeeded,
-        DEFAULT_TIME_OUT_FORM_VALUES.karenReviewNeeded,
-      ),
-    },
+  const record = asRecord(value)
+  const featuresRecord = asRecord(record.features)
+  const formRecord = asRecord(record.timeOutForm)
+  const features = { ...DEFAULT_ENABLED_FEATURES }
+  for (const id of FEATURE_IDS) {
+    const enabled = featuresRecord[id]
+    if (typeof enabled === "boolean") features[id] = enabled
   }
+  const timeOutForm = { ...DEFAULT_TIME_OUT_FORM_VALUES }
+  for (const key of Object.keys(DEFAULT_TIME_OUT_FORM_VALUES) as Array<keyof TimeOutFormValues>) {
+    const fieldValue = formRecord[key]
+    if (typeof fieldValue === "string") timeOutForm[key] = fieldValue
+  }
+  return { features, timeOutForm }
 }
 
 export function isFeatureEnabled(features: EnabledFeatures, id: FeatureId | string): boolean {

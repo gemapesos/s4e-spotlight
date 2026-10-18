@@ -1,4 +1,308 @@
 (function () {
+const LOG_ENTRIES_MESSAGE = "LOG_ENTRIES";
+const LOGS_GET_MESSAGE = "LOGS_GET";
+const LOGS_CLEAR_MESSAGE = "LOGS_CLEAR";
+const LOGS_STORAGE_KEY = "s4e-logs";
+const MAX_STORED_LOG_ENTRIES = 1e3;
+/** Requests slower than this are logged individually. */
+const SLOW_REQUEST_MS = 5e3;
+const LOG_PREFIX = "[S4E]";
+const LOG_TEXT_LIMIT = 300;
+const LOG_STACK_LIMIT = 600;
+const LOG_DATA_LIMIT = 4e3;
+const LOG_FORWARD_DELAY_MS = 400;
+const LOG_FORWARD_BATCH = 25;
+const LOG_MESSAGE_ENTRY_LIMIT = 100;
+const LOG_STORE_FLUSH_MS = 1e3;
+/** Individual failure entries per endpoint before the rest are only counted. */
+const REQUEST_FAILURE_LOG_LIMIT = 5;
+let logSink = null;
+const logToConsole = !(typeof process !== "undefined" && process.env?.VITEST);
+/** Routes every entry written in this context to `sink`, or stops routing when null. */
+function setLogSink(sink) {
+	logSink = sink;
+}
+function logNow() {
+	return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+function clipLogText(value, limit = LOG_TEXT_LIMIT) {
+	return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+function errorMessage(error, fallback = "Unknown error.") {
+	if (error instanceof Error && error.message) return error.message;
+	if (typeof error === "string" && error) return error;
+	return fallback;
+}
+/** A compact, serializable description of an error for log data. */
+function describeError(error) {
+	if (!(error instanceof Error)) return { message: clipLogText(errorMessage(error)) };
+	const described = {
+		name: error.name,
+		message: clipLogText(errorMessage(error))
+	};
+	if (error.stack) described.stack = clipLogText(error.stack, LOG_STACK_LIMIT);
+	return described;
+}
+function writeLogEntry(entry) {
+	if (logToConsole) {
+		const write = entry.level === "error" ? console.error : entry.level === "warn" ? console.warn : console.info;
+		const timing = entry.ms === undefined ? "" : ` ${entry.ms}ms`;
+		const run = entry.run ? ` [${entry.run}]` : "";
+		write(`${LOG_PREFIX} ${entry.ctx} · ${entry.event}${timing}${run}`, ...entry.data ? [entry.data] : []);
+	}
+	try {
+		logSink?.(entry);
+	} catch {}
+}
+function createLogger(ctx, run) {
+	const write = (level, event, data, ms) => {
+		const entry = {
+			t: Date.now(),
+			level,
+			ctx,
+			event
+		};
+		if (run) entry.run = run;
+		if (ms !== undefined) entry.ms = ms;
+		if (data && Object.keys(data).length > 0) entry.data = data;
+		writeLogEntry(entry);
+	};
+	return {
+		info: (event, data) => write("info", event, data),
+		warn: (event, data) => write("warn", event, data),
+		error: (event, data) => write("error", event, data),
+		time: (event, data) => {
+			const startedAt = logNow();
+			return (more, level = "info") => {
+				const elapsed = Math.round(logNow() - startedAt);
+				write(level, event, data || more ? {
+					...data,
+					...more
+				} : undefined, elapsed);
+				return elapsed;
+			};
+		},
+		withRun: (nextRun) => createLogger(ctx, nextRun)
+	};
+}
+function createLogRunId(prefix) {
+	return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+/** Sends entries to the background worker in small batches. Install with setLogSink. */
+function forwardLogsToBackground() {
+	let queue = [];
+	let timer;
+	const flush = () => {
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+		const entries = queue;
+		queue = [];
+		if (entries.length === 0 || typeof chrome === "undefined" || !chrome.runtime?.id) return;
+		try {
+			void chrome.runtime.sendMessage({
+				type: LOG_ENTRIES_MESSAGE,
+				entries
+			}).catch(() => undefined);
+		} catch {}
+	};
+	return (entry) => {
+		queue.push(entry);
+		if (queue.length >= LOG_FORWARD_BATCH) flush();
+		else timer ??= setTimeout(flush, LOG_FORWARD_DELAY_MS);
+	};
+}
+/** Validates an entry received from another context and caps its size. */
+function sanitizeLogEntry(value) {
+	if (!value || typeof value !== "object") return undefined;
+	const record = value;
+	const levels = [
+		"info",
+		"warn",
+		"error"
+	];
+	if (typeof record.t !== "number" || !levels.includes(record.level)) return undefined;
+	if (typeof record.ctx !== "string" || typeof record.event !== "string") return undefined;
+	const entry = {
+		t: record.t,
+		level: record.level,
+		ctx: clipLogText(record.ctx, 40),
+		event: clipLogText(record.event, 120)
+	};
+	if (typeof record.run === "string") entry.run = clipLogText(record.run, 60);
+	if (typeof record.ms === "number" && Number.isFinite(record.ms)) entry.ms = record.ms;
+	if (record.data && typeof record.data === "object") {
+		let serialized = "";
+		try {
+			serialized = JSON.stringify(record.data);
+		} catch {
+			serialized = "";
+		}
+		entry.data = serialized.length <= LOG_DATA_LIMIT ? record.data : {
+			truncated: true,
+			preview: clipLogText(serialized, LOG_TEXT_LIMIT)
+		};
+	}
+	return entry;
+}
+function sanitizeLogEntries(value) {
+	if (!Array.isArray(value)) return [];
+	return value.slice(0, LOG_MESSAGE_ENTRY_LIMIT).map(sanitizeLogEntry).filter((entry) => entry !== undefined);
+}
+/** A ring buffer of the newest entries in extension storage. Only the background worker writes it. */
+function createLogStore(storage, maxEntries = MAX_STORED_LOG_ENTRIES) {
+	let pending = [];
+	let timer;
+	let chain = Promise.resolve();
+	const readStored = async () => {
+		const stored = (await storage.get(LOGS_STORAGE_KEY))[LOGS_STORAGE_KEY];
+		return Array.isArray(stored) ? stored : [];
+	};
+	const enqueue = (task) => {
+		const next = chain.then(task, task);
+		chain = next.catch(() => undefined);
+		return next;
+	};
+	const flush = () => {
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+		return enqueue(async () => {
+			const batch = pending;
+			pending = [];
+			if (batch.length === 0) return;
+			const next = [...await readStored(), ...batch].slice(-maxEntries);
+			await storage.set({ [LOGS_STORAGE_KEY]: next });
+		});
+	};
+	return {
+		append: (entries) => {
+			if (entries.length === 0) return;
+			pending.push(...entries);
+			timer ??= setTimeout(() => void flush().catch(() => undefined), LOG_STORE_FLUSH_MS);
+		},
+		read: async () => {
+			await flush().catch(() => undefined);
+			return enqueue(readStored);
+		},
+		clear: async () => {
+			if (timer !== undefined) clearTimeout(timer);
+			timer = undefined;
+			pending = [];
+			await enqueue(() => storage.remove(LOGS_STORAGE_KEY));
+		}
+	};
+}
+function requestUrl(input) {
+	if (typeof input === "string") return input;
+	if (input instanceof URL) return input.href;
+	return input.url;
+}
+/** "METHOD /path" with ID-like path segments collapsed and the GraphQL operation appended. */
+function requestEndpoint(input, init) {
+	const method = (init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET")).toUpperCase();
+	let path = requestUrl(input);
+	try {
+		path = new URL(path, "https://sellercentral.amazon.com").pathname;
+	} catch {
+		path = path.split("?")[0];
+	}
+	path = path.split("/").map((segment) => segment.length >= 6 && /\d/.test(segment) ? ":id" : segment).join("/");
+	const operation = typeof init?.body === "string" ? /"operationName":"([^"]+)"/.exec(init.body)?.[1] : undefined;
+	return `${method} ${path}${operation ? ` ${operation}` : ""}`;
+}
+/**
+* Wraps fetch to time each request by endpoint. Slow and failed requests are logged as they
+* happen; summary() reports counts, latency, and how much the requests overlapped.
+* Times run from sending the request to receiving the response headers.
+*/
+function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
+	const endpoints = new Map();
+	const statsFor = (key) => {
+		let stats = endpoints.get(key);
+		if (!stats) {
+			stats = {
+				n: 0,
+				failed: 0,
+				statuses: {},
+				totalMs: 0,
+				maxMs: 0,
+				firstStart: Number.POSITIVE_INFINITY,
+				lastEnd: 0,
+				inFlight: 0,
+				maxInFlight: 0,
+				loggedFailures: 0
+			};
+			endpoints.set(key, stats);
+		}
+		return stats;
+	};
+	const monitored = async (input, init) => {
+		const endpoint = requestEndpoint(input, init);
+		const stats = statsFor(endpoint);
+		const startedAt = logNow();
+		stats.n += 1;
+		stats.firstStart = Math.min(stats.firstStart, startedAt);
+		stats.inFlight += 1;
+		stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+		const finish = (status, failed) => {
+			const endedAt = logNow();
+			const elapsed = endedAt - startedAt;
+			stats.inFlight -= 1;
+			stats.totalMs += elapsed;
+			stats.maxMs = Math.max(stats.maxMs, elapsed);
+			stats.lastEnd = Math.max(stats.lastEnd, endedAt);
+			stats.statuses[status] = (stats.statuses[status] ?? 0) + 1;
+			const ms = Math.round(elapsed);
+			if (failed) {
+				stats.failed += 1;
+				if (stats.loggedFailures < REQUEST_FAILURE_LOG_LIMIT) {
+					stats.loggedFailures += 1;
+					logger?.warn("request.failed", {
+						endpoint,
+						status,
+						ms
+					});
+				}
+			} else if (elapsed >= slowMs) {
+				logger?.warn("request.slow", {
+					endpoint,
+					status,
+					ms
+				});
+			}
+			return ms;
+		};
+		try {
+			const response = await fetchImpl(input, init);
+			finish(String(response.status), !response.ok);
+			return response;
+		} catch (error) {
+			finish("network", true);
+			throw error;
+		}
+	};
+	return {
+		fetch: monitored,
+		summary: () => {
+			const summary = {};
+			for (const [endpoint, stats] of endpoints) {
+				const wallMs = Math.max(0, stats.lastEnd - stats.firstStart);
+				const statuses = Object.keys(stats.statuses).some((status) => status !== "200") ? stats.statuses : undefined;
+				summary[endpoint] = {
+					n: stats.n,
+					failed: stats.failed,
+					...statuses ? { statuses } : {},
+					avgMs: stats.n ? Math.round(stats.totalMs / stats.n) : 0,
+					maxMs: Math.round(stats.maxMs),
+					wallMs: Math.round(wallMs),
+					parallelism: wallMs > 0 ? Math.round(stats.totalMs / wallMs * 10) / 10 : 1,
+					maxInFlight: stats.maxInFlight
+				};
+			}
+			return summary;
+		}
+	};
+}
+
 const MODERN_SHELL_SELECTORS = [
 	"#sc-navtab-home",
 	"#sc-top-nav-root",
@@ -27,77 +331,34 @@ const LOGIN_FORM_SELECTORS = [
 function visible(element) {
 	return element instanceof HTMLElement && element.offsetParent !== null;
 }
-function shellSelectorHits(root = document) {
-	return {
-		modernHits: MODERN_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector))),
-		classicHits: CLASSIC_SHELL_SELECTORS.filter((selector) => visible(root.querySelector(selector)))
-	};
-}
 function hasAuthenticatedSellerUi(root = document) {
-	const { modernHits, classicHits } = shellSelectorHits(root);
-	if (modernHits.length > 0) return true;
-	return classicHits.length >= 2;
+	const isVisible = (selector) => visible(root.querySelector(selector));
+	if (MODERN_SHELL_SELECTORS.some(isVisible)) return true;
+	return CLASSIC_SHELL_SELECTORS.filter(isVisible).length >= 2;
 }
 function hasSellerCentralLoginForm(root = document) {
 	return LOGIN_FORM_SELECTORS.some((selector) => visible(root.querySelector(selector)));
 }
 function sellerCentralSessionStatus(pathname = location.pathname, root = document, readyState = typeof document !== "undefined" ? document.readyState : "loading") {
-	let result;
 	if (pathname.startsWith("/ap/") || pathname.startsWith("/account-switcher/")) {
-		result = {
+		return {
 			loggedInToStore: false,
 			settled: true
-		};
-	} else if (hasAuthenticatedSellerUi(root)) {
-		result = {
-			loggedInToStore: true,
-			settled: true
-		};
-	} else if (hasSellerCentralLoginForm(root)) {
-		result = {
-			loggedInToStore: false,
-			settled: true
-		};
-	} else if (readyState === "complete") {
-		// Fully loaded page with no store shell and no login form → logged out (avoid 15s probe wait).
-		result = {
-			loggedInToStore: false,
-			settled: true
-		};
-	} else {
-		result = {
-			loggedInToStore: false,
-			settled: false
 		};
 	}
-	// #region agent log
-	{
-		const hits = shellSelectorHits(root);
-		fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Debug-Session-Id": "f8f494"
-			},
-			body: JSON.stringify({
-				sessionId: "f8f494",
-				runId: "pre-fix",
-				hypothesisId: "A",
-				location: "sellerCentralSession.ts:sellerCentralSessionStatus",
-				message: "session status evaluated",
-				data: {
-					hostname: typeof location !== "undefined" ? location.hostname : "",
-					pathname,
-					...result,
-					modernHits: hits.modernHits,
-					classicHits: hits.classicHits
-				},
-				timestamp: Date.now()
-			})
-		}).catch(() => {});
-	}
-	// #endregion
-	return result;
+	if (hasAuthenticatedSellerUi(root)) return {
+		loggedInToStore: true,
+		settled: true
+	};
+	if (hasSellerCentralLoginForm(root)) return {
+		loggedInToStore: false,
+		settled: true
+	};
+	// A fully loaded page with no store shell and no login form is signed out; don't wait out the probe.
+	return {
+		loggedInToStore: false,
+		settled: readyState === "complete"
+	};
 }
 
 const STATUS_ID = "s4e-account-switch-status";
@@ -107,11 +368,41 @@ let inFlight = null;
 let leavingLogout = false;
 const RETRY_DELAY_MS = 5e3;
 const MAX_ATTEMPTS = 2;
+const STEP_TIMEOUT_MS = 9e4;
 const CAPTCHA_TEXT_SCAN_INTERVAL_MS = 3e3;
 let lastCaptchaTextScanAt = 0;
 let lastCaptchaTextScanResult = false;
+let runTimer;
+let waitingForLoad = false;
+let reportedWaitingPath = null;
+const automationLog = createLogger("automation");
+const EMAIL_INPUT_SELECTORS = [
+	"#ap_email",
+	"input[name=\"email\"]",
+	"input[type=\"email\"]",
+	"input[autocomplete=\"username\"]"
+];
+const PASSWORD_INPUT_SELECTORS = [
+	"#ap_password",
+	"input[name=\"password\"]",
+	"input[type=\"password\"]"
+];
+const OTP_INPUT_SELECTORS = [
+	"#auth-mfa-otpcode",
+	"input[name=\"otpCode\"]",
+	"input[autocomplete=\"one-time-code\"]",
+	"input[inputmode=\"numeric\"]"
+];
 async function send(message) {
 	return chrome.runtime.sendMessage(message);
+}
+/** Runs the workflow again after `delayMs`, replacing any run already scheduled so only one loop polls. */
+function scheduleRun(delayMs) {
+	if (runTimer !== undefined) window.clearTimeout(runTimer);
+	runTimer = window.setTimeout(() => {
+		runTimer = undefined;
+		void run();
+	}, delayMs);
 }
 function setWorkflowStatus(text, tone = "normal") {
 	let element = document.getElementById(STATUS_ID);
@@ -161,7 +452,13 @@ async function activate(jobId, element, action, missingMessage) {
 	if (!element) throw new Error(missingMessage);
 	if (!visible(element)) throw new Error(`${missingMessage} The control is not visible.`);
 	const rect = element.getBoundingClientRect();
-	if (!Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) {
+	const finite = [
+		rect.left,
+		rect.top,
+		rect.width,
+		rect.height
+	].every(Number.isFinite);
+	if (!finite || rect.width <= 0 || rect.height <= 0) {
 		throw new Error(`${missingMessage} The control has invalid click coordinates.`);
 	}
 	const response = await send({
@@ -180,7 +477,7 @@ function prepareStage(stage, failureMessage) {
 	}
 	const elapsed = Date.now() - inFlight.startedAt;
 	if (elapsed < RETRY_DELAY_MS) {
-		window.setTimeout(() => void run(), RETRY_DELAY_MS - elapsed);
+		scheduleRun(RETRY_DELAY_MS - elapsed);
 		return false;
 	}
 	if ((attempts.get(stage) ?? 0) >= MAX_ATTEMPTS) throw new Error(failureMessage);
@@ -193,7 +490,7 @@ function markStageSubmitted(stage) {
 		stage,
 		startedAt: Date.now()
 	};
-	window.setTimeout(() => void run(), RETRY_DELAY_MS);
+	scheduleRun(RETRY_DELAY_MS);
 }
 function hasCaptcha() {
 	if (document.querySelector("iframe[src*=\"captcha\" i], input[name*=\"captcha\" i], #captchacharacters")) {
@@ -226,10 +523,10 @@ async function requestSecret(jobId, kind) {
 		jobId,
 		kind
 	});
-	if (!response.ok) throw new Error(response.error);
+	if (!response.ok) throw new Error(response.error ?? "The saved account details are unavailable.");
 	if (response.waitMs) {
 		setWorkflowStatus("Waiting for a fresh verification code…");
-		window.setTimeout(() => void run(), response.waitMs);
+		scheduleRun(response.waitMs);
 		return null;
 	}
 	return response.value ?? null;
@@ -245,6 +542,19 @@ async function leaveLogout(jobId) {
 		throw new Error(left.error ?? "Could not leave Amazon’s logout page.");
 	}
 }
+/** Ends the switch with a visible error; the background worker logs the reason. */
+async function failWorkflow(jobId, error) {
+	const message = errorMessage(error, "Account switching failed.");
+	setWorkflowStatus(message, "error");
+	await send({
+		type: "ACCOUNT_AUTOMATION_ERROR",
+		jobId,
+		error: message
+	});
+}
+function onLogoutIntercept() {
+	return location.pathname.startsWith("/ap/") || location.pathname.includes("signin") || Boolean(input(EMAIL_INPUT_SELECTORS) || input(PASSWORD_INPUT_SELECTORS) || input(OTP_INPUT_SELECTORS));
+}
 async function run() {
 	const response = await send({ type: "ACCOUNT_AUTOMATION_GET_JOB" });
 	const job = response.job;
@@ -259,186 +569,98 @@ async function run() {
 					jobId: job.id
 				});
 			}
-			window.setTimeout(() => void run(), 1500);
+			scheduleRun(1500);
 			return;
 		}
 		if (hasAuthError()) {
-			setWorkflowStatus("Amazon rejected the login details. Review the page or edit the saved account.", "error");
-			await send({
-				type: "ACCOUNT_AUTOMATION_ERROR",
-				jobId: job.id
-			});
+			await failWorkflow(job.id, "Amazon rejected the login details. Review the page or edit the saved account.");
 			return;
 		}
 		// Never fill credentials on Amazon's logout re-auth (return_to=sign-out); wait for canonical sign-in navigation.
 		if (job.stage === "logout" || leavingLogout) {
-			if (Date.now() - documentStartedAt > 9e4) throw new Error("Amazon did not finish signing out. Cancel the switch and try again.");
+			if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) {
+				throw new Error("Amazon did not finish signing out. Cancel the switch and try again.");
+			}
 			setWorkflowStatus("Signing out of the current Seller Central account…");
-			const onLogoutIntercept = location.pathname.startsWith("/ap/") || location.pathname.includes("signin") || Boolean(input([
-				"#ap_email",
-				"input[name=\"email\"]",
-				"input[type=\"email\"]",
-				"input[autocomplete=\"username\"]"
-			])) || Boolean(input([
-				"#ap_password",
-				"input[name=\"password\"]",
-				"input[type=\"password\"]"
-			])) || Boolean(input([
-				"#auth-mfa-otpcode",
-				"input[name=\"otpCode\"]",
-				"input[autocomplete=\"one-time-code\"]",
-				"input[inputmode=\"numeric\"]"
-			]));
-			const leaveReason = !leavingLogout && onLogoutIntercept ? "intercept" : !leavingLogout && document.readyState === "complete" ? "ready-complete" : document.readyState !== "complete" ? "wait-load" : "poll";
-			// #region agent log
-			{
-				const hits = shellSelectorHits();
-				fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						"X-Debug-Session-Id": "f8f494"
-					},
-					body: JSON.stringify({
-						sessionId: "f8f494",
-						runId: "pre-fix",
-						hypothesisId: "C",
-						location: "accountAutomation.ts:logout-branch",
-						message: "logout stage tick",
-						data: {
-							stage: job.stage,
-							leavingLogout,
-							leaveReason,
-							pathname: location.pathname,
-							readyState: document.readyState,
-							onLogoutIntercept,
-							authenticatedUi: hasAuthenticatedSellerUi(),
-							modernHits: hits.modernHits,
-							classicHits: hits.classicHits
-						},
-						timestamp: Date.now()
-					})
-				}).catch(() => {});
-			}
-			// #endregion
-			if (!leavingLogout && onLogoutIntercept) {
+			if (!leavingLogout && (onLogoutIntercept() || document.readyState === "complete")) {
 				await leaveLogout(job.id);
-			} else if (!leavingLogout && document.readyState === "complete") {
-				await leaveLogout(job.id);
-			} else if (document.readyState !== "complete") {
-				window.addEventListener("load", () => void run(), { once: true });
+			} else if (document.readyState !== "complete" && !waitingForLoad) {
+				waitingForLoad = true;
+				window.addEventListener("load", () => scheduleRun(0), { once: true });
 			}
-			window.setTimeout(() => void run(), 1e3);
+			scheduleRun(1e3);
 			return;
 		}
-		const email = input([
-			"#ap_email",
-			"input[name=\"email\"]",
-			"input[type=\"email\"]",
-			"input[autocomplete=\"username\"]"
-		]);
+		const email = input(EMAIL_INPUT_SELECTORS);
 		if (email) {
 			if (!prepareStage("email", "Amazon’s Continue button did not advance the login.")) return;
 			setWorkflowStatus("Entering the saved account email…");
 			const value = await requestSecret(job.id, "email");
 			if (!value) return;
 			fill(email, value);
-			await activate(job.id, button(["#continue", "input[name=\"continue\"]"], /continue/iu), "continue", "Amazon’s Continue button was not found.");
+			const next = button(["#continue", "input[name=\"continue\"]"], /continue/iu);
+			await activate(job.id, next, "continue", "Amazon’s Continue button was not found.");
 			markStageSubmitted("email");
 			return;
 		}
-		const password = input([
-			"#ap_password",
-			"input[name=\"password\"]",
-			"input[type=\"password\"]"
-		]);
+		const password = input(PASSWORD_INPUT_SELECTORS);
 		if (password) {
 			if (!prepareStage("password", "Amazon’s password button did not advance the login.")) return;
 			setWorkflowStatus("Entering the saved password…");
 			const value = await requestSecret(job.id, "password");
 			if (!value) return;
 			fill(password, value);
-			await activate(job.id, button([
+			const submit = button([
 				"#signInSubmit",
 				"input[name=\"signIn\"]",
 				"button[type=\"submit\"]"
-			], /sign in|next|continue/iu), "password-submit", "Amazon’s password submit button was not found.");
+			], /sign in|next|continue/iu);
+			await activate(job.id, submit, "password-submit", "Amazon’s password submit button was not found.");
 			markStageSubmitted("password");
 			return;
 		}
-		const otp = input([
-			"#auth-mfa-otpcode",
-			"input[name=\"otpCode\"]",
-			"input[autocomplete=\"one-time-code\"]",
-			"input[inputmode=\"numeric\"]"
-		]);
+		const otp = input(OTP_INPUT_SELECTORS);
 		if (otp) {
 			if (!prepareStage("otp", "Amazon’s verification-code button did not advance the login.")) return;
 			setWorkflowStatus("Generating and entering a fresh verification code…");
 			const value = await requestSecret(job.id, "otp");
 			if (!value) return;
 			fill(otp, value);
-			await activate(job.id, button([
+			const submit = button([
 				"#auth-signin-button",
 				"input[type=\"submit\"]",
 				"button[type=\"submit\"]"
-			], /sign in|submit|continue/iu), "otp-submit", "Amazon’s verification-code submit button was not found.");
+			], /sign in|submit|continue/iu);
+			await activate(job.id, submit, "otp-submit", "Amazon’s verification-code submit button was not found.");
 			markStageSubmitted("otp");
 			return;
 		}
-		{
-			const ready = isReadyForStoreNavigation();
-			const allowed = shouldCompleteAuthenticatedSession(job.stage);
-			// #region agent log
-			{
-				const hits = shellSelectorHits();
-				fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						"X-Debug-Session-Id": "f8f494"
-					},
-					body: JSON.stringify({
-						sessionId: "f8f494",
-						runId: "pre-fix",
-						hypothesisId: "A",
-						location: "accountAutomation.ts:complete-gate",
-						message: "complete gate evaluated",
-						data: {
-							stage: job.stage,
-							pathname: location.pathname,
-							ready,
-							allowed,
-							willComplete: ready && allowed,
-							modernHits: hits.modernHits,
-							classicHits: hits.classicHits
-						},
-						timestamp: Date.now()
-					})
-				}).catch(() => {});
-			}
-			// #endregion
-			if (ready && allowed) {
-				setWorkflowStatus("Signed in. Opening the selected store…");
-				const completed = await send({
-					type: "ACCOUNT_AUTOMATION_COMPLETE",
-					jobId: job.id
-				});
-				if (!completed.ok) throw new Error(completed.error);
-				return;
-			}
+		if (isReadyForStoreNavigation() && shouldCompleteAuthenticatedSession(job.stage)) {
+			setWorkflowStatus("Signed in. Opening the selected store…");
+			const completed = await send({
+				type: "ACCOUNT_AUTOMATION_COMPLETE",
+				jobId: job.id
+			});
+			if (!completed.ok) throw new Error(completed.error ?? "Couldn’t open the selected store.");
+			return;
 		}
-		if (Date.now() - documentStartedAt > 9e4) throw new Error("Amazon’s login page did not match a supported step.");
+		if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) throw new Error("Amazon’s login page did not match a supported step.");
+		if (reportedWaitingPath !== location.pathname) {
+			// An unrecognized page is the first sign that Amazon changed its login flow.
+			reportedWaitingPath = location.pathname;
+			automationLog.withRun(job.id).info("automation.waiting", {
+				stage: job.stage,
+				path: location.pathname,
+				title: document.title
+			});
+		}
 		setWorkflowStatus("Waiting for Amazon’s next login step…");
-		window.setTimeout(() => void run(), 1e3);
+		scheduleRun(1e3);
 	} catch (error) {
-		setWorkflowStatus(error instanceof Error ? error.message : "Account switching failed.", "error");
-		await send({
-			type: "ACCOUNT_AUTOMATION_ERROR",
-			jobId: job.id
-		});
+		await failWorkflow(job.id, error);
 	}
 }
+if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground());
 void run();
 
 })();

@@ -1,6 +1,16 @@
 import * as React from "react"
 import type { LucideIcon } from "lucide-react"
-import { Building2, ChevronLeft, Clock, FileSpreadsheet, FolderOpen, Package, Settings, Truck } from "lucide-react"
+import {
+  Building2,
+  ChevronLeft,
+  CircleAlert,
+  Clock,
+  FileSpreadsheet,
+  FolderOpen,
+  Package,
+  Settings,
+  Truck,
+} from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -27,7 +37,10 @@ import {
   type ReportProgressState,
 } from "@/lib/reportProgress"
 import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"
+import { downloadGeneratedReport } from "@/lib/reportDownload"
+import type { GeneratedReport, ReportDownloadFormat } from "@/lib/reports"
 import { commandFilter } from "@/lib/searchScore"
+import { cn } from "@/lib/utils"
 import {
   DEFAULT_ENABLED_FEATURES,
   isFeatureEnabled,
@@ -37,7 +50,16 @@ import { extractShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds } from "@/lib/skuIds"
 import { ReportProgressPanel } from "@/ReportProgressPanel"
 
-export type PaletteMode = "commands" | "case-ids" | "shipment-ids" | "sku-ids" | "confirm-ids" | "accounts" | "unlock" | "report-login" | "generating-reports"
+export type PaletteMode =
+  | "commands"
+  | "case-ids"
+  | "shipment-ids"
+  | "sku-ids"
+  | "confirm-ids"
+  | "accounts"
+  | "unlock"
+  | "report-login"
+  | "generating-reports"
 type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids"
 
 const CONFIRM_THRESHOLD = 10
@@ -81,6 +103,17 @@ export interface AccountsStatus {
   currentStore?: AccountStoreSummary | null
 }
 
+/** What an account switch is doing, in the user's terms. */
+const SWITCH_STAGE_LABELS: Record<string, string> = {
+  logout: "Signing out of the current account…",
+  signin: "Opening Amazon sign-in…",
+  email: "Entering the account email…",
+  password: "Entering the password…",
+  otp: "Entering the verification code…",
+  paused: "Waiting for you to complete the CAPTCHA.",
+  authenticated: "Opening the store…",
+}
+
 const EMPTY_ACCOUNTS_STATUS: AccountsStatus = {
   initialized: false,
   unlocked: false,
@@ -99,7 +132,7 @@ export const commandGroups: ReadonlyArray<{
     heading: "Open",
     commands: [
       { id: "open-case-ids", label: "Open Case ID/s", icon: FolderOpen, keywords: ["case", "cases", "ticket", "support"] },
-      { id: "open-shipment-ids", label: "Open Shipment IDs", icon: Truck, keywords: ["shipment", "fba", "inbound", "transfer"] },
+      { id: "open-shipment-ids", label: "Open Shipment ID/s", icon: Truck, keywords: ["shipment", "shipments", "fba", "inbound", "transfer"] },
       { id: "search-skus", label: "Search SKU/s", icon: Package, keywords: ["sku", "skus", "asin", "msku", "listing", "product"] },
       { id: "time-out", label: "Time Out", icon: Clock, keywords: ["timeout", "time", "sheet", "form", "break"] },
     ],
@@ -113,6 +146,48 @@ export const commandGroups: ReadonlyArray<{
     commands: [{ id: "accounts", label: "Accounts", icon: Building2, keywords: ["account", "store", "stores", "switch", "login"] }],
   },
 ] as const
+
+function ReportDownloadButton({
+  children,
+  hidden,
+  onDownload,
+}: {
+  children: string
+  hidden: boolean
+  onDownload: () => void
+}) {
+  const lastDownloadAt = React.useRef(0)
+
+  const downloadOnce = () => {
+    const now = performance.now()
+    if (now - lastDownloadAt.current < 50) return
+    lastDownloadAt.current = now
+    onDownload()
+  }
+
+  return (
+    <Button
+      aria-hidden={hidden || undefined}
+      className={cn(
+        "px-3 active:not-aria-[haspopup]:translate-y-0",
+        hidden ? "invisible pointer-events-none" : "animate-download-in motion-reduce:animate-none!",
+      )}
+      disabled={hidden}
+      onClick={downloadOnce}
+      onPointerDown={(event) => {
+        if (event.button !== 0 || hidden) return
+        event.preventDefault()
+        downloadOnce()
+      }}
+      size="default"
+      tabIndex={hidden ? -1 : undefined}
+      type="button"
+      variant="default"
+    >
+      {children}
+    </Button>
+  )
+}
 
 export interface ReportsPrepareResult {
   loggedInToStore: boolean
@@ -137,7 +212,8 @@ export interface CommandPaletteProps {
   onGenerateReports?: (
     currentStoreName?: string,
     onProgress?: (event: ReportProgressEvent) => void,
-  ) => Promise<void> | void
+  ) => Promise<GeneratedReport | void> | GeneratedReport | void
+  onDownloadReport?: (report: GeneratedReport, format: ReportDownloadFormat) => void
   onOpenTimeOut?: () => Promise<void> | void
   onOpenChange: (open: boolean) => void
   enabledFeatures?: EnabledFeatures
@@ -159,6 +235,7 @@ export function CommandPalette({
   onManageAccounts = async () => undefined,
   onPrepareReports = async () => ({ loggedInToStore: true }),
   onGenerateReports = async () => undefined,
+  onDownloadReport = downloadGeneratedReport,
   onOpenTimeOut = async () => undefined,
   onOpenChange,
   enabledFeatures = DEFAULT_ENABLED_FEATURES,
@@ -175,6 +252,7 @@ export function CommandPalette({
   const [submitting, setSubmitting] = React.useState(false)
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
   const [reportProgress, setReportProgress] = React.useState<ReportProgressState>(INITIAL_REPORT_PROGRESS)
+  const [generatedReport, setGeneratedReport] = React.useState<GeneratedReport | null>(null)
   const [stores, setStores] = React.useState<AccountStoreSummary[]>([])
   const [activeSwitch, setActiveSwitch] = React.useState<ActiveSwitchSummary | undefined>()
   const [currentStore, setCurrentStore] = React.useState<AccountStoreSummary | null>(null)
@@ -184,6 +262,8 @@ export function CommandPalette({
   const [masterPassword, setMasterPassword] = React.useState("")
   const [fadeMask, setFadeMask] = React.useState<FadeMaskState>("none")
   const identifierInputRef = React.useRef<HTMLTextAreaElement>(null)
+  /** Bumped whenever a report run is abandoned, so its late results can't overwrite a newer run. */
+  const reportRunRef = React.useRef(0)
   const close = React.useCallback(() => onOpenChange(false), [onOpenChange])
 
   const inputModes = React.useMemo<Record<IdentifierMode, InputModeDefinition>>(() => ({
@@ -264,6 +344,7 @@ export function CommandPalette({
       if (initialMode === "report-login") setMode("report-login")
       return
     }
+    reportRunRef.current += 1
     setMode("commands")
     setCommandSearch("")
     setAccountSearch("")
@@ -273,6 +354,7 @@ export function CommandPalette({
     setSubmitting(false)
     setStatusMessage(null)
     setReportProgress(INITIAL_REPORT_PROGRESS)
+    setGeneratedReport(null)
     setSelectedStore(null)
     setMasterPassword("")
   }, [initialMode, open])
@@ -408,12 +490,16 @@ export function CommandPalette({
   }, [close, onManageAccounts])
 
   const generateReports = React.useCallback(async () => {
+    const run = ++reportRunRef.current
+    const isCurrentRun = () => run === reportRunRef.current
     setError(null)
+    setGeneratedReport(null)
     setReportProgress({ ...INITIAL_REPORT_PROGRESS, prepare: "active" })
     setMode("generating-reports")
     setSubmitting(true)
     try {
       const prepared = await onPrepareReports()
+      if (!isCurrentRun()) return
       if (!prepared.loggedInToStore) {
         setSubmitting(false)
         if (prepared.openedPromptOnSellerCentral) {
@@ -434,12 +520,18 @@ export function CommandPalette({
           shippingQueue: { status: "active" },
         },
       }))
-      await onGenerateReports(
+      const report = await onGenerateReports(
         accountsLoaded ? (currentStore?.name ?? "") : undefined,
-        (event) => setReportProgress((current) => applyReportProgressEvent(current, event)),
+        (event) => {
+          if (isCurrentRun()) setReportProgress((current) => applyReportProgressEvent(current, event))
+        },
       )
-      close()
+      if (!isCurrentRun()) return
+      if (report) setGeneratedReport(report)
+      setReportProgress((current) => ({ ...current, workbook: "complete" }))
+      setSubmitting(false)
     } catch (caught) {
+      if (!isCurrentRun()) return
       setError(caught instanceof Error ? caught.message : "Couldn’t generate the report. Please try again.")
       setSubmitting(false)
     }
@@ -497,14 +589,12 @@ export function CommandPalette({
   }, [onCancelAccountSwitch, onFocusAccountSwitch])
 
   const returnToCommands = React.useCallback(() => {
+    reportRunRef.current += 1
     setMode("commands")
     setError(null)
+    setGeneratedReport(null)
     setReportProgress(INITIAL_REPORT_PROGRESS)
   }, [])
-
-  const handleOpenChange = React.useCallback((nextOpen: boolean) => {
-    onOpenChange(nextOpen)
-  }, [onOpenChange])
 
   const handleEscapeKeyDown = React.useCallback((event: KeyboardEvent) => {
     event.preventDefault()
@@ -519,17 +609,34 @@ export function CommandPalette({
       return setMode("commands")
     }
     if (mode === "confirm-ids") return setMode(identifierMode)
-    if (mode === "report-login" || mode === "generating-reports") return setMode("commands")
+    if (mode === "generating-reports") return returnToCommands()
+    if (mode === "report-login") return setMode("commands")
     if (mode === "unlock") {
       if (masterPassword) return setMasterPassword("")
       return setMode("accounts")
     }
     if (accountSearch) return setAccountSearch("")
     setMode("commands")
-  }, [accountSearch, commandSearch, identifierInput, identifierMode, masterPassword, mode, onOpenChange, submitting])
+  }, [accountSearch, commandSearch, identifierInput, identifierMode, masterPassword, mode, onOpenChange, returnToCommands, submitting])
 
-  const title = mode === "commands" ? "Command Palette" : mode === "accounts" ? "Accounts" : mode === "unlock" ? "Unlock Accounts" : mode === "confirm-ids" ? "Confirm Bulk Open" : mode === "report-login" || mode === "generating-reports" ? "Generate Reports" : inputMode.title
-  const description = mode === "commands" ? "Search for a command to run." : mode === "accounts" ? "Search stores or manage account switching." : mode === "unlock" ? `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.` : mode === "report-login" ? "Sign in to a Seller Central store to generate reports." : mode === "generating-reports" ? "Generating the Seller Central report." : inputMode.description
+  const screens: Record<Exclude<PaletteMode, IdentifierMode>, { title: string; description: string }> = {
+    commands: { title: "Command Palette", description: "Search for a command to run." },
+    accounts: { title: "Accounts", description: "Search stores or manage account switching." },
+    unlock: {
+      title: "Unlock Accounts",
+      description: `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.`,
+    },
+    "confirm-ids": { title: "Confirm Bulk Open", description: `Open ${pendingIds.length} ${inputMode.noun} tabs.` },
+    "report-login": {
+      title: "Generate Reports",
+      description: "Sign in to a Seller Central store to generate reports.",
+    },
+    "generating-reports": {
+      title: "Generate Reports",
+      description: generatedReport ? "Choose Raw or Sheets." : "Generating the Seller Central report.",
+    },
+  }
+  const { title, description } = isIdentifierInputMode(mode) ? inputMode : screens[mode]
 
   const backButton = (label = "Back", action: () => void = returnToCommands) => (
     <div className="p-1 pb-0">
@@ -554,6 +661,7 @@ export function CommandPalette({
 
   const errorAlert = (id?: string) => error ? (
     <Alert className="mx-1 mb-1" id={id} variant="destructive">
+      <CircleAlert aria-hidden="true" />
       <AlertDescription>{error}</AlertDescription>
     </Alert>
   ) : null
@@ -566,12 +674,21 @@ export function CommandPalette({
         description={description}
         open={open}
         onEscapeKeyDown={handleEscapeKeyDown}
-        onOpenChange={handleOpenChange}
+        onOpenChange={onOpenChange}
         title={title}
       >
         {mode === "commands" ? <>
-          <CommandInput autoFocus aria-label="Search commands" disabled={submitting} onValueChange={(value) => { setCommandSearch(value); setError(null) }} placeholder="Type a command or store..." value={commandSearch} />
-          {submitting && statusMessage ? <p aria-live="polite" className="px-2 py-1.5 text-sm text-muted-foreground">{statusMessage}</p> : null}
+          <CommandInput
+            autoFocus
+            aria-label="Search commands"
+            disabled={submitting}
+            onValueChange={(value) => { setCommandSearch(value); setError(null) }}
+            placeholder="Type a command or store…"
+            value={commandSearch}
+          />
+          {submitting && statusMessage ? (
+            <p aria-live="polite" className="px-2 py-1.5 text-sm text-muted-foreground">{statusMessage}</p>
+          ) : null}
           <CommandList aria-label="Commands">
             {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || showSkuFallback || matchedStores.length > 0 ? null : (
               <CommandEmpty>No results found.</CommandEmpty>
@@ -671,10 +788,26 @@ export function CommandPalette({
           {activeSwitch ? (
             <Alert className="mx-1 my-1" role="status">
               <AlertTitle>Switching to {activeSwitch.storeName}</AlertTitle>
-              <AlertDescription>Stage: {activeSwitch.stage}</AlertDescription>
+              <AlertDescription>{SWITCH_STAGE_LABELS[activeSwitch.stage] ?? activeSwitch.stage}</AlertDescription>
               <div className="mt-2 flex gap-2">
-                <Button disabled={submitting} onClick={() => void handleSwitchAction("focus")} size="xs" type="button" variant="outline">Go to login</Button>
-                <Button disabled={submitting} onClick={() => void handleSwitchAction("cancel")} size="xs" type="button" variant="destructive">Cancel switch</Button>
+                <Button
+                  disabled={submitting}
+                  onClick={() => void handleSwitchAction("focus")}
+                  size="xs"
+                  type="button"
+                  variant="outline"
+                >
+                  Go to login
+                </Button>
+                <Button
+                  disabled={submitting}
+                  onClick={() => void handleSwitchAction("cancel")}
+                  size="xs"
+                  type="button"
+                  variant="destructive"
+                >
+                  Cancel switch
+                </Button>
               </div>
             </Alert>
           ) : null}
@@ -685,7 +818,14 @@ export function CommandPalette({
           >
             Current store: {currentStore?.name ?? "Unknown"}
           </p>
-          <CommandInput autoFocus aria-label="Search accounts" disabled={submitting} onValueChange={(value) => { setAccountSearch(value); setError(null) }} placeholder="Search stores..." value={accountSearch} />
+          <CommandInput
+            autoFocus
+            aria-label="Search accounts"
+            disabled={submitting}
+            onValueChange={(value) => { setAccountSearch(value); setError(null) }}
+            placeholder="Search stores…"
+            value={accountSearch}
+          />
           <CommandList aria-label="Accounts">
             <CommandEmpty>No matching stores.</CommandEmpty>
             <CommandGroup heading="Stores">
@@ -701,7 +841,9 @@ export function CommandPalette({
                   <span className="min-w-0 flex-1 truncate">{store.name}</span>
                 </CommandItem>
               ))}
-              {stores.length === 0 ? <div className="py-6 text-center text-sm text-muted-foreground">No stores configured.</div> : null}
+              {stores.length === 0 ? (
+                <div className="py-6 text-center text-sm text-muted-foreground">No stores configured.</div>
+              ) : null}
             </CommandGroup>
             <CommandSeparator />
             <CommandGroup heading="Configuration">
@@ -755,8 +897,22 @@ export function CommandPalette({
           </div>
           {errorAlert()}
         </> : mode === "generating-reports" ? <>
-          {error ? backButton() : null}
+          {submitting ? null : backButton()}
           <ReportProgressPanel failed={Boolean(error)} progress={reportProgress} submitting={submitting} />
+          <div className="flex justify-center gap-2 px-2 pb-2">
+            <ReportDownloadButton
+              hidden={!generatedReport || Boolean(error)}
+              onDownload={() => { if (generatedReport) onDownloadReport(generatedReport, "raw") }}
+            >
+              Raw
+            </ReportDownloadButton>
+            <ReportDownloadButton
+              hidden={!generatedReport || Boolean(error)}
+              onDownload={() => { if (generatedReport) onDownloadReport(generatedReport, "sheets") }}
+            >
+              Sheets
+            </ReportDownloadButton>
+          </div>
           {errorAlert()}
         </> : mode === "report-login" ? <>
           {backButton()}

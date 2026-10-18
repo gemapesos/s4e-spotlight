@@ -73,6 +73,21 @@ describe("Generate Reports Seller Central preflight", () => {
     expect(create).not.toHaveBeenCalled()
   })
 
+  it("tags each source request with the run started by prepare", async () => {
+    query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockResolvedValue({ id: 22, status: "complete", url: "https://sellercentral.amazon.com/home" } as chrome.tabs.Tab)
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await prepareReports(sender)
+    sendMessage.mockResolvedValue({ ok: true, listings: [] })
+    await fetchStrandedReport(sender)
+
+    expect(sendMessage).toHaveBeenCalledWith(22, {
+      type: "REPORTS_FETCH_STRANDED",
+      runId: expect.stringMatching(/^report-/),
+    })
+  })
+
   it("opens Seller Central when no matching tab exists", async () => {
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
@@ -173,9 +188,9 @@ describe("Generate Reports unfulfillable fetch", () => {
     sendMessage.mockResolvedValue({ ok: true, listings })
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
-    await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings })
+    await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings, nextRemovalOrderId: null })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_UNFULFILLABLE" }))
   })
 
   it("waits for the Seller Central tab to finish loading before fetching", async () => {
@@ -187,9 +202,9 @@ describe("Generate Reports unfulfillable fetch", () => {
     sendMessage.mockResolvedValue({ ok: true, listings: [] })
     const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
 
-    await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings: [] })
+    await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings: [], nextRemovalOrderId: null })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_UNFULFILLABLE" })
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_UNFULFILLABLE" }))
   })
 })
 
@@ -236,7 +251,7 @@ describe("Generate Reports feedback fetch", () => {
 
     await expect(fetchFeedbackReport(sender)).resolves.toEqual({ ok: true, feedbacks })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_FEEDBACK" })
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_FEEDBACK" }))
   })
 })
 
@@ -283,7 +298,7 @@ describe("Generate Reports stranded fetch", () => {
 
     await expect(fetchStrandedReport(sender)).resolves.toEqual({ ok: true, listings })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_STRANDED" })
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_STRANDED" }))
   })
 })
 
@@ -330,7 +345,7 @@ describe("Generate Reports suppressed fetch", () => {
 
     await expect(fetchSuppressedReport(sender)).resolves.toEqual({ ok: true, listings })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_SUPPRESSED" })
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_SUPPRESSED" }))
   })
 })
 
@@ -377,7 +392,7 @@ describe("Generate Reports shipping queue fetch", () => {
 
     await expect(fetchShippingQueueReport(sender)).resolves.toEqual({ ok: true, shipments })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_SHIPPING_QUEUE" }))
   })
 })
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { downloadGeneratedReport } from "../src/lib/reportDownload"
 import {
   focusCurrentStore,
   generateReports,
@@ -256,25 +257,30 @@ describe("content-script mount", () => {
     })
 
     try {
-      await generateReports(new Date(2026, 7, 14))
+      const report = await generateReports(new Date(2026, 7, 14))
       expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+      expect(clicked.download).toBeUndefined()
+      expect(createObjectURL).not.toHaveBeenCalled()
+      downloadGeneratedReport(report, "raw")
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
-      expect(createObjectURL).toHaveBeenCalledOnce()
+      downloadGeneratedReport(report, "sheets")
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026 - Sheets.xlsx")
 
       sendMessage.mockClear()
-      await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors")
+      clicked.download = undefined
+      await generateReports(new Date(2026, 7, 14), "JMG Outdoors")
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
       expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
-      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
+      expect(clicked.download).toBeUndefined()
     } finally {
       click.mockRestore()
     }
@@ -292,7 +298,7 @@ describe("content-script mount", () => {
     const onProgress = vi.fn()
 
     try {
-      const pending = generateReports(new Date(2026, 7, 14), document, "JMG Outdoors", onProgress)
+      const pending = generateReports(new Date(2026, 7, 14), "JMG Outdoors", onProgress)
       await vi.waitFor(() => {
         expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
         expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
@@ -326,7 +332,7 @@ describe("content-script mount", () => {
     }
   })
 
-  it("still downloads the report when an individual source fails", async () => {
+  it("still returns a report when an individual source fails", async () => {
     const sendMessage = vi.fn(async (message: { type?: string }) => {
       if (message.type === "REPORTS_FETCH_UNFULFILLABLE") {
         return { ok: false, error: "Couldn’t load unfulfillable inventory." }
@@ -357,19 +363,26 @@ describe("content-script mount", () => {
     const onProgress = vi.fn()
 
     try {
-      await generateReports(new Date(2026, 7, 14), document, "JMG Outdoors", onProgress)
+      const report = await generateReports(new Date(2026, 7, 14), "JMG Outdoors", onProgress)
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "error" })
+      expect(onProgress).toHaveBeenCalledWith({
+        source: "unfulfillable",
+        status: "error",
+        error: "Couldn’t load unfulfillable inventory.",
+      })
       expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete" })
       expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete" })
+      expect(clicked.download).toBeUndefined()
+      downloadGeneratedReport(report, "raw")
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")
-      expect(createObjectURL).toHaveBeenCalledOnce()
+      downloadGeneratedReport(report, "sheets")
+      expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026 - Sheets.xlsx")
     } finally {
       click.mockRestore()
     }
@@ -404,13 +417,17 @@ describe("content-script mount", () => {
     })
 
     try {
-      await generateReports(new Date(2026, 7, 14))
+      const report = await generateReports(new Date(2026, 7, 14))
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
       expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+      expect(clicked.download).toBeUndefined()
+      downloadGeneratedReport(report, "raw")
       expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")
+      downloadGeneratedReport(report, "sheets")
+      expect(clicked.download).toBe("Unknown - 14-Aug-2026 - Sheets.xlsx")
     } finally {
       click.mockRestore()
     }

@@ -22,6 +22,20 @@ import {
   type StoreRecord,
 } from "./lib/accounts.js"
 import {
+  createLogger,
+  createLogRunId,
+  createLogStore,
+  describeError,
+  errorMessage,
+  LOG_ENTRIES_MESSAGE,
+  LOGS_CLEAR_MESSAGE,
+  LOGS_GET_MESSAGE,
+  sanitizeLogEntries,
+  setLogSink,
+  type LogData,
+  type LogStore,
+} from "./lib/log.js"
+import {
   DEFAULT_TIME_OUT_FORM_VALUES,
   loadSettings,
   TIME_OUT_FORM_BASE_URL,
@@ -33,9 +47,17 @@ const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?r
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/"
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm="
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
+const OPENID_SPEC = "http://specs.openid.net/auth/2.0"
 export const TIME_OUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1E7gfUVzy47vboZHOJ6xd8Jwx-1N6oewaVggrtI7G4yw/edit?gid=0#gid=0"
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx"
-export const SIGN_IN_URL = "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_sw_signup_us&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
+export const SIGN_IN_URL = `https://sellercentral.amazon.com/ap/signin?${new URLSearchParams({
+  "openid.return_to": "https://sellercentral.amazon.com/",
+  "openid.identity": `${OPENID_SPEC}/identifier_select`,
+  "openid.assoc_handle": "amzn_sw_signup_us",
+  "openid.mode": "checkid_setup",
+  "openid.claimed_id": `${OPENID_SPEC}/identifier_select`,
+  "openid.ns": OPENID_SPEC,
+})}`
 export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/"
 export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*"
 
@@ -47,9 +69,13 @@ type RemoveTabs = (tabIds: number[]) => Promise<void>
 type OpenTabs = (ids: unknown, senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
 type OpenTimeOut = (senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
 type LoadTimeOutFormValues = () => Promise<TimeOutFormValues>
+type SenderTab = chrome.tabs.Tab & { id: number; windowId: number }
 
 const MAX_BULK_IDS = 50
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
+const log = createLogger("background")
+const createChromeTab: CreateTab = (properties) => chrome.tabs.create(properties)
+const removeChromeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)
 
 export class TabBatchError extends Error {
   constructor(
@@ -62,18 +88,20 @@ export class TabBatchError extends Error {
   }
 }
 
+function uniqueStrings(value: unknown, normalize: (id: string) => string, isValid: (id: string) => boolean): string[] {
+  if (!Array.isArray(value)) return []
+  const ids = value.filter((id): id is string => typeof id === "string").map(normalize).filter(isValid)
+  return [...new Set(ids)]
+}
+
 export function normalizeCaseIds(value: unknown): string[] {
-  return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && /^\d{11}$/u.test(id)))] : []
+  return uniqueStrings(value, (id) => id, (id) => /^\d{11}$/u.test(id))
 }
 export function normalizeShipmentIds(value: unknown): string[] {
-  return Array.isArray(value)
-    ? [...new Set(value.filter((id): id is string => typeof id === "string").map((id) => id.toUpperCase()).filter((id) => /^FBA[A-Z0-9]{9}$/u.test(id)))]
-    : []
+  return uniqueStrings(value, (id) => id.toUpperCase(), (id) => /^FBA[A-Z0-9]{9}$/u.test(id))
 }
 export function normalizeSkuIds(value: unknown): string[] {
-  return Array.isArray(value)
-    ? [...new Set(value.filter((id): id is string => typeof id === "string").map((id) => id.trim()).filter((id) => id.length > 0 && id.length <= 40))]
-    : []
+  return uniqueStrings(value, (id) => id.trim(), (id) => id.length > 0 && id.length <= 40)
 }
 export function buildCaseUrl(id: string): string { return `${CASE_URL}${id}` }
 export function buildShipmentUrl(id: string): string { return `${SHIPMENT_URL}${id}/contents` }
@@ -111,16 +139,21 @@ async function rollbackCreatedTabs(
 }
 
 function tabBatchError(cause: unknown, openedIds: string[], rolledBackIds: string[]): TabBatchError {
-  const reason = cause instanceof Error ? cause.message : "Chrome could not create a tab."
+  const reason = errorMessage(cause, "Chrome could not create a tab.")
   const suffix = openedIds.length
     ? ` ${openedIds.length} tab(s) could not be closed: ${openedIds.join(", ")}.`
     : " Any tabs opened by this attempt were closed."
   return new TabBatchError(`${reason}${suffix}`, openedIds, rolledBackIds)
 }
 
+function requireSenderTab(senderTab: chrome.tabs.Tab | undefined): SenderTab {
+  if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.")
+  return senderTab as SenderTab
+}
+
 async function createTabsInParallel(
   targets: ReadonlyArray<{ id: string; active: boolean; url: string }>,
-  senderTab: chrome.tabs.Tab & { id: number; windowId: number },
+  senderTab: SenderTab,
   createTab: CreateTab,
   removeTabs: RemoveTabs,
 ): Promise<{ openedCount: number }> {
@@ -152,47 +185,35 @@ async function createTabsInParallel(
   return { openedCount: created.length }
 }
 
-async function createBackgroundTabs(
-  ids: string[],
-  senderTab: chrome.tabs.Tab | undefined,
-  buildUrl: (id: string) => string,
-  createTab: CreateTab,
-  removeTabs: RemoveTabs,
-): Promise<{ openedCount: number }> {
-  if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.")
-  if (ids.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
+/** Opens one background tab per normalized ID, or rejects without leaving a partial batch open. */
+function idTabOpener(normalize: (ids: unknown) => string[], buildUrl: (id: string) => string, noun: string) {
+  return async (
+    ids: unknown,
+    senderTab: chrome.tabs.Tab | undefined,
+    createTab: CreateTab = createChromeTab,
+    removeTabs: RemoveTabs = removeChromeTabs,
+  ): Promise<{ openedCount: number }> => {
+    const normalized = normalize(ids)
+    if (!normalized.length) throw new Error(`No valid ${noun} were provided.`)
+    const sender = requireSenderTab(senderTab)
+    if (normalized.length > MAX_BULK_IDS) throw new Error(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
+    const targets = normalized.map((id) => ({ id, active: normalized.length === 1, url: buildUrl(id) }))
+    return createTabsInParallel(targets, sender, createTab, removeTabs)
+  }
+}
 
-  return createTabsInParallel(
-    ids.map((id) => ({ id, active: ids.length === 1, url: buildUrl(id) })),
-    senderTab as chrome.tabs.Tab & { id: number; windowId: number },
-    createTab,
-    removeTabs,
-  )
-}
-export async function openCaseTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
-  const normalized = normalizeCaseIds(ids)
-  if (!normalized.length) throw new Error("No valid Case IDs were provided.")
-  return createBackgroundTabs(normalized, senderTab, buildCaseUrl, createTab, removeTabs)
-}
-export async function openShipmentTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
-  const normalized = normalizeShipmentIds(ids)
-  if (!normalized.length) throw new Error("No valid Shipment IDs were provided.")
-  return createBackgroundTabs(normalized, senderTab, buildShipmentUrl, createTab, removeTabs)
-}
-export async function openSkuTabs(ids: unknown, senderTab: chrome.tabs.Tab | undefined, createTab: CreateTab = (properties) => chrome.tabs.create(properties), removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)): Promise<{ openedCount: number }> {
-  const normalized = normalizeSkuIds(ids)
-  if (!normalized.length) throw new Error("No valid SKUs were provided.")
-  return createBackgroundTabs(normalized, senderTab, buildSkuUrl, createTab, removeTabs)
-}
+export const openCaseTabs = idTabOpener(normalizeCaseIds, buildCaseUrl, "Case IDs")
+export const openShipmentTabs = idTabOpener(normalizeShipmentIds, buildShipmentUrl, "Shipment IDs")
+export const openSkuTabs = idTabOpener(normalizeSkuIds, buildSkuUrl, "SKUs")
 
 export async function openTimeOutTabs(
   senderTab: chrome.tabs.Tab | undefined,
-  createTab: CreateTab = (properties) => chrome.tabs.create(properties),
-  removeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds),
+  createTab: CreateTab = createChromeTab,
+  removeTabs: RemoveTabs = removeChromeTabs,
   date = new Date(),
   loadFormValues: LoadTimeOutFormValues = async () => (await loadSettings()).timeOutForm,
 ): Promise<{ openedCount: number }> {
-  if (senderTab?.id === undefined || senderTab.windowId === undefined) throw new Error("The originating tab is unavailable.")
+  const sender = requireSenderTab(senderTab)
   const values = await loadFormValues()
 
   return createTabsInParallel(
@@ -200,37 +221,57 @@ export async function openTimeOutTabs(
       { id: "Google Sheet", active: false, url: TIME_OUT_SHEET_URL },
       { id: "Google Form", active: true, url: buildTimeOutFormUrl(date, values) },
     ],
-    senderTab as chrome.tabs.Tab & { id: number; windowId: number },
+    sender,
     createTab,
     removeTabs,
   )
 }
 
-export function createOpenIdsMessageListener(openCases: OpenTabs = openCaseTabs, openShipments: OpenTabs = openShipmentTabs, openSkus: OpenTabs = openSkuTabs, openTimeOut: OpenTimeOut = openTimeOutTabs) {
-  return (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: OpenIdsResponse) => void): boolean | undefined => {
+function openTabsFailure(error: unknown, fallback: string): OpenIdsResponse {
+  return {
+    ok: false,
+    error: errorMessage(error, fallback),
+    ...(error instanceof TabBatchError ? { openedIds: error.openedIds, rolledBackIds: error.rolledBackIds } : {}),
+  }
+}
+
+export function createOpenIdsMessageListener(
+  openCases: OpenTabs = openCaseTabs,
+  openShipments: OpenTabs = openShipmentTabs,
+  openSkus: OpenTabs = openSkuTabs,
+  openTimeOut: OpenTimeOut = openTimeOutTabs,
+) {
+  const openers: Record<string, { kind: string; idsKey: string; open: OpenTabs }> = {
+    OPEN_CASE_IDS: { kind: "case", idsKey: "caseIds", open: openCases },
+    OPEN_SHIPMENT_IDS: { kind: "shipment", idsKey: "shipmentIds", open: openShipments },
+    OPEN_SKU_IDS: { kind: "sku", idsKey: "skuIds", open: openSkus },
+  }
+  return (
+    message: unknown,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: OpenIdsResponse) => void,
+  ): boolean | undefined => {
     if (!message || typeof message !== "object" || !("type" in message)) return undefined
     const record = message as Record<string, unknown>
-    if (record.type === "OPEN_TIME_OUT") {
-      void openTimeOut(sender.tab).then(
-        (result) => sendResponse({ ok: true, openedCount: result.openedCount }),
-        (error: unknown) => sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : "Couldn’t open Time Out.",
-          ...(error instanceof TabBatchError ? { openedIds: error.openedIds, rolledBackIds: error.rolledBackIds } : {}),
-        }),
-      )
-      return true
-    }
-    const handler = record.type === "OPEN_CASE_IDS" ? openCases : record.type === "OPEN_SHIPMENT_IDS" ? openShipments : record.type === "OPEN_SKU_IDS" ? openSkus : null
-    if (!handler) return undefined
-    const ids = record.type === "OPEN_CASE_IDS" ? record.caseIds : record.type === "OPEN_SHIPMENT_IDS" ? record.shipmentIds : record.skuIds
-    void handler(ids, sender.tab).then(
-      (result) => sendResponse({ ok: true, openedCount: result?.openedCount ?? 0 }),
-      (error: unknown) => sendResponse({
-        ok: false,
-        error: error instanceof Error ? error.message : "Couldn’t open tabs.",
-        ...(error instanceof TabBatchError ? { openedIds: error.openedIds, rolledBackIds: error.rolledBackIds } : {}),
-      }),
+    const type = String(record.type)
+    const opener = Object.hasOwn(openers, type) ? openers[type] : undefined
+    if (type !== "OPEN_TIME_OUT" && !opener) return undefined
+
+    const kind = opener?.kind ?? "timeOut"
+    const done = log.time("tabs.open", { kind })
+    const request = opener ? opener.open(record[opener.idsKey], sender.tab) : openTimeOut(sender.tab)
+    void request.then(
+      (result) => {
+        done({ count: result?.openedCount ?? 0 })
+        sendResponse({ ok: true, openedCount: result?.openedCount ?? 0 })
+      },
+      (error: unknown) => {
+        const rollback = error instanceof TabBatchError
+          ? { stillOpen: error.openedIds.length, closed: error.rolledBackIds.length }
+          : {}
+        done({ error: describeError(error), ...rollback }, "error")
+        sendResponse(openTabsFailure(error, opener ? "Couldn’t open tabs." : "Couldn’t open Time Out."))
+      },
     )
     return true
   }
@@ -240,6 +281,8 @@ interface ActiveJob {
   id: string
   tabId: number
   storeId: string
+  /** For logs only; the vault stays the source of truth. */
+  storeName?: string
   stage: "logout" | "signin" | "email" | "password" | "otp" | "authenticated" | "paused"
   startedAt: number
   /** True when this job created the tab; cancel/failure must not close reused SC tabs. */
@@ -288,7 +331,8 @@ async function getUnlockedVault(): Promise<{ vault: AccountVault; envelope: Encr
 }
 async function saveVault(vault: AccountVault, envelope: EncryptedVault, key: Uint8Array): Promise<void> {
   validateVault(vault)
-  const nextEnvelope = await encryptVaultWithKey(vault, key, Uint8Array.from(atob(envelope.salt), (c) => c.charCodeAt(0)), envelope.iterations)
+  const salt = Uint8Array.from(atob(envelope.salt), (c) => c.charCodeAt(0))
+  const nextEnvelope = await encryptVaultWithKey(vault, key, salt, envelope.iterations)
   await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: nextEnvelope, [STORE_INDEX_KEY]: publicStoreIndex(vault) })
   await pruneCurrentStore(vault.stores.map(({ id }) => id))
 }
@@ -315,41 +359,12 @@ function currentStoreFromIndex(stores: StoreIndexRecord[], storeId?: string): St
 
 export function pickSellerCentralTab(tabs: readonly chrome.tabs.Tab[], preferredWindowId?: number): chrome.tabs.Tab | undefined {
   const withId = tabs.filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined)
-  if (withId.length === 0) return undefined
-  const picked = [...withId].sort((a, b) => {
+  return [...withId].sort((a, b) => {
     const aPreferred = a.windowId === preferredWindowId ? 1 : 0
     const bPreferred = b.windowId === preferredWindowId ? 1 : 0
     if (aPreferred !== bPreferred) return bPreferred - aPreferred
     return (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)
   })[0]
-  // #region agent log
-  fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-    body: JSON.stringify({
-      sessionId: "f8f494",
-      runId: "pre-fix",
-      hypothesisId: "B",
-      location: "background.ts:pickSellerCentralTab",
-      message: "picked Seller Central tab",
-      data: {
-        preferredWindowId: preferredWindowId ?? null,
-        candidateCount: withId.length,
-        candidates: withId.map((tab) => ({
-          id: tab.id,
-          windowId: tab.windowId,
-          lastAccessed: tab.lastAccessed ?? null,
-          url: typeof tab.url === "string" ? tab.url.slice(0, 120) : null,
-          active: tab.active,
-        })),
-        pickedId: picked?.id ?? null,
-        pickedUrl: typeof picked?.url === "string" ? picked.url.slice(0, 120) : null,
-      },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {})
-  // #endregion
-  return picked
 }
 
 const TAB_LOAD_TIMEOUT_MS = 30_000
@@ -442,28 +457,122 @@ export async function waitForTabCompleteMatching(
   })
 }
 
-async function sendUnfulfillableFetch(tabId: number): Promise<{ ok: true; listings: unknown[] }> {
-  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
+interface ReportRun {
+  id: string
+  paletteTabId?: number
+  sellerCentralTabId: number
+}
+
+/** The report run started by the latest successful prepare; used to tag logs from every context. */
+let activeReportRun: ReportRun | undefined
+
+function reportRunForPaletteTab(tabId?: number): string | undefined {
+  return activeReportRun && activeReportRun.paletteTabId === tabId ? activeReportRun.id : undefined
+}
+
+function reportRunForTab(tabId?: number): string | undefined {
+  if (!activeReportRun || tabId === undefined) return undefined
+  return tabId === activeReportRun.paletteTabId || tabId === activeReportRun.sellerCentralTabId
+    ? activeReportRun.id
+    : undefined
+}
+
+type ReportFetchType =
+  | "REPORTS_FETCH_UNFULFILLABLE"
+  | "REPORTS_FETCH_FEEDBACK"
+  | "REPORTS_FETCH_STRANDED"
+  | "REPORTS_FETCH_SUPPRESSED"
+  | "REPORTS_FETCH_SHIPPING_QUEUE"
+
+interface ReportRequest {
+  source: string
+  fallbackError: string
+  /** The fields the palette needs from the content script's response. */
+  pick: (response: Record<string, unknown>) => Record<string, unknown>
+}
+
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
+
+const REPORT_REQUESTS: Record<ReportFetchType, ReportRequest> = {
+  REPORTS_FETCH_UNFULFILLABLE: {
+    source: "unfulfillable",
+    fallbackError: "Couldn’t load unfulfillable inventory.",
+    pick: ({ listings, nextRemovalOrderId }) => ({
+      listings: asArray(listings),
+      nextRemovalOrderId: typeof nextRemovalOrderId === "string" && nextRemovalOrderId ? nextRemovalOrderId : null,
+    }),
+  },
+  REPORTS_FETCH_FEEDBACK: {
+    source: "feedback",
+    fallbackError: "Couldn’t load seller feedback.",
+    pick: ({ feedbacks }) => ({ feedbacks: asArray(feedbacks) }),
+  },
+  REPORTS_FETCH_STRANDED: {
+    source: "stranded",
+    fallbackError: "Couldn’t load stranded inventory.",
+    pick: ({ listings }) => ({ listings: asArray(listings) }),
+  },
+  REPORTS_FETCH_SUPPRESSED: {
+    source: "suppressed",
+    fallbackError: "Couldn’t load search-suppressed inventory.",
+    pick: ({ listings }) => ({ listings: asArray(listings) }),
+  },
+  REPORTS_FETCH_SHIPPING_QUEUE: {
+    source: "shippingQueue",
+    fallbackError: "Couldn’t load shipping queue.",
+    pick: ({ shipments }) => ({ shipments: asArray(shipments) }),
+  },
+}
+
+function isReportFetchType(type: string): type is ReportFetchType {
+  return Object.hasOwn(REPORT_REQUESTS, type)
+}
+
+const CONTENT_SCRIPT_MISSING = /Receiving end does not exist/i
+
+/** Asks the Seller Central tab's content script for one report source, waiting for the script to load. */
+async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: string): Promise<Record<string, unknown>> {
+  const request = REPORT_REQUESTS[type]
+  const startedAt = Date.now()
+  const deadline = startedAt + SESSION_PROBE_TIMEOUT_MS
   let lastError: string | undefined
+  let attempts = 0
   while (Date.now() < deadline) {
+    attempts += 1
     try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_UNFULFILLABLE" }) as {
-        ok?: boolean
-        listings?: unknown
-        error?: string
+      const response = await chrome.tabs.sendMessage(tabId, runId ? { type, runId } : { type }) as
+        Record<string, unknown> | undefined
+      if (attempts > 1) {
+        log.withRun(runId).info("report.contentScriptWait", { source: request.source, attempts, ms: Date.now() - startedAt })
       }
-      if (response?.ok) {
-        return { ok: true, listings: Array.isArray(response.listings) ? response.listings : [] }
-      }
-      throw new Error(response?.error ?? "Couldn’t load unfulfillable inventory.")
+      if (response?.ok) return { ok: true, ...request.pick(response) }
+      throw new Error(typeof response?.error === "string" ? response.error : request.fallbackError)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message)
+      const message = errorMessage(error, String(error))
+      if (!CONTENT_SCRIPT_MISSING.test(message)) throw error instanceof Error ? error : new Error(message)
       lastError = message
     }
     await sleep(SESSION_PROBE_INTERVAL_MS)
   }
-  throw new Error(lastError ?? "Couldn’t load unfulfillable inventory.")
+  throw new Error(lastError ?? request.fallbackError)
+}
+
+async function fetchReportSource(type: ReportFetchType, senderTab?: chrome.tabs.Tab): Promise<Record<string, unknown>> {
+  rememberReportProgressTab(senderTab?.id)
+  const runId = reportRunForPaletteTab(senderTab?.id)
+  const source = REPORT_REQUESTS[type].source
+  const done = log.withRun(runId).time("report.source", { source })
+  try {
+    const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
+    await waitForTabComplete(tabId)
+    const result = await sendReportFetch(tabId, type, runId)
+    const items = Object.values(result).find(Array.isArray)
+    done({ count: items?.length ?? 0 })
+    return result
+  } catch (error) {
+    done({ error: describeError(error) }, "error")
+    throw error
+  }
 }
 
 export function rememberReportProgressTab(tabId?: number): void {
@@ -480,139 +589,22 @@ export async function relayReportProgress(message: unknown): Promise<{ ok: true 
   return { ok: true }
 }
 
-export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
-  rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
-  await waitForTabComplete(tabId)
-  return sendUnfulfillableFetch(tabId)
-}
+type UnfulfillableReport = { ok: true; listings: unknown[]; nextRemovalOrderId: string | null }
 
-async function sendFeedbackFetch(tabId: number): Promise<{ ok: true; feedbacks: unknown[] }> {
-  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
-  let lastError: string | undefined
-  while (Date.now() < deadline) {
-    try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_FEEDBACK" }) as {
-        ok?: boolean
-        feedbacks?: unknown
-        error?: string
-      }
-      if (response?.ok) {
-        return { ok: true, feedbacks: Array.isArray(response.feedbacks) ? response.feedbacks : [] }
-      }
-      throw new Error(response?.error ?? "Couldn’t load seller feedback.")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message)
-      lastError = message
-    }
-    await sleep(SESSION_PROBE_INTERVAL_MS)
-  }
-  throw new Error(lastError ?? "Couldn’t load seller feedback.")
+export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<UnfulfillableReport> {
+  return await fetchReportSource("REPORTS_FETCH_UNFULFILLABLE", senderTab) as UnfulfillableReport
 }
-
 export async function fetchFeedbackReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; feedbacks: unknown[] }> {
-  rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
-  await waitForTabComplete(tabId)
-  return sendFeedbackFetch(tabId)
+  return await fetchReportSource("REPORTS_FETCH_FEEDBACK", senderTab) as { ok: true; feedbacks: unknown[] }
 }
-
-async function sendStrandedFetch(tabId: number): Promise<{ ok: true; listings: unknown[] }> {
-  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
-  let lastError: string | undefined
-  while (Date.now() < deadline) {
-    try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_STRANDED" }) as {
-        ok?: boolean
-        listings?: unknown
-        error?: string
-      }
-      if (response?.ok) {
-        return { ok: true, listings: Array.isArray(response.listings) ? response.listings : [] }
-      }
-      throw new Error(response?.error ?? "Couldn’t load stranded inventory.")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message)
-      lastError = message
-    }
-    await sleep(SESSION_PROBE_INTERVAL_MS)
-  }
-  throw new Error(lastError ?? "Couldn’t load stranded inventory.")
-}
-
 export async function fetchStrandedReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
-  rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
-  await waitForTabComplete(tabId)
-  return sendStrandedFetch(tabId)
+  return await fetchReportSource("REPORTS_FETCH_STRANDED", senderTab) as { ok: true; listings: unknown[] }
 }
-
-async function sendSuppressedFetch(tabId: number): Promise<{ ok: true; listings: unknown[] }> {
-  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
-  let lastError: string | undefined
-  while (Date.now() < deadline) {
-    try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_SUPPRESSED" }) as {
-        ok?: boolean
-        listings?: unknown
-        error?: string
-      }
-      if (response?.ok) {
-        return { ok: true, listings: Array.isArray(response.listings) ? response.listings : [] }
-      }
-      throw new Error(response?.error ?? "Couldn’t load search-suppressed inventory.")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/Receiving end does not exist/i.test(message)) throw error instanceof Error ? error : new Error(message)
-      lastError = message
-    }
-    await sleep(SESSION_PROBE_INTERVAL_MS)
-  }
-  throw new Error(lastError ?? "Couldn’t load search-suppressed inventory.")
-}
-
 export async function fetchSuppressedReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
-  rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
-  await waitForTabComplete(tabId)
-  return sendSuppressedFetch(tabId)
+  return await fetchReportSource("REPORTS_FETCH_SUPPRESSED", senderTab) as { ok: true; listings: unknown[] }
 }
-
-async function sendShippingQueueFetch(tabId: number): Promise<{ ok: true; shipments: unknown[] }> {
-  const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
-  let lastError: string | undefined
-  while (Date.now() < deadline) {
-    try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_FETCH_SHIPPING_QUEUE" }) as {
-        ok?: boolean
-        shipments?: unknown
-        error?: string
-      }
-      if (response?.ok) {
-        return { ok: true, shipments: Array.isArray(response.shipments) ? response.shipments : [] }
-      }
-      throw new Error(response?.error ?? "Couldn’t load shipping queue.")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/Receiving end does not exist/i.test(message)) {
-        console.error("[ShippingQueue Background] Fetch failed:", error)
-        throw error instanceof Error ? error : new Error(message)
-      }
-      lastError = message
-    }
-    await sleep(SESSION_PROBE_INTERVAL_MS)
-  }
-  console.error("[ShippingQueue Background] Timed out waiting for content script:", lastError)
-  throw new Error(lastError ?? "Couldn’t load shipping queue.")
-}
-
 export async function fetchShippingQueueReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; shipments: unknown[] }> {
-  rememberReportProgressTab(senderTab?.id)
-  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
-  await waitForTabComplete(tabId)
-  return sendShippingQueueFetch(tabId)
+  return await fetchReportSource("REPORTS_FETCH_SHIPPING_QUEUE", senderTab) as { ok: true; shipments: unknown[] }
 }
 
 export async function probeSellerCentralSession(tabId: number): Promise<boolean> {
@@ -635,46 +627,46 @@ export async function probeSellerCentralSession(tabId: number): Promise<boolean>
     await sleep(SESSION_PROBE_INTERVAL_MS)
   }
   if (!last) throw new Error("Couldn’t confirm the Seller Central session.")
+  log.warn("report.sessionUnsettled", { tabId, loggedInToStore: last.loggedInToStore })
   return last.loggedInToStore
 }
 
 export async function prepareReports(senderTab?: chrome.tabs.Tab): Promise<ReportsPrepareResult> {
-  const currentStoreId = await getCurrentStoreId()
-  const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
-  await waitForTabComplete(tabId)
-  const tab = await chrome.tabs.get(tabId)
-  const loggedInToStore = await probeSellerCentralSession(tabId)
-  // #region agent log
-  fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-    body: JSON.stringify({
-      sessionId: "f8f494",
-      runId: "pre-fix",
-      hypothesisId: "B",
-      location: "background.ts:prepareReports",
-      message: "reports prepare result",
-      data: {
-        currentStoreId: currentStoreId ?? null,
-        senderTabId: senderTab?.id ?? null,
-        sellerCentralTabId: tabId,
-        tabUrl: typeof tab.url === "string" ? tab.url.slice(0, 160) : null,
-        loggedInToStore,
-        sameAsSender: senderTab?.id === tabId,
-      },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {})
-  // #endregion
-  if (loggedInToStore) return { ok: true, loggedInToStore: true, sellerCentralTabId: tabId }
-  if (senderTab?.id === tabId) return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId }
+  const runId = createLogRunId("report")
+  const runLog = log.withRun(runId)
+  const done = runLog.time("report.prepare")
+  const timings: LogData = {}
+  const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now()
+    try {
+      return await action()
+    } finally {
+      timings[name] = Date.now() - startedAt
+    }
+  }
+  try {
+    const { tabId, opened } = await step("tabMs", () => ensureSellerCentralTab(senderTab, { focus: false }))
+    await step("loadMs", () => waitForTabComplete(tabId))
+    const tab = await chrome.tabs.get(tabId)
+    const loggedInToStore = await step("sessionMs", () => probeSellerCentralSession(tabId))
+    done({ loggedInToStore, sellerCentralTab: opened ? "opened" : "reused", ...timings })
+    if (loggedInToStore) {
+      activeReportRun = { id: runId, paletteTabId: senderTab?.id, sellerCentralTabId: tabId }
+      return { ok: true, loggedInToStore: true, sellerCentralTabId: tabId }
+    }
+    if (senderTab?.id === tabId) return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId }
 
-  await chrome.tabs.update(tabId, { active: true })
-  if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+    await chrome.tabs.update(tabId, { active: true })
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
 
-  const opened = await chrome.tabs.sendMessage(tabId, { type: "OPEN_PALETTE", mode: "report-login" }) as { ok?: boolean; error?: string }
-  if (!opened?.ok) throw new Error(opened?.error ?? "Couldn’t open the command palette on Seller Central.")
-  return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId, openedPromptOnSellerCentral: true }
+    const prompt = await chrome.tabs.sendMessage(tabId, { type: "OPEN_PALETTE", mode: "report-login" }) as
+      { ok?: boolean; error?: string }
+    if (!prompt?.ok) throw new Error(prompt?.error ?? "Couldn’t open the command palette on Seller Central.")
+    return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId, openedPromptOnSellerCentral: true }
+  } catch (error) {
+    runLog.error("report.prepareFailed", { error: describeError(error), ...timings })
+    throw error
+  }
 }
 
 async function openStoreUrl(storeUrl: string, senderTab?: chrome.tabs.Tab): Promise<void> {
@@ -736,9 +728,18 @@ export async function restorePageFocus(tabId: number): Promise<void> {
   }
 }
 
+function jobLog(job: ActiveJob) {
+  return log.withRun(job.id)
+}
+
+function jobContext(job: ActiveJob): LogData {
+  return { store: job.storeName ?? job.storeId, stage: job.stage, elapsedMs: Date.now() - job.startedAt }
+}
+
 async function getActiveJob(): Promise<ActiveJob | undefined> {
   const job = (await chrome.storage.session.get(ACTIVE_JOB_STORAGE_KEY))[ACTIVE_JOB_STORAGE_KEY] as ActiveJob | undefined
   if (job && Date.now() - job.startedAt >= ACTIVE_JOB_TTL_MS) {
+    jobLog(job).warn("account.switch.expired", jobContext(job))
     await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
     return undefined
   }
@@ -747,6 +748,13 @@ async function getActiveJob(): Promise<ActiveJob | undefined> {
 async function setActiveJob(job?: ActiveJob): Promise<void> {
   if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job })
   else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
+}
+
+/** Moves a job to `stage`, logging the transition once. */
+async function setJobStage(job: ActiveJob, stage: ActiveJob["stage"]): Promise<void> {
+  if (job.stage !== stage) jobLog(job).info("account.switch.stage", { ...jobContext(job), stage, from: job.stage })
+  job.stage = stage
+  await setActiveJob(job)
 }
 
 async function serializeSwitchStart<T>(action: () => Promise<T>): Promise<T> {
@@ -788,6 +796,51 @@ async function withJobDebugger<T>(
   }
 }
 
+function requireMasterPassword(value: unknown): string {
+  if (typeof value !== "string" || value.length < 10) throw new Error("Use a master password of at least 10 characters.")
+  return value
+}
+
+/** Starts a switch to a store on another credential: sign out in a Seller Central tab, then sign in. */
+async function startSignInSwitch(store: StoreRecord, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+  const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
+  const existingTabId = pickSellerCentralTab(tabs, sender.tab?.windowId)?.id
+  const ownsTab = existingTabId === undefined
+  let tabId = existingTabId
+  try {
+    if (tabId === undefined) {
+      // Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it
+      // focused across the whole switch, so create it in the background and activate it
+      // once it is showing a real page.
+      const tab = await chrome.tabs.create({
+        active: false,
+        url: "about:blank",
+        ...(sender.tab?.windowId === undefined ? {} : { windowId: sender.tab.windowId }),
+      })
+      if (tab.id === undefined) throw new Error("Chrome did not create the login tab.")
+      tabId = tab.id
+    }
+    const job: ActiveJob = {
+      id: crypto.randomUUID(),
+      tabId,
+      storeId: store.id,
+      storeName: store.name,
+      stage: "logout",
+      startedAt: Date.now(),
+      ownsTab,
+    }
+    await setActiveJob(job)
+    await chrome.tabs.update(tabId, { url: LOGOUT_URL })
+    void activateLoadedTab(tabId)
+    jobLog(job).info("account.switch.start", { store: store.name, path: "sign-in", tab: ownsTab ? "new" : "reused" })
+    return { ok: true, jobId: job.id }
+  } catch (error) {
+    if (ownsTab && tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
+    await setActiveJob(undefined)
+    throw error
+  }
+}
+
 export async function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
   switch (message.type) {
     case "ACCOUNTS_STATUS": {
@@ -797,6 +850,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
         chrome.storage.local.get([STORE_INDEX_KEY, CURRENT_STORE_KEY]),
       ])
       const stores = (stored[STORE_INDEX_KEY] ?? []) as StoreIndexRecord[]
+      const currentStoreId = typeof stored[CURRENT_STORE_KEY] === "string" ? stored[CURRENT_STORE_KEY] : undefined
       const job = await getActiveJob()
       const activeStore = job ? stores.find((store) => store.id === job.storeId) : undefined
       return {
@@ -804,30 +858,40 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
         initialized: Boolean(envelope),
         unlocked: Boolean(key),
         stores,
-        currentStore: currentStoreFromIndex(stores, typeof stored[CURRENT_STORE_KEY] === "string" ? stored[CURRENT_STORE_KEY] : undefined),
-        activeSwitch: job ? { storeId: job.storeId, storeName: activeStore?.name ?? "Selected store", stage: job.stage, startedAt: job.startedAt } : undefined,
+        currentStore: currentStoreFromIndex(stores, currentStoreId),
+        activeSwitch: job
+          ? { storeId: job.storeId, storeName: activeStore?.name ?? "Selected store", stage: job.stage, startedAt: job.startedAt }
+          : undefined,
       }
     }
     case "ACCOUNTS_CREATE": {
       if (await getEnvelope()) throw new Error("The account vault already exists.")
-      if (typeof message.masterPassword !== "string" || message.masterPassword.length < 10) throw new Error("Use a master password of at least 10 characters.")
-      const { envelope, keyBytes } = await encryptVault(emptyVault(), message.masterPassword)
+      const masterPassword = requireMasterPassword(message.masterPassword)
+      const done = log.time("vault.create")
+      const { envelope, keyBytes } = await encryptVault(emptyVault(), masterPassword)
       await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope, [STORE_INDEX_KEY]: [] })
       await chrome.storage.local.remove(CURRENT_STORE_KEY)
       await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
+      done()
       return { ok: true }
     }
     case "ACCOUNTS_UNLOCK": {
       const envelope = await getEnvelope()
       if (!envelope || typeof message.masterPassword !== "string") throw new Error("The account vault is not initialized.")
+      const done = log.time("vault.unlock")
       try {
         const { keyBytes } = await decryptVault(envelope, message.masterPassword)
         await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
-      } catch { throw new Error("Incorrect master password or damaged vault.") }
+      } catch {
+        done({ ok: false }, "warn")
+        throw new Error("Incorrect master password or damaged vault.")
+      }
+      done({ ok: true })
       return { ok: true }
     }
     case "ACCOUNTS_LOCK":
       await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY])
+      log.info("vault.lock")
       return { ok: true }
     case "ACCOUNTS_GET_VAULT": {
       const { vault } = await getUnlockedVault()
@@ -837,19 +901,22 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       const current = await getUnlockedVault()
       const vault = message.vault as AccountVault
       await saveVault(vault, current.envelope, current.key)
+      log.info("vault.save", { stores: vault.stores.length, credentials: vault.credentials.length })
       return { ok: true }
     }
     case "ACCOUNTS_CHANGE_MASTER_PASSWORD": {
       const { vault } = await getUnlockedVault()
-      if (typeof message.masterPassword !== "string" || message.masterPassword.length < 10) throw new Error("Use a master password of at least 10 characters.")
-      const { envelope, keyBytes } = await encryptVault(vault, message.masterPassword)
+      const masterPassword = requireMasterPassword(message.masterPassword)
+      const { envelope, keyBytes } = await encryptVault(vault, masterPassword)
       await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope })
       await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
+      log.info("vault.changePassword")
       return { ok: true }
     }
     case "ACCOUNTS_RESET":
       await chrome.storage.local.remove([VAULT_STORAGE_KEY, STORE_INDEX_KEY, CURRENT_STORE_KEY])
       await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY])
+      log.warn("vault.reset")
       return { ok: true }
     case "ACCOUNTS_OPEN_OPTIONS":
       await chrome.runtime.openOptionsPage()
@@ -862,85 +929,13 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
         if (!store) throw new Error("The selected store was not found.")
         const currentStoreId = await getCurrentStoreId()
         const currentStore = currentStoreId ? vault.stores.find(({ id }) => id === currentStoreId) : undefined
-        const sameCredential = Boolean(currentStore && currentStore.credentialId === store.credentialId)
-        // #region agent log
-        fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-          body: JSON.stringify({
-            sessionId: "f8f494",
-            runId: "pre-fix",
-            hypothesisId: "D",
-            location: "background.ts:ACCOUNTS_START_SWITCH",
-            message: "account switch started",
-            data: {
-              targetStoreId: store.id,
-              targetStoreName: store.name,
-              currentStoreId: currentStoreId ?? null,
-              sameCredential,
-              path: sameCredential ? "navigate-only" : "logout-login",
-              senderTabId: sender.tab?.id ?? null,
-              senderUrl: typeof sender.tab?.url === "string" ? sender.tab.url.slice(0, 120) : null,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {})
-        // #endregion
-        if (sameCredential) {
+        if (currentStore && currentStore.credentialId === store.credentialId) {
           await openStoreUrl(store.storeUrl, sender.tab)
           await setCurrentStoreId(store.id)
+          log.info("account.switch.start", { store: store.name, path: "same-credential" })
           return { ok: true }
         }
-        let tabId: number | undefined
-        let ownsTab = false
-        try {
-          const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
-          const existing = pickSellerCentralTab(tabs, sender.tab?.windowId)
-          if (existing?.id !== undefined) {
-            tabId = existing.id
-            ownsTab = false
-            const job: ActiveJob = {
-              id: crypto.randomUUID(),
-              tabId: existing.id,
-              storeId: store.id,
-              stage: "logout",
-              startedAt: Date.now(),
-              ownsTab: false,
-            }
-            await setActiveJob(job)
-            await chrome.tabs.update(existing.id, { url: LOGOUT_URL })
-            void activateLoadedTab(existing.id)
-            return { ok: true, jobId: job.id }
-          }
-
-          // Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it
-          // focused across the whole switch, so create it in the background and activate it
-          // once it is showing a real page.
-          const tab = await chrome.tabs.create({
-            active: false,
-            url: "about:blank",
-            ...(sender.tab?.windowId === undefined ? {} : { windowId: sender.tab.windowId }),
-          })
-          if (tab.id === undefined) throw new Error("Chrome did not create the login tab.")
-          tabId = tab.id
-          ownsTab = true
-          const job: ActiveJob = {
-            id: crypto.randomUUID(),
-            tabId: tab.id,
-            storeId: store.id,
-            stage: "logout",
-            startedAt: Date.now(),
-            ownsTab: true,
-          }
-          await setActiveJob(job)
-          await chrome.tabs.update(tab.id, { url: LOGOUT_URL })
-          void activateLoadedTab(tab.id)
-          return { ok: true, jobId: job.id }
-        } catch (error) {
-          if (ownsTab && tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
-          await setActiveJob(undefined)
-          throw error
-        }
+        return startSignInSwitch(store, sender)
       })
     }
     case "ACCOUNTS_FOCUS_CURRENT_STORE": {
@@ -950,7 +945,8 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
     case "ACCOUNTS_FOCUS_SWITCH": {
       const job = await getActiveJob()
       if (!job || job.tabId < 0) throw new Error("No account switch is running.")
-      await chrome.tabs.update(job.tabId, { active: true })
+      const tab = await chrome.tabs.update(job.tabId, { active: true })
+      if (tab?.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
       return { ok: true }
     }
     case "ACCOUNTS_CANCEL_SWITCH": {
@@ -958,6 +954,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       if (!job) return { ok: true }
       await setActiveJob(undefined)
       if (job.ownsTab && job.tabId >= 0) try { await chrome.tabs.remove(job.tabId) } catch { /* tab already closed */ }
+      jobLog(job).info("account.switch.cancelled", jobContext(job))
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_GET_JOB": {
@@ -968,32 +965,49 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
     case "ACCOUNT_AUTOMATION_SECRET": {
       const job = await assertWorkflowSender(sender, message.jobId)
       const { credential } = await getJobRecords(job)
-      if (message.kind === "email") { job.stage = "email"; await setActiveJob(job); return { ok: true, value: credential.domain } }
-      if (message.kind === "password") { job.stage = "password"; await setActiveJob(job); return { ok: true, value: credential.password } }
+      if (message.kind === "email") {
+        await setJobStage(job, "email")
+        return { ok: true, value: credential.domain }
+      }
+      if (message.kind === "password") {
+        await setJobStage(job, "password")
+        return { ok: true, value: credential.password }
+      }
       if (message.kind === "otp") {
         const parsed = parseOtpAuthUri(credential.otpAuthUri)
         const remaining = parsed.period - (Math.floor(Date.now() / 1000) % parsed.period)
-        if (remaining <= 5) return { ok: true, waitMs: (remaining + 1) * 1000 }
-        job.stage = "otp"; await setActiveJob(job)
+        if (remaining <= 5) {
+          jobLog(job).info("account.switch.otpWait", { waitMs: (remaining + 1) * 1000 })
+          return { ok: true, waitMs: (remaining + 1) * 1000 }
+        }
+        await setJobStage(job, "otp")
         return { ok: true, value: await generateTotp(credential.otpAuthUri) }
       }
       throw new Error("Unknown credential stage.")
     }
     case "ACCOUNT_AUTOMATION_CLICK": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      if (typeof message.action !== "string" || !AUTOMATION_CLICK_ACTIONS.has(message.action)) throw new Error("Unsupported login click action.")
+      if (typeof message.action !== "string" || !AUTOMATION_CLICK_ACTIONS.has(message.action)) {
+        throw new Error("Unsupported login click action.")
+      }
       const { x, y } = message
-      if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) throw new Error("Invalid login click coordinates.")
+      if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
+        throw new Error("Invalid login click coordinates.")
+      }
       await withJobDebugger(job, async (target) => {
-        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y })
-        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 })
-        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 })
+        const send = (type: string, extra: Record<string, unknown> = {}) =>
+          chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type, x, y, ...extra })
+        await send("mouseMoved")
+        await send("mousePressed", { button: "left", clickCount: 1 })
+        await send("mouseReleased", { button: "left", clickCount: 1 })
       })
+      jobLog(job).info("account.switch.click", { ...jobContext(job), action: message.action })
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_PAUSED": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      job.stage = "paused"; await setActiveJob(job)
+      await setJobStage(job, "paused")
+      jobLog(job).warn("account.switch.paused", { ...jobContext(job), reason: "captcha" })
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_LEAVE_LOGOUT": {
@@ -1005,38 +1019,20 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
     case "ACCOUNT_AUTOMATION_COMPLETE": {
       const job = await assertWorkflowSender(sender, message.jobId)
       const { store } = await getJobRecords(job)
-      // #region agent log
-      fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-        body: JSON.stringify({
-          sessionId: "f8f494",
-          runId: "pre-fix",
-          hypothesisId: "A",
-          location: "background.ts:ACCOUNT_AUTOMATION_COMPLETE",
-          message: "automation complete accepted",
-          data: {
-            jobStage: job.stage,
-            storeId: store.id,
-            storeName: store.name,
-            senderPath: sender.url ? (() => { try { return new URL(sender.url).pathname } catch { return null } })() : null,
-            storeUrlHost: (() => { try { return new URL(store.storeUrl).hostname } catch { return null } })(),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {})
-      // #endregion
-      job.stage = "authenticated"; await setActiveJob(job)
+      await setJobStage(job, "authenticated")
       await chrome.tabs.update(job.tabId, { active: true, url: store.storeUrl })
       await setCurrentStoreId(store.id)
       await setActiveJob(undefined)
       void restorePageFocus(job.tabId)
       void closeDuplicateSellerCentralTabs(job.tabId)
+      jobLog(job).info("account.switch.complete", { store: store.name, ms: Date.now() - job.startedAt })
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_ERROR": {
-      await assertWorkflowSender(sender, message.jobId)
+      const job = await assertWorkflowSender(sender, message.jobId)
       await setActiveJob(undefined)
+      const error = typeof message.error === "string" ? message.error : "Unknown error."
+      jobLog(job).error("account.switch.failed", { ...jobContext(job), error })
       return { ok: true }
     }
     default: throw new Error("Unknown account command.")
@@ -1044,8 +1040,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
 }
 
 async function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
-  job.stage = "signin"
-  await setActiveJob(job)
+  await setJobStage(job, "signin")
   await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
 }
 
@@ -1063,103 +1058,103 @@ export async function handleAccountTabUpdated(
   let url: URL
   try { url = new URL(currentUrl) } catch { return }
   if (url.hostname !== "sellercentral.amazon.com") return
-  const pathOk = url.pathname.startsWith("/ap/") || url.pathname.startsWith("/sign-out")
-  // #region agent log
-  fetch("http://127.0.0.1:7629/ingest/2f50b123-fd39-4d0e-ab71-986f14d4d34f", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "f8f494" },
-    body: JSON.stringify({
-      sessionId: "f8f494",
-      runId: "pre-fix",
-      hypothesisId: "C",
-      location: "background.ts:handleAccountTabUpdated",
-      message: "logout tab complete",
-      data: {
-        tabId,
-        stage: job.stage,
-        pathname: url.pathname,
-        pathOk,
-        willAdvance: pathOk,
-      },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {})
-  // #endregion
-  if (!pathOk) return
+  if (!url.pathname.startsWith("/ap/") && !url.pathname.startsWith("/sign-out")) return
 
   // Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
   await advanceLogoutToSignIn(job)
 }
 
+/** Only extension pages (popup, options) may read or clear the diagnostics log. */
+function isExtensionPage(sender: chrome.runtime.MessageSender): boolean {
+  return sender.id === chrome.runtime.id && Boolean(sender.url?.startsWith(chrome.runtime.getURL("")))
+}
+
+export function handleLogMessage(
+  type: string,
+  message: Record<string, unknown>,
+  sender: chrome.runtime.MessageSender,
+  store: LogStore,
+  sendResponse: (response: unknown) => void,
+): boolean | undefined {
+  if (type === LOG_ENTRIES_MESSAGE) {
+    const tab = sender.tab?.id
+    const entries = sanitizeLogEntries(message.entries).map((entry) => {
+      const run = entry.run ?? reportRunForTab(tab)
+      return { ...entry, ...(tab === undefined ? {} : { tab }), ...(run ? { run } : {}) }
+    })
+    store.append(entries)
+    sendResponse({ ok: true })
+    return undefined
+  }
+  if (type !== LOGS_GET_MESSAGE && type !== LOGS_CLEAR_MESSAGE) return undefined
+  if (!isExtensionPage(sender)) {
+    sendResponse({ ok: false, error: "Logs are only available to extension pages." })
+    return undefined
+  }
+  const request = type === LOGS_GET_MESSAGE
+    ? store.read().then((entries) => ({ ok: true, entries }))
+    : store.clear().then(() => ({ ok: true }))
+  void request.then(sendResponse, (error: unknown) => sendResponse({ ok: false, error: errorMessage(error, "Couldn’t read logs.") }))
+  return true
+}
+
+/** Resolves a message handler's promise into sendResponse. Handlers that log their own failures pass logged. */
+function respond(
+  type: string,
+  request: Promise<unknown>,
+  sendResponse: (response: unknown) => void,
+  fallbackError: string,
+  logged = false,
+): true {
+  void request.then(sendResponse, (error: unknown) => {
+    if (!logged) log.warn("message.failed", { type, error: describeError(error) })
+    sendResponse({ ok: false, error: errorMessage(error, fallbackError) })
+  })
+  return true
+}
+
 const idsListener = createOpenIdsMessageListener()
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  const logStore = createLogStore(chrome.storage.local)
+  setLogSink((entry) => logStore.append([entry]))
+  chrome.runtime.onInstalled?.addListener(({ reason, previousVersion }) => {
+    log.info("extension.installed", { reason, version: chrome.runtime.getManifest().version, previousVersion })
+  })
+
   void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
   void chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     const handled = idsListener(message, sender, sendResponse)
     if (handled) return true
     if (!message || typeof message !== "object" || !("type" in message)) return undefined
-    const type = String((message as { type: unknown }).type)
+    const record = message as Record<string, unknown>
+    const type = String(record.type)
+    if (type === LOG_ENTRIES_MESSAGE || type === LOGS_GET_MESSAGE || type === LOGS_CLEAR_MESSAGE) {
+      return handleLogMessage(type, record, sender, logStore, sendResponse)
+    }
     if (type === "GET_SETTINGS") {
-      void loadSettings().then(
-        (settings) => sendResponse({ ok: true, settings }),
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load settings." }),
-      )
-      return true
+      return respond(type, loadSettings().then((settings) => ({ ok: true, settings })), sendResponse, "Couldn’t load settings.")
     }
     if (type === "REPORTS_PREPARE") {
-      void prepareReports(sender.tab).then(
-        sendResponse,
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t open Seller Central." }),
-      )
-      return true
+      return respond(type, prepareReports(sender.tab), sendResponse, "Couldn’t open Seller Central.", true)
     }
-    if (type === "REPORTS_FETCH_UNFULFILLABLE") {
-      void fetchUnfulfillableReport(sender.tab).then(
-        sendResponse,
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load unfulfillable inventory." }),
-      )
-      return true
-    }
-    if (type === "REPORTS_FETCH_FEEDBACK") {
-      void fetchFeedbackReport(sender.tab).then(
-        sendResponse,
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load seller feedback." }),
-      )
-      return true
-    }
-    if (type === "REPORTS_FETCH_STRANDED") {
-      void fetchStrandedReport(sender.tab).then(
-        sendResponse,
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load stranded inventory." }),
-      )
-      return true
-    }
-    if (type === "REPORTS_FETCH_SUPPRESSED") {
-      void fetchSuppressedReport(sender.tab).then(
-        sendResponse,
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load search-suppressed inventory." }),
-      )
-      return true
-    }
-    if (type === "REPORTS_FETCH_SHIPPING_QUEUE") {
-      void fetchShippingQueueReport(sender.tab).then(
-        sendResponse,
-        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Couldn’t load shipping queue." }),
-      )
-      return true
+    if (isReportFetchType(type)) {
+      const { fallbackError } = REPORT_REQUESTS[type]
+      return respond(type, fetchReportSource(type, sender.tab), sendResponse, fallbackError, true)
     }
     if (type === "REPORTS_PROGRESS") {
-      void relayReportProgress(message).then(
-        sendResponse,
-        () => sendResponse({ ok: true }),
-      )
+      void relayReportProgress(message).then(sendResponse, () => sendResponse({ ok: true }))
       return true
     }
     if (!type.startsWith("ACCOUNT")) return undefined
-    void handleAccountsMessage(message as Record<string, unknown>, sender).then(sendResponse, (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "Account operation failed." }))
-    return true
+    return respond(type, handleAccountsMessage(record, sender), sendResponse, "Account operation failed.")
   })
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { void handleAccountTabUpdated(tabId, changeInfo, tab) })
-  chrome.tabs.onRemoved.addListener((tabId) => { void getActiveJob().then((job) => job?.tabId === tabId ? setActiveJob(undefined) : undefined) })
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void getActiveJob().then(async (job) => {
+      if (job?.tabId !== tabId) return
+      jobLog(job).warn("account.switch.tabClosed", jobContext(job))
+      await setActiveJob(undefined)
+    })
+  })
 }

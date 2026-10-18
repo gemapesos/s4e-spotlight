@@ -4,7 +4,17 @@ import { createRoot, type Root } from "react-dom/client"
 import styles from "./styles.css?inline"
 import { CommandPalette, type AccountsStatus, type PaletteMode, type ReportsPrepareResult } from "./CommandPalette"
 import { applyPrefersColorScheme } from "./lib/colorScheme"
-import { buildReportWorkbook, downloadBytes, reportFileName, reportWorkbookSheets } from "./lib/reports"
+import {
+  createLogger,
+  describeError,
+  errorMessage,
+  forwardLogsToBackground,
+  logNow,
+  setLogSink,
+  type LogData,
+} from "./lib/log"
+import { downloadGeneratedReport } from "./lib/reportDownload"
+import type { GeneratedReport, ReportDownloadFormat } from "./lib/reports"
 import {
   DEFAULT_ENABLED_FEATURES,
   enabledFeaturesEqual,
@@ -16,6 +26,7 @@ import type { SellerFeedback } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
 import {
   isReportProgressMessage,
+  REPORT_SOURCES,
   type ReportProgressEvent,
   type ReportSource,
 } from "./lib/reportProgress"
@@ -29,6 +40,9 @@ const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open"
 const PASTE_GUARD_KEY = "__s4eSpotlightPasteGuard"
 const GEIST_FONT_FILE = "geist-latin-wght-normal.woff2"
 const FIRST_OPEN_ASSET_TIMEOUT_MS = 120
+const paletteLog = createLogger("palette")
+
+if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground())
 
 export async function loadPaletteFont(targetDocument: Document): Promise<void> {
   const fontUrl =
@@ -165,73 +179,30 @@ function applyPaletteRemScale(host: HTMLElement, targetDocument: Document): numb
   return scale
 }
 
-export async function openCaseIds(caseIds: string[]): Promise<void> {
-  const response = await chrome.runtime.sendMessage<
-    OpenCaseIdsMessage,
-    OpenIdsResponse
-  >({
-    type: "OPEN_CASE_IDS",
-    caseIds,
-  })
-
-  if (!response?.ok) {
-    throw new Error(response?.error ?? "The background worker did not respond.")
-  }
-}
-
-export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
-  const response = await chrome.runtime.sendMessage<
-    OpenShipmentIdsMessage,
-    OpenIdsResponse
-  >({
-    type: "OPEN_SHIPMENT_IDS",
-    shipmentIds,
-  })
-
-  if (!response?.ok) {
-    throw new Error(response?.error ?? "The background worker did not respond.")
-  }
-}
-
-export async function openSkuIds(skuIds: string[]): Promise<void> {
-  const response = await chrome.runtime.sendMessage<
-    OpenSkuIdsMessage,
-    OpenIdsResponse
-  >({
-    type: "OPEN_SKU_IDS",
-    skuIds,
-  })
-
-  if (!response?.ok) {
-    throw new Error(response?.error ?? "The background worker did not respond.")
-  }
-}
-
-export async function openTimeOut(): Promise<void> {
-  const response = await chrome.runtime.sendMessage<
-    OpenTimeOutMessage,
-    OpenIdsResponse
-  >({ type: "OPEN_TIME_OUT" })
-
-  if (!response?.ok) {
-    throw new Error(response?.error ?? "The background worker did not respond.")
-  }
-}
-
-async function accountApi<T extends Record<string, unknown>>(message: Record<string, unknown>): Promise<T> {
-  const response = await chrome.runtime.sendMessage(message) as T & { ok?: boolean; error?: string }
+/** Sends a message to the background worker and requires `ok: true` in the reply. */
+async function requestBackground<T extends object = Record<string, unknown>>(
+  message: Record<string, unknown>,
+): Promise<T & { ok: true }> {
+  const response = await chrome.runtime.sendMessage(message) as (T & { ok?: boolean; error?: string }) | undefined
   if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return response
+  return response as T & { ok: true }
 }
+
+export async function openCaseIds(caseIds: string[]): Promise<void> {
+  await requestBackground<OpenIdsResponse>({ type: "OPEN_CASE_IDS", caseIds } satisfies OpenCaseIdsMessage)
+}
+export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
+  await requestBackground<OpenIdsResponse>({ type: "OPEN_SHIPMENT_IDS", shipmentIds } satisfies OpenShipmentIdsMessage)
+}
+export async function openSkuIds(skuIds: string[]): Promise<void> {
+  await requestBackground<OpenIdsResponse>({ type: "OPEN_SKU_IDS", skuIds } satisfies OpenSkuIdsMessage)
+}
+export async function openTimeOut(): Promise<void> {
+  await requestBackground<OpenIdsResponse>({ type: "OPEN_TIME_OUT" } satisfies OpenTimeOutMessage)
+}
+
 export async function getAccountsStatus(): Promise<AccountsStatus> {
-  const response = await accountApi<{
-    ok: true
-    initialized: boolean
-    unlocked: boolean
-    stores: AccountsStatus["stores"]
-    activeSwitch?: AccountsStatus["activeSwitch"]
-    currentStore?: AccountsStatus["currentStore"]
-  }>({ type: "ACCOUNTS_STATUS" })
+  const response = await requestBackground<AccountsStatus>({ type: "ACCOUNTS_STATUS" })
   return {
     initialized: response.initialized,
     unlocked: response.unlocked,
@@ -240,81 +211,63 @@ export async function getAccountsStatus(): Promise<AccountsStatus> {
     currentStore: response.currentStore ?? null,
   }
 }
-export async function unlockAccounts(masterPassword: string): Promise<void> { await accountApi({ type: "ACCOUNTS_UNLOCK", masterPassword }) }
-export async function startAccountSwitch(storeId: string): Promise<void> { await accountApi({ type: "ACCOUNTS_START_SWITCH", storeId }) }
-export async function focusCurrentStore(): Promise<void> { await accountApi({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" }) }
-export async function focusAccountSwitch(): Promise<void> { await accountApi({ type: "ACCOUNTS_FOCUS_SWITCH" }) }
-export async function cancelAccountSwitch(): Promise<void> { await accountApi({ type: "ACCOUNTS_CANCEL_SWITCH" }) }
-export async function manageAccounts(): Promise<void> { await accountApi({ type: "ACCOUNTS_OPEN_OPTIONS" }) }
+export async function unlockAccounts(masterPassword: string): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_UNLOCK", masterPassword })
+}
+export async function startAccountSwitch(storeId: string): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_START_SWITCH", storeId })
+}
+export async function focusCurrentStore(): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" })
+}
+export async function focusAccountSwitch(): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_FOCUS_SWITCH" })
+}
+export async function cancelAccountSwitch(): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_CANCEL_SWITCH" })
+}
+export async function manageAccounts(): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_OPEN_OPTIONS" })
+}
 
 export async function getSettings(): Promise<ExtensionSettings> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return parseSettings(undefined)
   try {
-    const response = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" }) as { ok?: boolean; settings?: unknown }
-    if (!response?.ok) return parseSettings(undefined)
+    const response = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" }) as { ok?: boolean; settings?: unknown; error?: string }
+    if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
     return parseSettings(response.settings)
-  } catch {
+  } catch (error) {
+    paletteLog.warn("settings.loadFailed", { error: describeError(error) })
     return parseSettings(undefined)
   }
 }
 
 export async function prepareReports(): Promise<ReportsPrepareResult> {
-  const response = await chrome.runtime.sendMessage({ type: "REPORTS_PREPARE" }) as ReportsPrepareResult & { ok?: boolean; error?: string }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
+  const response = await requestBackground<ReportsPrepareResult>({ type: "REPORTS_PREPARE" })
   return {
     loggedInToStore: Boolean(response.loggedInToStore),
     openedPromptOnSellerCentral: response.openedPromptOnSellerCentral,
   }
 }
 
-export async function fetchUnfulfillableListingsFromBackground(): Promise<UnfulfillableListing[]> {
-  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_UNFULFILLABLE" }) as {
-    ok?: boolean
-    listings?: UnfulfillableListing[]
-    error?: string
-  }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return Array.isArray(response.listings) ? response.listings : []
+async function fetchReportItems<T>(type: string, key: string): Promise<T[]> {
+  const response = await requestBackground<Record<string, unknown>>({ type })
+  const items = response[key]
+  return Array.isArray(items) ? items as T[] : []
 }
 
-export async function fetchFeedbacksFromBackground(): Promise<SellerFeedback[]> {
-  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_FEEDBACK" }) as {
-    ok?: boolean
-    feedbacks?: SellerFeedback[]
-    error?: string
+async function fetchUnfulfillableFromBackground(): Promise<{
+  listings: UnfulfillableListing[]
+  nextRemovalOrderId: string | null
+}> {
+  const response = await requestBackground<{ listings?: unknown; nextRemovalOrderId?: unknown }>({
+    type: "REPORTS_FETCH_UNFULFILLABLE",
+  })
+  const nextRemovalOrderId = response.nextRemovalOrderId
+  return {
+    listings: Array.isArray(response.listings) ? response.listings as UnfulfillableListing[] : [],
+    nextRemovalOrderId: typeof nextRemovalOrderId === "string" && nextRemovalOrderId ? nextRemovalOrderId : null,
   }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return Array.isArray(response.feedbacks) ? response.feedbacks : []
-}
-
-export async function fetchStrandedListingsFromBackground(): Promise<StrandedListing[]> {
-  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_STRANDED" }) as {
-    ok?: boolean
-    listings?: StrandedListing[]
-    error?: string
-  }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return Array.isArray(response.listings) ? response.listings : []
-}
-
-export async function fetchSuppressedListingsFromBackground(): Promise<SuppressedListing[]> {
-  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_SUPPRESSED" }) as {
-    ok?: boolean
-    listings?: SuppressedListing[]
-    error?: string
-  }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return Array.isArray(response.listings) ? response.listings : []
-}
-
-export async function fetchShippingQueueFromBackground(): Promise<ShippingQueueShipment[]> {
-  const response = await chrome.runtime.sendMessage({ type: "REPORTS_FETCH_SHIPPING_QUEUE" }) as {
-    ok?: boolean
-    shipments?: ShippingQueueShipment[]
-    error?: string
-  }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return Array.isArray(response.shipments) ? response.shipments : []
 }
 
 const reportProgressListeners = new Set<(event: ReportProgressEvent) => void>()
@@ -328,51 +281,88 @@ function dispatchReportProgress(event: ReportProgressEvent): void {
   for (const listener of reportProgressListeners) listener(event)
 }
 
-function trackReportSource<T>(
-  source: ReportSource,
-  promise: Promise<T>,
-  fallback: T,
-  onProgress?: (event: ReportProgressEvent) => void,
-): Promise<T> {
-  return promise.then(
-    (value) => {
-      onProgress?.({ source, status: "complete" })
-      return value
-    },
-    () => {
-      onProgress?.({ source, status: "error" })
-      return fallback
-    },
-  )
-}
-
 export async function generateReports(
   now = new Date(),
-  targetDocument: Document = document,
   currentStoreName?: string,
   onProgress?: (event: ReportProgressEvent) => void,
-): Promise<void> {
+): Promise<GeneratedReport> {
   const unsubscribe = onProgress ? subscribeReportProgress(onProgress) : () => undefined
+  const done = paletteLog.time("report.run")
+  const sources: Partial<Record<ReportSource, LogData>> = {}
+  /** Resolves a source to its value, or to `fallback` after reporting the failure. */
+  const track = <T,>(source: ReportSource, request: Promise<T>, fallback: T, count: (value: T) => number) => {
+    const startedAt = logNow()
+    const elapsed = () => Math.round(logNow() - startedAt)
+    return request.then(
+      (value) => {
+        sources[source] = { ms: elapsed(), count: count(value) }
+        onProgress?.({ source, status: "complete" })
+        return value
+      },
+      (error: unknown) => {
+        const message = errorMessage(error, "Couldn’t load this report section.")
+        sources[source] = { ms: elapsed(), error: message }
+        paletteLog.warn("report.sourceFailed", { source, error: describeError(error) })
+        onProgress?.({ source, status: "error", error: message })
+        return fallback
+      },
+    )
+  }
   try {
     const storeName =
       currentStoreName !== undefined
         ? currentStoreName
         : (await getAccountsStatus()).currentStore?.name ?? ""
-    onProgress?.({ source: "unfulfillable", status: "active" })
-    onProgress?.({ source: "feedback", status: "active" })
-    onProgress?.({ source: "stranded", status: "active" })
-    onProgress?.({ source: "suppressed", status: "active" })
-    onProgress?.({ source: "shippingQueue", status: "active" })
-    const [listings, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
-      trackReportSource("unfulfillable", fetchUnfulfillableListingsFromBackground(), [], onProgress),
-      trackReportSource("feedback", fetchFeedbacksFromBackground(), [], onProgress),
-      trackReportSource("stranded", fetchStrandedListingsFromBackground(), [], onProgress),
-      trackReportSource("suppressed", fetchSuppressedListingsFromBackground(), [], onProgress),
-      trackReportSource("shippingQueue", fetchShippingQueueFromBackground(), [], onProgress),
+    for (const source of REPORT_SOURCES) onProgress?.({ source, status: "active" })
+    const length = (items: readonly unknown[]) => items.length
+    const [unfulfillable, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
+      track(
+        "unfulfillable",
+        fetchUnfulfillableFromBackground(),
+        { listings: [], nextRemovalOrderId: null },
+        (value) => value.listings.length,
+      ),
+      track("feedback", fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks"), [], length),
+      track("stranded", fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings"), [], length),
+      track("suppressed", fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings"), [], length),
+      track("shippingQueue", fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments"), [], length),
     ])
-    downloadBytes(buildReportWorkbook(reportWorkbookSheets(listings, feedbacks, strandedListings, suppressedListings, shipments)), reportFileName(storeName, now), targetDocument)
+    const timed = Object.entries(sources) as Array<[ReportSource, LogData]>
+    const slowest = timed.reduce<[ReportSource, LogData] | undefined>(
+      (best, entry) => (!best || Number(entry[1].ms) > Number(best[1].ms) ? entry : best),
+      undefined,
+    )
+    done({
+      sources,
+      slowest: slowest?.[0],
+      failed: timed.filter(([, data]) => data.error).map(([source]) => source),
+    })
+    return {
+      storeName,
+      generatedAt: now,
+      unfulfillableListings: unfulfillable.listings,
+      nextRemovalOrderId: unfulfillable.nextRemovalOrderId,
+      feedbacks,
+      strandedListings,
+      suppressedListings,
+      shipments,
+    }
+  } catch (error) {
+    done({ error: describeError(error), sources }, "error")
+    throw error
   } finally {
     unsubscribe()
+  }
+}
+
+function downloadReport(report: GeneratedReport, format: ReportDownloadFormat, targetDocument: Document): void {
+  const done = paletteLog.time("report.download", { format })
+  try {
+    const { bytes } = downloadGeneratedReport(report, format, targetDocument)
+    done({ bytes })
+  } catch (error) {
+    done({ error: describeError(error) }, "error")
+    throw error
   }
 }
 
@@ -417,8 +407,11 @@ export function mountCommandPalette({
   let openGeneration = 0
   let firstOpenAssetsSettled = false
 
-  const fontReady = loadPaletteFont(targetDocument)
+  let fontLoaded = false
+  let settingsLoaded = false
+  const fontReady = loadPaletteFont(targetDocument).finally(() => { fontLoaded = true })
   const settingsReady = getSettings().then((settings) => {
+    settingsLoaded = true
     if (enabledFeaturesEqual(enabledFeatures, settings.features)) return
     enabledFeatures = settings.features
     if (isOpen) renderPalette()
@@ -443,7 +436,8 @@ export function mountCommandPalette({
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
           onPrepareReports={prepareReports}
-          onGenerateReports={(storeName, onProgress) => generateReports(new Date(), targetDocument, storeName, onProgress)}
+          onGenerateReports={(storeName, onProgress) => generateReports(new Date(), storeName, onProgress)}
+          onDownloadReport={(report, format) => downloadReport(report, format, targetDocument)}
           onOpenTimeOut={openTimeOut}
           onOpenChange={setOpen}
         />
@@ -491,12 +485,17 @@ export function mountCommandPalette({
     }
 
     if (nextOpen && !firstOpenAssetsSettled) {
+      const startedAt = logNow()
       void waitWithTimeout(
         Promise.all([fontReady, settingsReady]),
         FIRST_OPEN_ASSET_TIMEOUT_MS,
         targetDocument.defaultView,
       ).then(() => {
         firstOpenAssetsSettled = true
+        if (!fontLoaded || !settingsLoaded) {
+          const waitedMs = Math.round(logNow() - startedAt)
+          paletteLog.warn("palette.slowFirstOpen", { waitedMs, fontLoaded, settingsLoaded })
+        }
         render()
       })
       return

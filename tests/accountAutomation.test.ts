@@ -154,7 +154,11 @@ describe("Seller Central account automation", () => {
     await vi.advanceTimersByTimeAsync(5_000)
     expect(clickCount()).toBe(2)
     expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Amazon’s Continue button did not advance the login.")
-    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1" })
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "ACCOUNT_AUTOMATION_ERROR",
+      jobId: "job-1",
+      error: "Amazon’s Continue button did not advance the login.",
+    })
   })
 
   it("completes only after login when signed-in Seller Central UI is present", async () => {
@@ -287,7 +291,11 @@ describe("Seller Central account automation", () => {
     await vi.advanceTimersByTimeAsync(91_000)
 
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_COMPLETE" }))
-    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1" })
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "ACCOUNT_AUTOMATION_ERROR",
+      jobId: "job-1",
+      error: "Amazon’s login page did not match a supported step.",
+    })
   })
 
   it("polls a logout page and reports a specific timeout instead of hanging", async () => {
@@ -304,6 +312,31 @@ describe("Seller Central account automation", () => {
     await vi.advanceTimersByTimeAsync(91_000)
 
     expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Amazon did not finish signing out")
-    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1" })
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "ACCOUNT_AUTOMATION_ERROR",
+      jobId: "job-1",
+      error: "Amazon did not finish signing out. Cancel the switch and try again.",
+    })
+  })
+
+  it("keeps a single polling loop while a logout page loads", async () => {
+    vi.useFakeTimers()
+    Object.defineProperty(document, "readyState", { configurable: true, get: () => "interactive" })
+    document.body.innerHTML = "<main>Signing out</main>"
+    const addListener = vi.spyOn(window, "addEventListener")
+    const logoutJob = { id: "job-1", stage: "logout" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: logoutJob }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    const polls = sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNT_AUTOMATION_GET_JOB")
+    expect(polls.length).toBeGreaterThanOrEqual(5)
+    expect(polls.length).toBeLessThanOrEqual(7)
+    expect(addListener.mock.calls.filter(([type]) => type === "load")).toHaveLength(1)
   })
 })

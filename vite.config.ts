@@ -8,6 +8,63 @@ import tailwindcss from "@tailwindcss/vite"
 import { transformWithOxc, type Plugin } from "vite"
 import { defineConfig } from "vitest/config"
 
+const root = fileURLToPath(new URL(".", import.meta.url))
+const fromRoot = (path: string) => resolve(root, path)
+const GEIST_FONT_PATH = "node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2"
+
+/** Modules Chrome loads without bundling: compiled one by one, then emitted or concatenated. */
+const SCRIPT_SOURCES = {
+  background: "src/background.ts",
+  accounts: "src/lib/accounts.ts",
+  settings: "src/lib/settings.ts",
+  log: "src/lib/log.ts",
+  dates: "src/lib/dates.ts",
+  pasteGuard: "src/pasteGuard.ts",
+  passkeyGuardCore: "src/lib/passkeyGuardCore.ts",
+  passkeyGuard: "src/passkeyGuard.ts",
+  shortcut: "src/lib/shortcut.ts",
+  sellerCentralSession: "src/lib/sellerCentralSession.ts",
+  accountAutomation: "src/accountAutomation.ts",
+  unfulfillable: "src/lib/unfulfillable.ts",
+  feedback: "src/lib/feedback.ts",
+  stranded: "src/lib/stranded.ts",
+  suppressed: "src/lib/suppressed.ts",
+  shippingQueue: "src/lib/shippingQueue.ts",
+  content: "src/content.tsx",
+} as const
+
+type ScriptName = keyof typeof SCRIPT_SOURCES
+
+/**
+ * Manifest content scripts are classic scripts, so each one concatenates its modules in
+ * dependency order inside one function scope. Top-level names must be unique within a script.
+ */
+const CLASSIC_SCRIPTS: Record<string, readonly ScriptName[]> = {
+  "paste-guard.js": ["pasteGuard"],
+  "passkey-guard.js": ["passkeyGuardCore", "passkeyGuard"],
+  "content.js": [
+    "log",
+    "dates",
+    "shortcut",
+    "sellerCentralSession",
+    "unfulfillable",
+    "feedback",
+    "stranded",
+    "suppressed",
+    "shippingQueue",
+    "content",
+  ],
+  "account-automation.js": ["log", "sellerCentralSession", "accountAutomation"],
+}
+
+/** ES modules the background service worker imports by relative path. */
+const BACKGROUND_MODULES: Record<string, ScriptName> = {
+  "background.js": "background",
+  "lib/accounts.js": "accounts",
+  "lib/settings.js": "settings",
+  "lib/log.js": "log",
+}
+
 function stripModuleSyntax(source: string): string {
   return source.replace(/^export /gm, "").replace(/^import .+;\s*/gm, "")
 }
@@ -16,150 +73,68 @@ function asClassicContentScript(source: string): string {
   return `(function () {\n${source}\n})();\n`
 }
 
-function extensionScriptsPlugin(): Plugin {
-  const backgroundPath = resolve(
-    fileURLToPath(new URL(".", import.meta.url)),
-    "src/background.ts",
-  )
-  const pasteGuardPath = resolve(
-    fileURLToPath(new URL(".", import.meta.url)),
-    "src/pasteGuard.ts",
-  )
-  const geistFontPath = resolve(
-    fileURLToPath(new URL(".", import.meta.url)),
-    "node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2",
-  )
-  const passkeyGuardPath = resolve(
-    fileURLToPath(new URL(".", import.meta.url)),
-    "src/passkeyGuard.ts",
-  )
-  const passkeyGuardCorePath = resolve(
-    fileURLToPath(new URL(".", import.meta.url)),
-    "src/lib/passkeyGuardCore.ts",
-  )
-  const accountAutomationPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/accountAutomation.ts")
-  const accountsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/accounts.ts")
-  const settingsPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/settings.ts")
-  const sellerCentralSessionPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/sellerCentralSession.ts")
-  const unfulfillablePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/unfulfillable.ts")
-  const feedbackPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/feedback.ts")
-  const strandedPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/stranded.ts")
-  const suppressedPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/suppressed.ts")
-  const shippingQueuePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/shippingQueue.ts")
-  const contentPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/content.tsx")
-  const shortcutPath = resolve(fileURLToPath(new URL(".", import.meta.url)), "src/lib/shortcut.ts")
+function topLevelNames(source: string): string[] {
+  const declarations = /^(?:async\s+)?function\s*\*?\s*([\w$]+)|^(?:const|let|var|class)\s+([\w$]+)/gm
+  return [...source.matchAll(declarations)].map((match) => match[1] ?? match[2])
+}
 
+/** Two modules declaring the same top-level function would silently override each other. */
+function duplicateTopLevelName(modules: ReadonlyArray<{ name: ScriptName; code: string }>): string | undefined {
+  const owners = new Map<string, ScriptName>()
+  for (const { name, code } of modules) {
+    for (const identifier of topLevelNames(code)) {
+      const owner = owners.get(identifier)
+      if (owner && owner !== name) return `“${identifier}” is declared in both ${owner} and ${name}`
+      owners.set(identifier, name)
+    }
+  }
+  return undefined
+}
+
+function extensionScriptsPlugin(): Plugin {
   return {
     name: "extension-scripts",
     buildStart() {
-      this.addWatchFile(backgroundPath)
-      this.addWatchFile(geistFontPath)
-      this.addWatchFile(pasteGuardPath)
-      this.addWatchFile(passkeyGuardPath)
-      this.addWatchFile(passkeyGuardCorePath)
-      this.addWatchFile(accountAutomationPath)
-      this.addWatchFile(accountsPath)
-      this.addWatchFile(settingsPath)
-      this.addWatchFile(sellerCentralSessionPath)
-      this.addWatchFile(unfulfillablePath)
-      this.addWatchFile(feedbackPath)
-      this.addWatchFile(strandedPath)
-      this.addWatchFile(suppressedPath)
-      this.addWatchFile(shippingQueuePath)
-      this.addWatchFile(contentPath)
-      this.addWatchFile(shortcutPath)
+      this.addWatchFile(fromRoot(GEIST_FONT_PATH))
+      for (const path of Object.values(SCRIPT_SOURCES)) this.addWatchFile(fromRoot(path))
     },
     async generateBundle(_options, bundle) {
-      const [backgroundSource, pasteGuardSource, passkeyGuardSource, passkeyGuardCoreSource, accountAutomationSource, accountsSource, settingsSource, sellerCentralSessionSource, unfulfillableSource, feedbackSource, strandedSource, suppressedSource, shippingQueueSource, contentSource, shortcutSource, geistFont] = await Promise.all([
-        readFile(backgroundPath, "utf8"),
-        readFile(pasteGuardPath, "utf8"),
-        readFile(passkeyGuardPath, "utf8"),
-        readFile(passkeyGuardCorePath, "utf8"),
-        readFile(accountAutomationPath, "utf8"),
-        readFile(accountsPath, "utf8"),
-        readFile(settingsPath, "utf8"),
-        readFile(sellerCentralSessionPath, "utf8"),
-        readFile(unfulfillablePath, "utf8"),
-        readFile(feedbackPath, "utf8"),
-        readFile(strandedPath, "utf8"),
-        readFile(suppressedPath, "utf8"),
-        readFile(shippingQueuePath, "utf8"),
-        readFile(contentPath, "utf8"),
-        readFile(shortcutPath, "utf8"),
-        readFile(geistFontPath),
-      ])
-      const [backgroundResult, pasteGuardResult, passkeyGuardResult, passkeyGuardCoreResult, accountAutomationResult, accountsResult, settingsResult, sellerCentralSessionResult, unfulfillableResult, feedbackResult, strandedResult, suppressedResult, shippingQueueResult, contentResult, shortcutResult] = await Promise.all([
-        transformWithOxc(backgroundSource, backgroundPath),
-        transformWithOxc(pasteGuardSource, pasteGuardPath),
-        transformWithOxc(passkeyGuardSource, passkeyGuardPath),
-        transformWithOxc(passkeyGuardCoreSource, passkeyGuardCorePath),
-        transformWithOxc(accountAutomationSource, accountAutomationPath),
-        transformWithOxc(accountsSource, accountsPath),
-        transformWithOxc(settingsSource, settingsPath),
-        transformWithOxc(sellerCentralSessionSource, sellerCentralSessionPath),
-        transformWithOxc(unfulfillableSource, unfulfillablePath),
-        transformWithOxc(feedbackSource, feedbackPath),
-        transformWithOxc(strandedSource, strandedPath),
-        transformWithOxc(suppressedSource, suppressedPath),
-        transformWithOxc(shippingQueueSource, shippingQueuePath),
-        transformWithOxc(contentSource, contentPath),
-        transformWithOxc(shortcutSource, shortcutPath),
-      ])
-      const passkeyGuardBundle = `${stripModuleSyntax(passkeyGuardCoreResult.code)}\n${stripModuleSyntax(passkeyGuardResult.code)}`
-      const sellerCentralSessionBoot = stripModuleSyntax(sellerCentralSessionResult.code)
-      const accountAutomationBundle = asClassicContentScript(
-        `${sellerCentralSessionBoot}\n${stripModuleSyntax(accountAutomationResult.code)}`,
-      )
-      const contentBoot = asClassicContentScript(
-        `${stripModuleSyntax(shortcutResult.code)}\n${sellerCentralSessionBoot}\n${stripModuleSyntax(unfulfillableResult.code)}\n${stripModuleSyntax(feedbackResult.code)}\n${stripModuleSyntax(strandedResult.code)}\n${stripModuleSyntax(suppressedResult.code)}\n${stripModuleSyntax(shippingQueueResult.code)}\n${stripModuleSyntax(contentResult.code)}`,
-      )
-
-      this.emitFile({
-        type: "asset",
-        fileName: "background.js",
-        source: backgroundResult.code,
-      })
       const paletteOutput = bundle["palette-app.js"]
       if (!paletteOutput || paletteOutput.type !== "chunk") {
         this.error("The palette-app.js bundle was not generated.")
       }
 
-      for (const [fileName, source] of [
-        ["paste-guard.js", pasteGuardResult.code],
-        ["passkey-guard.js", passkeyGuardBundle],
-        ["content.js", contentBoot],
-        ["account-automation.js", accountAutomationBundle],
-      ] as const) {
+      const entries = await Promise.all(
+        (Object.entries(SCRIPT_SOURCES) as Array<[ScriptName, string]>).map(async ([name, path]) => {
+          const file = fromRoot(path)
+          const { code } = await transformWithOxc(await readFile(file, "utf8"), file)
+          return [name, code] as const
+        }),
+      )
+      const compiled = Object.fromEntries(entries) as Record<ScriptName, string>
+
+      const classicScripts = Object.entries(CLASSIC_SCRIPTS).map(([fileName, names]) => {
+        const modules = names.map((name) => ({ name, code: stripModuleSyntax(compiled[name]) }))
+        const duplicate = duplicateTopLevelName(modules)
+        if (duplicate) this.error(`${fileName}: ${duplicate}. Rename one of them.`)
+        const source = asClassicContentScript(modules.map(({ code }) => code).join("\n"))
         try {
           new Script(source, { filename: fileName })
         } catch (error) {
-          this.error(`${fileName} must be valid classic JavaScript because Chrome loads it as a manifest content script: ${error instanceof Error ? error.message : String(error)}`)
+          const reason = error instanceof Error ? error.message : String(error)
+          this.error(`${fileName} must be valid classic JavaScript because Chrome loads it as a manifest content script: ${reason}`)
         }
-      }
-      try {
-        new Script(`${contentBoot}\n${accountAutomationBundle}`, { filename: "content+account-automation.js" })
-      } catch (error) {
-        this.error(`content.js and account-automation.js must share a page without clashing: ${error instanceof Error ? error.message : String(error)}`)
-      }
+        return [fileName, source] as const
+      })
 
-      this.emitFile({ type: "asset", fileName: "account-automation.js", source: accountAutomationBundle })
-      this.emitFile({ type: "asset", fileName: "passkey-guard.js", source: passkeyGuardBundle })
-      this.emitFile({ type: "asset", fileName: "lib/accounts.js", source: accountsResult.code })
-      this.emitFile({ type: "asset", fileName: "lib/settings.js", source: settingsResult.code })
-      this.emitFile({
-        type: "asset",
-        fileName: "content.js",
-        source: contentBoot,
-      })
-      this.emitFile({
-        type: "asset",
-        fileName: "paste-guard.js",
-        source: pasteGuardResult.code,
-      })
+      for (const [fileName, source] of classicScripts) this.emitFile({ type: "asset", fileName, source })
+      for (const [fileName, name] of Object.entries(BACKGROUND_MODULES)) {
+        this.emitFile({ type: "asset", fileName, source: compiled[name] })
+      }
       this.emitFile({
         type: "asset",
         fileName: "geist-latin-wght-normal.woff2",
-        source: geistFont,
+        source: await readFile(fromRoot(GEIST_FONT_PATH)),
       })
     },
   }

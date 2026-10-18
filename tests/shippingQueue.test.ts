@@ -28,7 +28,20 @@ import {
   SHIPPING_QUEUE_SHEET_HEADERS,
   SHIPPING_QUEUE_SHIPMENT_HEADERS,
   SHIPPING_QUEUE_URL,
+  parseDocumentTypes,
+  requiredDocumentLabel,
+  SHIPMENT_DOCUMENTS_URL,
+  SHIPPING_STATUS_INVESTIGATION_COMPLETED,
+  SHIPPING_STATUS_MONITORING,
+  SHIPPING_STATUS_NEW,
+  SHIPPING_STATUS_OUTSIDE_WINDOW,
+  SHIPPING_STATUS_OVERAGED,
+  SHIPPING_STATUS_RECEIVED_IN_FULL,
+  SHIPPING_STATUS_REVIEW,
+  SHIPPING_STATUS_UNITS_LOCATED,
   shipmentDetailsUrl,
+  shipmentDocumentsUrl,
+  shippingQueueLineStatus,
   shippingQueueNumericCell,
   shippingQueueSheetRow,
   shippingQueueSheetRows,
@@ -178,10 +191,11 @@ const response = (payload: unknown, status = 200, contentType?: string) => ({
 interface RouteOptions {
   pages?: unknown[]
   details?: Record<string, unknown | number | Error>
+  documents?: Record<string, unknown | number | Error>
 }
 
-/** Serves list pages in order and eligibility details by shipment ID. */
-function routedFetch({ pages = [], details = {} }: RouteOptions) {
+/** Serves list pages in order, eligibility details, and document requirements by shipment ID. */
+function routedFetch({ pages = [], details = {}, documents = {} }: RouteOptions) {
   let pageIndex = 0
   return vi.fn(async (input: unknown, _init?: unknown) => {
     const url = String(input)
@@ -191,6 +205,13 @@ function routedFetch({ pages = [], details = {} }: RouteOptions) {
       if (page instanceof Error) throw page
       if (typeof page === "number") return response({}, page)
       return response(page ?? [])
+    }
+    if (url.includes("/document-requirements/")) {
+      const id = decodeURIComponent(url.split("/document-requirements/")[1].split("?")[0])
+      const result = id in documents ? documents[id] : { documents: [] }
+      if (result instanceof Error) throw result
+      if (typeof result === "number") return response({}, result)
+      return response(result)
     }
     const id = decodeURIComponent(url.split("/eligibilities/")[1].split("?")[0])
     const result = id in details ? details[id] : { ...SAMPLE_DETAILS_RESPONSE, shipmentId: id }
@@ -202,6 +223,8 @@ function routedFetch({ pages = [], details = {} }: RouteOptions) {
 
 const noSleep = async () => {}
 const NO_CUTOFF = { cutoffDate: 0, sleep: noSleep }
+/** Eligible with a negative discrepancy, so the shipment can need required documents. */
+const ELIGIBLE_DETAILS = { FBA19RKC646S: { ...SAMPLE_DETAILS_RESPONSE, eligible: true } }
 
 describe("shippingQueue URL generation", () => {
   it("builds the first-page URL exactly like Seller Central", () => {
@@ -225,6 +248,36 @@ describe("shippingQueue URL generation", () => {
     expect(shipmentDetailsUrl("FBA18TNH8GWF")).toBe(
       "https://sellercentral.amazon.com/fba/wmsr/eligibilities/FBA18TNH8GWF?withInquiry=true&withDiscrepancies=true",
     )
+  })
+
+  it("builds the document-requirements URL", () => {
+    expect(shipmentDocumentsUrl("FBA18TNH8GWF")).toBe(
+      `${SHIPMENT_DOCUMENTS_URL}/FBA18TNH8GWF?evaluateOption=DOCUMENT`,
+    )
+  })
+})
+
+describe("shipping queue paste status", () => {
+  it("maps eligibility reasons the way the shipping queue bookmarklet does", () => {
+    expect(shippingQueueLineStatus({ detailsFailed: true, discrepancy: -2, eligible: true })).toBe("N/A")
+    expect(shippingQueueLineStatus({ shipmentIneligibilityReason: "NINE_MONTH_STATUTE_OF_LIMITATIONS", discrepancy: -1 })).toBe(SHIPPING_STATUS_OUTSIDE_WINDOW)
+    expect(shippingQueueLineStatus({ shipmentIneligibilityReason: "NOT_ALL_SHIPPED", discrepancy: -1 })).toBe(SHIPPING_STATUS_MONITORING)
+    expect(shippingQueueLineStatus({ itemIneligibilityReason: "ITEM_LEVEL_AUTHORITATIVE_RECEIVE", discrepancy: -1 })).toBe(SHIPPING_STATUS_INVESTIGATION_COMPLETED)
+    expect(shippingQueueLineStatus({ itemIneligibilityReason: "RESEARCHED", discrepancy: -1 })).toBe(SHIPPING_STATUS_UNITS_LOCATED)
+    expect(shippingQueueLineStatus({ discrepancy: 0, eligible: true })).toBe(SHIPPING_STATUS_RECEIVED_IN_FULL)
+    expect(shippingQueueLineStatus({ discrepancy: -4, eligible: true })).toBe(SHIPPING_STATUS_NEW)
+    expect(shippingQueueLineStatus({ discrepancy: 2, eligible: true })).toBe(SHIPPING_STATUS_OVERAGED)
+    expect(shippingQueueLineStatus({ shipmentIneligibilityReason: "OTHER", discrepancy: -1, eligible: false })).toBe("OTHER")
+    expect(shippingQueueLineStatus({ shipmentIneligibilityReason: "NONE", discrepancy: -1 })).toBe(SHIPPING_STATUS_REVIEW)
+  })
+
+  it("names invoice and delivery documents only for a new send-list line", () => {
+    expect(parseDocumentTypes({ documents: [{ documentType: "POD" }, { documentType: " INVOICE " }, { documentType: "" }] })).toEqual(["POD", "INVOICE"])
+    expect(parseDocumentTypes({})).toEqual([])
+    expect(requiredDocumentLabel(["POD", "INVOICE"], SHIPPING_STATUS_NEW)).toBe("Proof of Inventory Ownership AND Delivery")
+    expect(requiredDocumentLabel(["POD"], SHIPPING_STATUS_NEW)).toBe("Delivery")
+    expect(requiredDocumentLabel([], SHIPPING_STATUS_NEW)).toBe("N/A")
+    expect(requiredDocumentLabel(["INVOICE"], SHIPPING_STATUS_MONITORING)).toBe("N/A")
   })
 })
 
@@ -479,7 +532,7 @@ describe("shippingQueue sheet generation", () => {
 
 describe("fetchShippingQueueShipments", () => {
   it("loads the list, then each shipment's details, and reports progress", async () => {
-    const fetchImpl = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
+    const fetchImpl = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]], details: ELIGIBLE_DETAILS })
     const events: ReportProgressEvent[] = []
 
     const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, onProgress: (e) => events.push(e) })
@@ -488,7 +541,25 @@ describe("fetchShippingQueueShipments", () => {
     expect(shipments[0].shipmentId).toBe("FBA19RKC646S")
     expect(shipments[0].details?.items).toHaveLength(2)
     expect(shipments[0].detailsFetchFailed).toBeUndefined()
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(shipments[0].documentTypes).toEqual([])
+    expect(shipments[0].documentsFetchFailed).toBeUndefined()
+
+    const withDocs = routedFetch({
+      pages: [[SAMPLE_RAW_SHIPMENT]],
+      details: ELIGIBLE_DETAILS,
+      documents: { FBA19RKC646S: { documents: [{ documentType: "INVOICE" }, { documentType: "POD" }] } },
+    })
+    const documented = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: withDocs })
+    expect(documented[0].documentTypes).toEqual(["INVOICE", "POD"])
+    expect(documented[0].detailsFetchFailed).toBeUndefined()
+
+    const docsFail = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]], details: ELIGIBLE_DETAILS, documents: { FBA19RKC646S: 500 } })
+    const failedDocs = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: docsFail })
+    expect(failedDocs[0].details?.items).toHaveLength(2)
+    expect(failedDocs[0].detailsFetchFailed).toBeUndefined()
+    expect(failedDocs[0].documentsFetchFailed).toBe(true)
+    expect(failedDocs[0].documentTypes).toBeUndefined()
     expect(events).toContainEqual({ source: "shippingQueue", status: "active", loaded: 0, phase: "listings" })
     expect(events).toContainEqual({ source: "shippingQueue", status: "active", loaded: 1, phase: "listings" })
     expect(events).toContainEqual({ source: "shippingQueue", status: "active", loaded: 0, total: 1, phase: "details" })
@@ -496,8 +567,32 @@ describe("fetchShippingQueueShipments", () => {
     expect(events.at(-1)).toEqual({ source: "shippingQueue", status: "complete", loaded: 1, total: 1, phase: "details" })
   })
 
+  it("skips document requirements when no line can need documents", async () => {
+    const ineligible = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
+    const [skipped] = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: ineligible })
+    expect(ineligible).toHaveBeenCalledTimes(2)
+    expect(ineligible.mock.calls.some(([url]) => String(url).includes("/document-requirements/"))).toBe(false)
+    expect(skipped.details?.items).toHaveLength(2)
+    expect(skipped.documentTypes).toBeUndefined()
+    expect(skipped.documentsFetchFailed).toBeUndefined()
+
+    const items = SAMPLE_DETAILS_RESPONSE.discrepancies.items.map((item) => ({ ...item, totalDiscrepancyQuantity: 0 }))
+    const balanced = routedFetch({
+      pages: [[SAMPLE_RAW_SHIPMENT]],
+      details: {
+        FBA19RKC646S: {
+          ...SAMPLE_DETAILS_RESPONSE,
+          eligible: true,
+          discrepancies: { ...SAMPLE_DETAILS_RESPONSE.discrepancies, items },
+        },
+      },
+    })
+    await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: balanced })
+    expect(balanced).toHaveBeenCalledTimes(2)
+  })
+
   it("sends the same requests Seller Central does", async () => {
-    const fetchImpl = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
+    const fetchImpl = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]], details: ELIGIBLE_DETAILS })
     await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl })
 
     const [listUrl, listInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
@@ -513,6 +608,16 @@ describe("fetchShippingQueueShipments", () => {
     const [detailsUrl, detailsInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit]
     expect(detailsUrl).toBe(shipmentDetailsUrl("FBA19RKC646S"))
     expect(detailsInit).toMatchObject({
+      method: "GET",
+      mode: "cors",
+      credentials: "include",
+      referrer: "https://sellercentral.amazon.com/fba/wmsr/FBA19RKC646S",
+    })
+
+    const [documentsUrl, documentsInit] = fetchImpl.mock.calls[2] as unknown as [string, RequestInit]
+    expect(documentsUrl).toBe(shipmentDocumentsUrl("FBA19RKC646S"))
+    expect(documentsUrl.startsWith(SHIPMENT_DOCUMENTS_URL)).toBe(true)
+    expect(documentsInit).toMatchObject({
       method: "GET",
       mode: "cors",
       credentials: "include",
@@ -612,8 +717,10 @@ describe("fetchShippingQueueShipments", () => {
     expect(shipments[1].details).toBeUndefined()
     expect(shipments[2]).toMatchObject({ shipmentId: "FBA_BROKEN", detailsFetchFailed: true })
     // A 403 pauses once, checks the list, and retries that shipment once.
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("FBA_FORBIDDEN"))).toHaveLength(2)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("FBA_BROKEN"))).toHaveLength(1)
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/eligibilities/FBA_FORBIDDEN"))).toHaveLength(2)
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/document-requirements/FBA_FORBIDDEN"))).toHaveLength(0)
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/eligibilities/FBA_BROKEN"))).toHaveLength(1)
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/document-requirements/FBA_BROKEN"))).toHaveLength(0)
     expect(fetchImpl.mock.calls.filter(([url]) => String(url).startsWith(SHIPPING_QUEUE_URL))).toHaveLength(2)
     vi.restoreAllMocks()
   })

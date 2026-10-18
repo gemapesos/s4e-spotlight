@@ -1,9 +1,11 @@
+import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 import {
+  fetchAntiCsrfTokenFromInventory,
   formatListingStatus,
-  INVENTORY_MANAGE_URL,
+  graphqlMessages,
+  mapWithConcurrency,
   readAntiCsrfToken,
-  readAntiCsrfTokenFromHtml,
   UNFULFILLABLE_GQL_URL,
 } from "./unfulfillable"
 
@@ -780,6 +782,7 @@ export interface FetchSuppressedListingsOptions {
   root?: ParentNode
   cookie?: string
   onProgress?: (event: ReportProgressEvent) => void
+  log?: Logger
 }
 
 function suppressedCell(value: string | number | null | undefined): string {
@@ -841,7 +844,9 @@ function formatQuantityDiscount(
   return [...quantityPrices(discount.percentQuantityPrice, "%"), ...quantityPrices(discount.fixedQuantityPrice)].join(", ")
 }
 
-function formatFbaRecommendation(recommendation: NonNullable<NonNullable<SuppressedListing["availability"]>["fbaRecommendation"]> | null | undefined): string {
+type FbaRecommendation = NonNullable<NonNullable<SuppressedListing["availability"]>["fbaRecommendation"]>
+
+function formatFbaRecommendation(recommendation: FbaRecommendation | null | undefined): string {
   if (!recommendation) return ""
   return joinParts([
     recommendation.type,
@@ -911,25 +916,13 @@ export function primaryOffer(listing: SuppressedListing): SuppressedOffer | unde
   return offers.reduce((best, offer) => (offerRichness(offer) > offerRichness(best) ? offer : best))
 }
 
-function suppressedGraphqlMessages(payload: unknown): string[] {
-  if (!payload || typeof payload !== "object" || !("errors" in payload)) return []
-  const errors = (payload as { errors?: unknown }).errors
-  if (!Array.isArray(errors)) return []
-  return errors
-    .map((error) => {
-      if (!error || typeof error !== "object" || !("message" in error)) return ""
-      return String((error as { message?: unknown }).message ?? "")
-    })
-    .filter(Boolean)
-}
-
 function asSuppressedListing(value: unknown): SuppressedListing | undefined {
   if (!value || typeof value !== "object") return undefined
   return value as SuppressedListing
 }
 
 export function parseSuppressedListingsPage(payload: unknown): ListingsPage {
-  const messages = suppressedGraphqlMessages(payload)
+  const messages = graphqlMessages(payload)
   const data = payload && typeof payload === "object" && "data" in payload ? (payload as { data?: unknown }).data : undefined
   const listingsV2 =
     data && typeof data === "object" && "listingsV2" in data
@@ -1121,14 +1114,8 @@ function suppressedIssueCells(listing: SuppressedListing): string[] {
   return [formatted.message, formatted.type, formatted.attribute, formatted.enforcement, formatted.source, formatted.tags]
 }
 
-function suppressedChunk<T>(items: readonly T[], size: number): T[][] {
-  const batches: T[][] = []
-  for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size))
-  return batches
-}
-
 export function parseListingIssues(payload: unknown): ListingIssue[] {
-  const messages = suppressedGraphqlMessages(payload)
+  const messages = graphqlMessages(payload)
   const data = payload && typeof payload === "object" && "data" in payload ? (payload as { data?: unknown }).data : undefined
   const listingIssuesActions =
     data && typeof data === "object" && "listingIssuesActions" in data
@@ -1178,22 +1165,6 @@ function suppressedListingsVariables(from: number): Record<string, unknown> {
       { key: "CONDITION", values: [] },
     ],
   }
-}
-
-async function fetchSuppressedAntiCsrfTokenFromInventory(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
-  const response = await fetchImpl(INVENTORY_MANAGE_URL, {
-    method: "GET",
-    credentials: "include",
-    headers: { accept: "text/html" },
-  })
-  if (!response.ok) return undefined
-  let html = ""
-  try {
-    html = await response.text()
-  } catch {
-    return undefined
-  }
-  return readAntiCsrfTokenFromHtml(html)
 }
 
 async function postSuppressedListingsPage(
@@ -1260,36 +1231,38 @@ async function postListingIssues(
   return parseListingIssues(payload)
 }
 
+/** Loads each SKU's suppression reasons, keeping SUPPRESSED_ISSUES_CONCURRENCY requests in flight. */
 async function fetchListingIssues(
   fetchImpl: typeof globalThis.fetch,
   token: string,
   listings: readonly SuppressedListing[],
   onProgress?: (event: ReportProgressEvent) => void,
+  log?: Logger,
 ): Promise<SuppressedListing[]> {
   if (listings.length === 0) return []
-  onProgress?.({ source: "suppressed", status: "active", loaded: 0, total: listings.length, phase: "issues" })
-  const withIssues: SuppressedListing[] = []
+  const total = listings.length
+  onProgress?.({ source: "suppressed", status: "active", loaded: 0, total, phase: "issues" })
   let processed = 0
-  for (const batch of suppressedChunk(listings, SUPPRESSED_ISSUES_CONCURRENCY)) {
-    const results = await Promise.all(batch.map(async (listing) => {
-      const sku = listingSku(listing)
-      if (!sku) return { ...listing, issues: [] }
+  let failed = 0
+  const withIssues = await mapWithConcurrency(listings, SUPPRESSED_ISSUES_CONCURRENCY, async (listing) => {
+    const sku = listingSku(listing)
+    let result: SuppressedListing
+    if (!sku) {
+      result = { ...listing, issues: [] }
+    } else {
       try {
-        return { ...listing, issues: await postListingIssues(fetchImpl, token, sku) }
-      } catch {
-        return { ...listing, issues: [], issuesFetchFailed: true }
+        result = { ...listing, issues: await postListingIssues(fetchImpl, token, sku) }
+      } catch (error) {
+        failed += 1
+        if (failed === 1) log?.warn("suppressed.issuesFailed", { error: describeError(error) })
+        result = { ...listing, issues: [], issuesFetchFailed: true }
       }
-    }))
-    withIssues.push(...results)
-    processed += batch.length
-    onProgress?.({
-      source: "suppressed",
-      status: "active",
-      loaded: processed,
-      total: listings.length,
-      phase: "issues",
-    })
-  }
+    }
+    processed += 1
+    onProgress?.({ source: "suppressed", status: "active", loaded: processed, total, phase: "issues" })
+    return result
+  })
+  if (failed > 0) log?.warn("suppressed.issuesIncomplete", { failed, total })
   return withIssues
 }
 
@@ -1300,8 +1273,12 @@ export async function fetchSuppressedListings(
   const root = options.root ?? document
   const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "")
   const onProgress = options.onProgress
+  const log = options.log
   let token = readAntiCsrfToken(root, cookie)
-  if (!token) token = await fetchSuppressedAntiCsrfTokenFromInventory(fetchImpl)
+  if (!token) {
+    log?.info("suppressed.tokenFromInventoryPage")
+    token = await fetchAntiCsrfTokenFromInventory(fetchImpl)
+  }
   if (!token) throw new Error("Couldn’t read the Seller Central security token.")
 
   onProgress?.({ source: "suppressed", status: "active", loaded: 0, phase: "listings" })
@@ -1318,6 +1295,7 @@ export async function fetchSuppressedListings(
       result = await postSuppressedListingsPage(fetchImpl, token, from)
     } catch (error) {
       if (listings.length > 0) {
+        log?.warn("suppressed.listingsStopped", { page, loaded: listings.length, error: describeError(error) })
         listingsIncomplete = true
         break
       }
@@ -1345,13 +1323,16 @@ export async function fetchSuppressedListings(
     if (result.listings.length === 0) break
   }
 
-  if (!stoppedAtZeroAvailable && reportedCount > listings.length) listingsIncomplete = true
+  if (!stoppedAtZeroAvailable && reportedCount > listings.length) {
+    log?.warn("suppressed.listingsIncomplete", { loaded: listings.length, reported: reportedCount })
+    listingsIncomplete = true
+  }
 
   const tagged = listingsIncomplete
     ? listings.map((listing) => ({ ...listing, listingsIncomplete: true }))
     : listings
   const inStock = inStockSuppressedListings(tagged)
-  const merged = await fetchListingIssues(fetchImpl, token, inStock, onProgress)
+  const merged = await fetchListingIssues(fetchImpl, token, inStock, onProgress, log)
   onProgress?.({
     source: "suppressed",
     status: "complete",

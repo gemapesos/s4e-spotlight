@@ -81,11 +81,6 @@ function strandedQuantity(value: string | number | null | undefined): number {
   return amount === "" ? 0 : amount
 }
 
-function strandedStringField(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined
-  return value
-}
-
 export function formatStrandedDate(value: string | null | undefined): string {
   if (!value) return ""
   const ms = Number(value)
@@ -140,56 +135,41 @@ function parseFilterLabelMap(root: ParentNode): Map<string, string> {
   return labels
 }
 
+/** String fields copied as-is from each row's data-row-data JSON. */
+const STRANDED_ROW_FIELDS = [
+  "SKU",
+  "ASIN",
+  "FNSKU",
+  "ProductName",
+  "Condition",
+  "Status",
+  "StatusSecondary",
+  "Price",
+  "PriceUnit",
+  "Available",
+  "TotalQuantity",
+  "Reserved",
+  "Inbound",
+  "Unfulfillable",
+  "DateAutoRemoval",
+  "AutoRemovalType",
+  "DateStranded",
+  "StrandedReason",
+  "StrandedReasonCode",
+  "ErrorMessage",
+  "FulfilledBy",
+  "Program",
+  "SupportedActions",
+] as const satisfies ReadonlyArray<Exclude<keyof StrandedListing, "StrandedReasonLabel">>
+
 function asStrandedListing(value: unknown, labels: ReadonlyMap<string, string>): StrandedListing | undefined {
   if (!value || typeof value !== "object") return undefined
   const record = value as Record<string, unknown>
   const listing: StrandedListing = {}
-  const sku = strandedStringField(record.SKU)
-  const asin = strandedStringField(record.ASIN)
-  const fnsku = strandedStringField(record.FNSKU)
-  const productName = strandedStringField(record.ProductName)
-  const condition = strandedStringField(record.Condition)
-  const status = strandedStringField(record.Status)
-  const statusSecondary = strandedStringField(record.StatusSecondary)
-  const price = strandedStringField(record.Price)
-  const priceUnit = strandedStringField(record.PriceUnit)
-  const available = strandedStringField(record.Available)
-  const totalQuantity = strandedStringField(record.TotalQuantity)
-  const reserved = strandedStringField(record.Reserved)
-  const inbound = strandedStringField(record.Inbound)
-  const unfulfillable = strandedStringField(record.Unfulfillable)
-  const dateAutoRemoval = strandedStringField(record.DateAutoRemoval)
-  const autoRemovalType = strandedStringField(record.AutoRemovalType)
-  const dateStranded = strandedStringField(record.DateStranded)
-  const strandedReason = strandedStringField(record.StrandedReason)
-  const strandedReasonCode = strandedStringField(record.StrandedReasonCode)
-  const errorMessage = strandedStringField(record.ErrorMessage)
-  const fulfilledBy = strandedStringField(record.FulfilledBy)
-  const program = strandedStringField(record.Program)
-  const supportedActions = strandedStringField(record.SupportedActions)
-  if (sku !== undefined) listing.SKU = sku
-  if (asin !== undefined) listing.ASIN = asin
-  if (fnsku !== undefined) listing.FNSKU = fnsku
-  if (productName !== undefined) listing.ProductName = productName
-  if (condition !== undefined) listing.Condition = condition
-  if (status !== undefined) listing.Status = status
-  if (statusSecondary !== undefined) listing.StatusSecondary = statusSecondary
-  if (price !== undefined) listing.Price = price
-  if (priceUnit !== undefined) listing.PriceUnit = priceUnit
-  if (available !== undefined) listing.Available = available
-  if (totalQuantity !== undefined) listing.TotalQuantity = totalQuantity
-  if (reserved !== undefined) listing.Reserved = reserved
-  if (inbound !== undefined) listing.Inbound = inbound
-  if (unfulfillable !== undefined) listing.Unfulfillable = unfulfillable
-  if (dateAutoRemoval !== undefined) listing.DateAutoRemoval = dateAutoRemoval
-  if (autoRemovalType !== undefined) listing.AutoRemovalType = autoRemovalType
-  if (dateStranded !== undefined) listing.DateStranded = dateStranded
-  if (strandedReason !== undefined) listing.StrandedReason = strandedReason
-  if (strandedReasonCode !== undefined) listing.StrandedReasonCode = strandedReasonCode
-  if (errorMessage !== undefined) listing.ErrorMessage = errorMessage
-  if (fulfilledBy !== undefined) listing.FulfilledBy = fulfilledBy
-  if (program !== undefined) listing.Program = program
-  if (supportedActions !== undefined) listing.SupportedActions = supportedActions
+  for (const field of STRANDED_ROW_FIELDS) {
+    const fieldValue = record[field]
+    if (typeof fieldValue === "string") listing[field] = fieldValue
+  }
   const reasonCode = (listing.StrandedReasonCode || listing.StrandedReason || "").trim()
   const reasonLabel = (reasonCode && labels.get(reasonCode)) || listing.ErrorMessage?.trim() || reasonCode
   if (reasonLabel) listing.StrandedReasonLabel = reasonLabel

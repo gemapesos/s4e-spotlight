@@ -1,3 +1,4 @@
+(function () {
 const PALETTE_HOST_ID = "command-palette-extension-root";
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open";
 const PASTE_GUARD_KEY = "__s4eSpotlightPasteGuard";
@@ -48,3 +49,5 @@ function installPasteGuard(targetWindow) {
 const pasteGuardWindow = window;
 pasteGuardWindow[PASTE_GUARD_KEY]?.destroy();
 pasteGuardWindow[PASTE_GUARD_KEY] = installPasteGuard(window);
+
+})();
