@@ -133,31 +133,75 @@ export interface MountCommandPaletteOptions {
   shadowMode?: ShadowRootMode
 }
 
-interface OverflowStyles {
-  overflow: string
-  overflowX: string
-  overflowY: string
-}
+/** Sets inline styles and returns a function that puts the previous inline values back. */
+function setInlineStyles(element: HTMLElement, styles: Record<string, [value: string, priority?: string]>): () => void {
+  const previous = Object.keys(styles).map((property) => [
+    property,
+    element.style.getPropertyValue(property),
+    element.style.getPropertyPriority(property),
+  ] as const)
 
-function lockDocumentScroll(document: Document): () => void {
-  const elements = [document.documentElement, document.body]
-  const previousStyles = elements.map<OverflowStyles>((element) => ({
-    overflow: element.style.overflow,
-    overflowX: element.style.overflowX,
-    overflowY: element.style.overflowY,
-  }))
-
-  for (const element of elements) {
-    element.style.overflow = "hidden"
+  for (const [property, [value, priority = ""]] of Object.entries(styles)) {
+    element.style.setProperty(property, value, priority)
   }
 
   return () => {
-    elements.forEach((element, index) => {
-      const previous = previousStyles[index]
-      element.style.overflow = previous.overflow
-      element.style.overflowX = previous.overflowX
-      element.style.overflowY = previous.overflowY
-    })
+    for (const [property, value, priority] of previous) {
+      if (value) element.style.setProperty(property, value, priority)
+      else element.style.removeProperty(property)
+    }
+  }
+}
+
+/** Radix Dialog marks body while its own scroll lock is mounted. */
+const RADIX_SCROLL_LOCK_ATTRIBUTE = "data-scroll-locked"
+
+/** Body styles Radix's scroll lock overrides (see react-remove-scroll-bar). */
+const RADIX_LOCKED_BODY_PROPERTIES = [
+  "overflow-x",
+  "overflow-y",
+  "position",
+  "margin-top",
+  "margin-right",
+  "margin-left",
+  "padding-top",
+  "padding-right",
+  "padding-left",
+] as const
+
+/**
+ * Locks page scroll without touching layout. Hiding the scrollbar (Radix's approach, or
+ * `overflow: hidden`) changes the viewport's width, and no padding or gutter trick looks the
+ * same as the real scrollbar, so the scrollbar stays exactly as it is:
+ * - Radix's lock styles on body are pinned to body's current values, so they change nothing.
+ * - Radix's lock still cancels wheel and touch scrolling outside the palette, and focus stays
+ *   trapped in the palette, so keys can't scroll the page.
+ * - Dragging the scrollbar itself is undone as it happens.
+ */
+function lockDocumentScroll(document: Document): () => void {
+  const { body } = document
+  const view = document.defaultView
+  if (!view) return () => {}
+
+  const computed = view.getComputedStyle(body)
+  const restoreBody = setInlineStyles(body, Object.fromEntries(
+    RADIX_LOCKED_BODY_PROPERTIES.map((property) => [property, [computed.getPropertyValue(property), "important"]]),
+  ))
+
+  const scroller = document.scrollingElement ?? document.documentElement
+  const { scrollLeft, scrollTop } = scroller
+  const keepScrollPosition = (event: Event) => {
+    const target = event.target === document ? scroller : event.target
+    if (target !== scroller) return
+    if (scroller.scrollTop !== scrollTop || scroller.scrollLeft !== scrollLeft) {
+      scroller.scrollTo({ left: scrollLeft, top: scrollTop, behavior: "instant" })
+    }
+  }
+  document.addEventListener("scroll", keepScrollPosition, { capture: true, passive: true })
+
+  return () => {
+    document.removeEventListener("scroll", keepScrollPosition, { capture: true })
+    restoreBody()
   }
 }
 
@@ -427,6 +471,36 @@ export function mountCommandPalette({
   let openMode: PaletteMode = "commands"
   let previousFocus: HTMLElement | null = null
   let unlockDocumentScroll: (() => void) | null = null
+  let cancelPendingUnlock: (() => void) | null = null
+
+  const unlockNow = () => {
+    cancelPendingUnlock?.()
+    unlockDocumentScroll?.()
+    unlockDocumentScroll = null
+  }
+
+  // Radix keeps its own scroll lock mounted until the close animation ends. Unpinning body
+  // first would let its styles hide the scrollbar for a moment, so release both together.
+  const unlockAfterRadixScrollLock = () => {
+    const body = targetDocument.body
+    if (!unlockDocumentScroll || !body?.hasAttribute(RADIX_SCROLL_LOCK_ATTRIBUTE)) {
+      unlockNow()
+      return
+    }
+
+    const view = targetDocument.defaultView ?? window
+    const observer = new MutationObserver(() => {
+      if (!body.hasAttribute(RADIX_SCROLL_LOCK_ATTRIBUTE)) unlockNow()
+    })
+    // Fallback in case the close animation never finishes.
+    const timeout = view.setTimeout(unlockNow, 1000)
+    observer.observe(body, { attributes: true, attributeFilter: [RADIX_SCROLL_LOCK_ATTRIBUTE] })
+    cancelPendingUnlock = () => {
+      observer.disconnect()
+      view.clearTimeout(timeout)
+      cancelPendingUnlock = null
+    }
+  }
   let enabledFeatures: EnabledFeatures = DEFAULT_ENABLED_FEATURES
   let openGeneration = 0
   let firstOpenAssetsSettled = false
@@ -482,15 +556,16 @@ export function mountCommandPalette({
 
     if (nextOpen) {
       previousFocus = getDeepActiveElement(targetDocument)
-      unlockDocumentScroll = lockDocumentScroll(targetDocument)
+      applyPaletteRemScale(host, targetDocument)
+      // Reopened during the close animation: the page is still locked.
+      if (cancelPendingUnlock) cancelPendingUnlock()
+      else unlockDocumentScroll = lockDocumentScroll(targetDocument)
     } else {
-      unlockDocumentScroll?.()
-      unlockDocumentScroll = null
+      unlockAfterRadixScrollLock()
     }
     isOpen = nextOpen
     host.setAttribute(PALETTE_OPEN_ATTRIBUTE, String(nextOpen))
     host.style.pointerEvents = nextOpen ? "auto" : "none"
-    if (nextOpen) applyPaletteRemScale(host, targetDocument)
 
     const render = () => {
       if (generation !== openGeneration) return
@@ -550,8 +625,7 @@ export function mountCommandPalette({
     setOpen,
     destroy: () => {
       host.setAttribute(PALETTE_OPEN_ATTRIBUTE, "false")
-      unlockDocumentScroll?.()
-      unlockDocumentScroll = null
+      unlockNow()
       targetDocument.defaultView?.removeEventListener("keydown", onKeyDown, true)
       if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.removeListener(onRuntimeMessage)
       ;(targetDocument.defaultView as PasteGuardWindow | null)?.[
