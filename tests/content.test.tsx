@@ -513,28 +513,45 @@ describe("content-script mount", () => {
     window.removeEventListener("keydown", pageHandler)
   })
 
-  it("locks page scrolling without reserving a scrollbar gutter and restores styles", async () => {
-    document.documentElement.style.overflowX = "clip"
-    document.documentElement.style.overflowY = "auto"
-    document.body.style.overflow = "visible"
+  it("pins body styles against Radix's scroll lock without hiding the scrollbar, then restores them", () => {
+    document.body.style.setProperty("margin-right", "4px")
     mounted = mountCommandPalette({ document, shadowMode: "open" })
 
     mounted?.setOpen(true)
 
-    expect(document.documentElement.style.overflow).toBe("hidden")
-    expect(document.body.style.overflow).toBe("hidden")
-    expect(document.documentElement.style.scrollbarGutter).toBe("")
+    expect(document.documentElement.style.overflow).toBe("")
+    expect(document.body.style.getPropertyValue("margin-right")).toBe("4px")
+    expect(document.body.style.getPropertyPriority("margin-right")).toBe("important")
+    expect(document.body.style.getPropertyPriority("overflow-y")).toBe("important")
 
     mounted?.setOpen(false)
 
-    expect(document.documentElement.style.overflow).toBe("")
-    expect(document.documentElement.style.overflowX).toBe("clip")
-    expect(document.documentElement.style.overflowY).toBe("auto")
-    expect(document.body.style.overflow).toBe("visible")
+    expect(document.body.style.getPropertyValue("margin-right")).toBe("4px")
+    expect(document.body.style.getPropertyPriority("margin-right")).toBe("")
+    expect(document.body.style.getPropertyValue("overflow-y")).toBe("")
+    document.body.style.removeProperty("margin-right")
   })
 
-  it("restores page overflow styles when destroyed while open", () => {
-    document.documentElement.style.overflow = "scroll"
+  it("undoes page scrolling while open", () => {
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+    const scroller = document.scrollingElement ?? document.documentElement
+    const scrollTo = vi.fn()
+    scroller.scrollTo = scrollTo as typeof scroller.scrollTo
+
+    mounted?.setOpen(true)
+    scroller.scrollTop = 120
+    document.dispatchEvent(new Event("scroll"))
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: 0, top: 0, behavior: "instant" })
+
+    mounted?.setOpen(false)
+    scrollTo.mockClear()
+    document.dispatchEvent(new Event("scroll"))
+    expect(scrollTo).not.toHaveBeenCalled()
+    scroller.scrollTop = 0
+  })
+
+  it("restores body styles when destroyed while open", () => {
     document.body.style.overflowY = "auto"
     mounted = mountCommandPalette({ document, shadowMode: "open" })
 
@@ -542,8 +559,8 @@ describe("content-script mount", () => {
     mounted?.destroy()
     mounted = null
 
-    expect(document.documentElement.style.overflow).toBe("scroll")
     expect(document.body.style.overflowY).toBe("auto")
+    expect(document.body.style.getPropertyPriority("overflow-y")).toBe("")
   })
 
   it("marks the palette closed and tears down the early guard on destroy", () => {
