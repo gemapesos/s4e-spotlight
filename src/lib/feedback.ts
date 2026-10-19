@@ -1,17 +1,25 @@
 import { formatUtcDateTime } from "./dates"
-import type { Logger } from "./log"
+import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 
 export const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks"
-export const FEEDBACK_PAGE_SIZE = 20
-/** Lifetime 1–3 star entries, newest first; stores with more than this many pages are flagged. */
-export const FEEDBACK_MAX_PAGES = 200
-export const FEEDBACK_PAGE_CONCURRENCY = 5
+/** Amazon's largest page; bigger pages fail with HTTP 500. */
+export const FEEDBACK_PAGE_SIZE = 50
+/** Cursor chains loading at once, each walking its own stretch of dates. */
+export const FEEDBACK_CHAINS = 12
+/** A busy chain is split for an idle one only while about this many entries are left in it. */
+export const FEEDBACK_MIN_SPLIT_ENTRIES = 100
+/** Lifetime 1–3 star entries; stores with more than this many are flagged. */
+export const FEEDBACK_MAX_ENTRIES = 20_000
+export const FEEDBACK_ATTEMPTS = 3
+export const FEEDBACK_RETRY_DELAY_MS = 400
 export const FEEDBACK_FROM_RATING = 1
 export const FEEDBACK_TO_RATING = 3
+/** Used for the date ranges if Amazon won't say when the oldest entry was left. */
+const FEEDBACK_FALLBACK_OLDEST_MS = Date.UTC(1995, 0, 1)
 
 export const FEEDBACK_INCOMPLETE_NOTE =
-  `Only the newest ${FEEDBACK_MAX_PAGES * FEEDBACK_PAGE_SIZE} feedback entries were loaded. Seller Central has more.`
+  `Only ${FEEDBACK_MAX_ENTRIES.toLocaleString("en-US")} feedback entries were loaded. Seller Central has more.`
 
 export const FEEDBACK_SHEET_HEADERS = [
   "Date",
@@ -53,20 +61,26 @@ export interface SellerFeedback {
       booleanRating?: boolean | null
     } | null
   } | null
-  /** Set on every entry when the page limit stopped loading before the last page. */
+  /** Set on every entry when the entry limit stopped loading before the end. */
   feedbackIncomplete?: boolean
 }
 
 export interface FeedbacksPage {
   feedbacks: SellerFeedback[]
+  /** Entries Amazon returned, including any dropped as malformed. */
+  rows: number
   lastPage?: boolean
-  pageNumber: number
+  /** Amazon's key for the next page, when there is one. */
+  cursor?: string
 }
 
 export interface FetchSellerFeedbacksOptions {
   fetch?: typeof globalThis.fetch
   onProgress?: (event: ReportProgressEvent) => void
   log?: Logger
+  sleep?: (ms: number) => Promise<void>
+  /** Overrides FEEDBACK_MAX_ENTRIES. */
+  maxEntries?: number
 }
 
 export function isNeutralOrNegativeRating(rating: number | null | undefined): rating is number {
@@ -188,94 +202,301 @@ function asFeedback(value: unknown): SellerFeedback | undefined {
 
 export function parseFeedbacksPage(payload: unknown): FeedbacksPage {
   if (!payload || typeof payload !== "object") throw new Error("Couldn’t load seller feedback.")
-  const record = payload as { feedbacks?: unknown; lastPage?: unknown; pageNumber?: unknown }
+  const record = payload as { feedbacks?: unknown; lastPage?: unknown; lastEvaluatedKey?: unknown }
   if (!Array.isArray(record.feedbacks)) throw new Error("Couldn’t load seller feedback.")
   const feedbacks = record.feedbacks.map(asFeedback).filter((feedback): feedback is SellerFeedback => feedback !== undefined)
-  const pageNumber = typeof record.pageNumber === "number" && Number.isFinite(record.pageNumber) ? record.pageNumber : 0
   return {
     feedbacks,
+    rows: record.feedbacks.length,
     lastPage: typeof record.lastPage === "boolean" ? record.lastPage : undefined,
-    pageNumber,
+    ...(typeof record.lastEvaluatedKey === "string" && record.lastEvaluatedKey ? { cursor: record.lastEvaluatedKey } : {}),
   }
 }
 
-export function feedbacksUrl(pageNumber: number): string {
+/** A page of entries newest first (or oldest first), starting after `cursor`. */
+export function feedbacksUrl(cursor = "", ascending = false): string {
   const params = new URLSearchParams({
-    pageNumber: String(pageNumber),
+    pageNumber: "0",
     pageSize: String(FEEDBACK_PAGE_SIZE),
     fromRating: String(FEEDBACK_FROM_RATING),
     toRating: String(FEEDBACK_TO_RATING),
     sortBy: "Date",
-    descendingOrder: "true",
+    descendingOrder: String(!ascending),
     includePartiallySuppressed: "true",
     excludeTTRFeedback: "false",
-    lastEvaluatedKey: "",
+    lastEvaluatedKey: cursor,
   })
   return `${FEEDBACKS_URL}?${params.toString()}`
 }
 
+const feedbackSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 async function getFeedbacksPage(
   fetchImpl: typeof globalThis.fetch,
-  pageNumber: number,
+  cursor: string,
+  ascending: boolean,
+  sleep: (ms: number) => Promise<void>,
 ): Promise<FeedbacksPage> {
-  const response = await fetchImpl(feedbacksUrl(pageNumber), {
-    method: "GET",
-    credentials: "include",
-    headers: {
-      accept: "application/json, text/plain, */*",
-      "x-requested-with": "XMLHttpRequest",
-    },
-  })
-
-  if (!response.ok) throw new Error(`Couldn’t load seller feedback (${response.status}).`)
-
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new Error("Couldn’t load seller feedback.")
+  let lastError = new Error("Couldn’t load seller feedback.")
+  for (let attempt = 1; attempt <= FEEDBACK_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) await sleep(FEEDBACK_RETRY_DELAY_MS * (attempt - 1))
+    let response: Response
+    try {
+      response = await fetchImpl(feedbacksUrl(cursor, ascending), {
+        method: "GET",
+        credentials: "include",
+        headers: {
+          accept: "application/json, text/plain, */*",
+          "x-requested-with": "XMLHttpRequest",
+        },
+      })
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      continue
+    }
+    if (!response.ok) {
+      lastError = new Error(`Couldn’t load seller feedback (${response.status}).`)
+      if (response.status === 429 || response.status >= 500) continue
+      throw lastError
+    }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      throw new Error("Couldn’t load seller feedback.")
+    }
+    return parseFeedbacksPage(payload)
   }
+  throw lastError
+}
 
-  return parseFeedbacksPage(payload)
+type FeedbackCursorKey = Record<string, { S?: string; N?: string }>
+
+/** Amazon's cursor is base64 JSON of the last entry's table key. Undefined if that ever changes. */
+export function decodeFeedbackCursor(cursor: string): FeedbackCursorKey | undefined {
+  try {
+    const key = JSON.parse(atob(cursor)) as FeedbackCursorKey
+    const date = Number(key?.feedbackDateUtcEpoch?.N)
+    return Number.isFinite(date) && date > 0 && typeof key?.feedbackId?.N === "string" ? key : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A cursor that resumes the list just below `dateMs`, so the next page holds older entries. */
+export function feedbackCursorAt(template: FeedbackCursorKey, dateMs: number): string {
+  return btoa(JSON.stringify({
+    ...template,
+    feedbackId: { N: "0" },
+    feedbackDateUtcEpoch: { N: String(Math.floor(dateMs)) },
+  }))
+}
+
+function feedbackDateMs(feedback: SellerFeedback): number {
+  return Date.parse(feedback.feedbackDate ?? "")
 }
 
 function isLastFeedbackPage(page: FeedbacksPage): boolean {
-  return page.lastPage === true
-    || page.feedbacks.length === 0
-    || (page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE)
+  return page.lastPage === true || page.rows === 0 || !page.cursor
 }
 
+interface FeedbackChain {
+  /** Newest date the chain covers. */
+  hi: number
+  /** Entries older than this belong to another chain. */
+  lo: number
+  cursor: string
+  /** Date of the oldest entry kept so far. */
+  reached: number
+  entries: SellerFeedback[]
+  done: boolean
+  running: boolean
+}
+
+/**
+ * Loads lifetime 1–3 star feedback, newest first.
+ *
+ * Amazon pages this list with a cursor; asking for a page number instead re-reads every earlier
+ * entry, gets slower with depth, and stops at page 100. A cursor is base64 JSON of an entry's key,
+ * so a cursor built for any date starts reading there. The dates between the newest and oldest
+ * entries are split among FEEDBACK_CHAINS chains that read at once, and a chain that finishes
+ * early takes half of whichever chain has the most left. If the cursor format is unfamiliar or a
+ * built cursor fails, one chain reads the list from start to end instead.
+ */
 export async function fetchNeutralNegativeFeedbacks(
   options: FetchSellerFeedbacksOptions = {},
 ): Promise<SellerFeedback[]> {
   const fetchImpl = options.fetch ?? globalThis.fetch
+  const sleep = options.sleep ?? feedbackSleep
   const onProgress = options.onProgress
-  const feedbacks: SellerFeedback[] = []
+  const log = options.log
+  const maxEntries = options.maxEntries ?? FEEDBACK_MAX_ENTRIES
+  let requests = 0
+  let kept = 0
+  let capped = false
+  const load = (cursor = "", ascending = false) => {
+    requests += 1
+    return getFeedbacksPage(fetchImpl, cursor, ascending, sleep)
+  }
+  const reportKept = (count: number) => {
+    kept += count
+    onProgress?.({ source: "feedback", status: "active", loaded: kept })
+  }
 
   onProgress?.({ source: "feedback", status: "active", loaded: 0 })
-  for (let start = 0; start < FEEDBACK_MAX_PAGES; start += FEEDBACK_PAGE_CONCURRENCY) {
-    const batchSize = Math.min(FEEDBACK_PAGE_CONCURRENCY, FEEDBACK_MAX_PAGES - start)
-    const results = await Promise.allSettled(
-      Array.from({ length: batchSize }, (_, offset) => getFeedbacksPage(fetchImpl, start + offset)),
-    )
+  // The oldest entry bounds the date ranges, so ask for it alongside the newest page.
+  const [first, oldestPage] = await Promise.all([
+    load(),
+    load("", true).catch((error: unknown) => {
+      log?.warn("feedback.oldestUnavailable", { error: describeError(error) })
+      return undefined
+    }),
+  ])
+  reportKept(first.feedbacks.length)
 
-    for (let offset = 0; offset < results.length; offset += 1) {
-      const result = results[offset]
-      if (result.status === "rejected") throw result.reason
-      const page = result.value
-      feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)))
-      const lastPage = isLastFeedbackPage(page)
-      const loaded = start + offset + 1
-      onProgress?.({
-        source: "feedback",
-        status: lastPage ? "complete" : "active",
-        loaded,
-        total: lastPage ? loaded : undefined,
+  let strategy = "single"
+  let chains: FeedbackChain[] = []
+  let splits = 0
+  let rest: SellerFeedback[] = []
+  /** Reads one chain at a time from `cursor` to the end of the list. */
+  const walk = async (cursor: string): Promise<SellerFeedback[]> => {
+    const entries: SellerFeedback[] = []
+    for (let next: string | undefined = cursor; next; ) {
+      if (kept >= maxEntries) {
+        capped = true
+        break
+      }
+      const page = await load(next)
+      entries.push(...page.feedbacks)
+      reportKept(page.feedbacks.length)
+      next = isLastFeedbackPage(page) ? undefined : page.cursor
+    }
+    return entries
+  }
+
+  if (!isLastFeedbackPage(first)) {
+    const template = decodeFeedbackCursor(first.cursor ?? "")
+    if (!template) {
+      log?.warn("feedback.cursorUnknown")
+      strategy = "sequential"
+      rest = await walk(first.cursor ?? "")
+    } else {
+      strategy = "parallel"
+      const top = Number(template.feedbackDateUtcEpoch?.N)
+      const oldestDate = oldestPage?.feedbacks[0] ? feedbackDateMs(oldestPage.feedbacks[0]) : Number.NaN
+      const oldest = Number.isFinite(oldestDate) && oldestDate < top ? oldestDate : FEEDBACK_FALLBACK_OLDEST_MS
+      const span = Math.max(1, top - oldest)
+      chains = Array.from({ length: FEEDBACK_CHAINS }, (_, index) => {
+        const hi = index === 0 ? top : Math.round(top - (span * index) / FEEDBACK_CHAINS)
+        return {
+          hi,
+          lo: index === FEEDBACK_CHAINS - 1 ? Number.NEGATIVE_INFINITY : Math.round(top - (span * (index + 1)) / FEEDBACK_CHAINS),
+          // The first chain continues from Amazon's own cursor, so entries sharing page one's last date aren't skipped.
+          cursor: index === 0 ? first.cursor ?? "" : feedbackCursorAt(template, hi),
+          reached: hi,
+          entries: [],
+          done: false,
+          running: false,
+        }
       })
-      if (lastPage) return feedbacks
+      let failure: unknown
+      const run = async (chain: FeedbackChain) => {
+        chain.running = true
+        try {
+          while (!chain.done && failure === undefined) {
+            if (kept >= maxEntries) {
+              capped = true
+              return
+            }
+            const page = await load(chain.cursor)
+            let ended = isLastFeedbackPage(page)
+            const before = chain.entries.length
+            for (const feedback of page.feedbacks) {
+              const date = feedbackDateMs(feedback)
+              if (date < chain.lo) {
+                ended = true
+                break
+              }
+              chain.entries.push(feedback)
+              if (Number.isFinite(date)) chain.reached = date
+            }
+            reportKept(chain.entries.length - before)
+            if (ended) chain.done = true
+            else chain.cursor = page.cursor ?? ""
+          }
+        } catch (error) {
+          failure ??= error
+        } finally {
+          chain.running = false
+        }
+      }
+      /** An idle chain, or half of the busiest one when it still has plenty left. */
+      const nextChain = (): FeedbackChain | undefined => {
+        if (failure !== undefined || capped) return undefined
+        const idle = chains.find((chain) => !chain.done && !chain.running)
+        if (idle) return idle
+        let busiest: FeedbackChain | undefined
+        let busiestLeft = FEEDBACK_MIN_SPLIT_ENTRIES
+        for (const chain of chains) {
+          if (chain.done || chain.entries.length === 0) continue
+          const floor = Number.isFinite(chain.lo) ? chain.lo : oldest
+          const left = (chain.entries.length / Math.max(1, chain.hi - chain.reached)) * (chain.reached - floor)
+          if (left > busiestLeft) {
+            busiest = chain
+            busiestLeft = left
+          }
+        }
+        if (!busiest) return undefined
+        const floor = Number.isFinite(busiest.lo) ? busiest.lo : oldest - 1
+        const middle = Math.round(floor + (busiest.reached - floor) / 2)
+        const half: FeedbackChain = {
+          hi: middle,
+          lo: busiest.lo,
+          cursor: feedbackCursorAt(template, middle),
+          reached: middle,
+          entries: [],
+          done: false,
+          running: false,
+        }
+        busiest.lo = middle
+        chains.push(half)
+        splits += 1
+        return half
+      }
+      await Promise.all(Array.from({ length: FEEDBACK_CHAINS }, async () => {
+        for (let chain = nextChain(); chain; chain = nextChain()) await run(chain)
+      }))
+      if (failure !== undefined) {
+        log?.warn("feedback.parallelFailed", { error: describeError(failure), requests })
+        strategy = "sequential"
+        chains = []
+        kept = first.feedbacks.length
+        capped = false
+        rest = await walk(first.cursor ?? "")
+      } else {
+        rest = [...chains].sort((a, b) => b.hi - a.hi).flatMap((chain) => chain.entries)
+      }
     }
   }
 
-  options.log?.warn("feedback.pageLimit", { pages: FEEDBACK_MAX_PAGES, entries: feedbacks.length })
-  return feedbacks.map((feedback) => ({ ...feedback, feedbackIncomplete: true }))
+  const seen = new Set<string>()
+  const feedbacks = [...first.feedbacks, ...rest].filter((feedback) => {
+    if (!isNeutralOrNegativeRating(feedback.numericRating)) return false
+    const id = feedback.feedbackId
+    if (!id) return true
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+  log?.info("feedback.load", {
+    strategy,
+    requests,
+    entries: feedbacks.length,
+    ...(chains.length ? { chains: chains.length, splits } : {}),
+  })
+  onProgress?.({ source: "feedback", status: "complete", loaded: feedbacks.length, total: feedbacks.length })
+  if (!capped) return feedbacks
+
+  log?.warn("feedback.entryLimit", { limit: maxEntries, entries: feedbacks.length })
+  return feedbacks.slice(0, maxEntries).map((feedback) => ({ ...feedback, feedbackIncomplete: true }))
 }

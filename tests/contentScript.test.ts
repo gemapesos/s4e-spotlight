@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { handleContentKeyDown, handleContentMessage } from "../src/content"
-import { FEEDBACK_PAGE_CONCURRENCY } from "../src/lib/feedback"
+import { canHostPalette, handleContentKeyDown, handleContentMessage, loadPalette } from "../src/content"
 import { setLogSink, type LogEntry } from "../src/lib/log"
 
 function makeVisible() {
@@ -175,7 +174,8 @@ describe("content script report messages", () => {
         ok: true,
         feedbacks: [feedback],
       }))
-      expect(fetchImpl).toHaveBeenCalledTimes(FEEDBACK_PAGE_CONCURRENCY)
+      // The newest page, and the oldest-first page asked for alongside it.
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
       expect(fetchImpl).toHaveBeenCalledWith(
         expect.stringContaining("/fbmapi/v1/feedbacks"),
         expect.objectContaining({ method: "GET", credentials: "include" }),
@@ -354,5 +354,41 @@ describe("content script report logging", () => {
       },
     })
     expect(fetchEntry?.ms).toBeTypeOf("number")
+  })
+})
+
+describe("palette host page", () => {
+  afterEach(() => {
+    setLogSink(null)
+    vi.unstubAllGlobals()
+  })
+
+  it("hosts the palette only on HTML documents", () => {
+    const parser = new DOMParser()
+    expect(canHostPalette(document)).toBe(true)
+    expect(canHostPalette(parser.parseFromString("<rss><channel/></rss>", "application/xml"))).toBe(false)
+    expect(canHostPalette(parser.parseFromString('<svg xmlns="http://www.w3.org/2000/svg"/>', "image/svg+xml"))).toBe(false)
+  })
+
+  it("refuses to load the palette on an XML page without importing it", async () => {
+    const getURL = vi.fn()
+    vi.stubGlobal("chrome", { runtime: { id: "extension", getURL } })
+    const feed = new DOMParser().parseFromString("<rss/>", "application/xml")
+
+    await expect(loadPalette(feed)).rejects.toThrow("The command palette can’t open on this page.")
+    expect(getURL).not.toHaveBeenCalled()
+  })
+
+  it("logs the page's content type when the palette fails to load", async () => {
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+    vi.stubGlobal("chrome", { runtime: { id: "extension", getURL: (path: string) => `/__missing__/${path}` } })
+
+    await expect(loadPalette()).rejects.toThrow()
+    expect(entries).toContainEqual(expect.objectContaining({
+      level: "error",
+      event: "palette.loadFailed",
+      data: expect.objectContaining({ contentType: "text/html" }),
+    }))
   })
 })

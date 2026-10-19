@@ -257,8 +257,12 @@ interface EndpointStats {
   n: number
   failed: number
   statuses: Record<string, number>
+  /** Summed time to response headers. */
   totalMs: number
   maxMs: number
+  /** Summed time from headers to a finished body read, and how many bodies were read. */
+  bodyMs: number
+  bodies: number
   firstStart: number
   lastEnd: number
   inFlight: number
@@ -273,11 +277,14 @@ export interface EndpointSummary {
   failed: number
   /** Response counts by status, when any were not 200. */
   statuses?: Record<string, number>
+  /** Average and slowest time from sending the request to receiving the response headers. */
   avgMs: number
   maxMs: number
-  /** First request start to last response end. */
+  /** Average time to download and parse a response body after its headers, when bodies were read. */
+  bodyMs?: number
+  /** First request start to last response read. */
   wallMs: number
-  /** Total request time over wall time: about 1 means the requests ran one after another. */
+  /** Total request time, bodies included, over wall time: about 1 means one after another. */
   parallelism: number
   maxInFlight: number
 }
@@ -310,10 +317,32 @@ export function requestEndpoint(input: RequestInfo | URL, init?: RequestInit): s
   return `${method} ${path}${operation ? ` ${operation}` : ""}`
 }
 
+const RESPONSE_BODY_READERS = ["arrayBuffer", "blob", "bytes", "formData", "json", "text"] as const
+
+/** Calls `onRead` once, when the first body read (json(), text(), and so on) settles. */
+function onResponseBodyRead(response: Response, onRead: () => void): void {
+  let waiting = true
+  const target = response as unknown as Record<string, unknown>
+  try {
+    for (const method of RESPONSE_BODY_READERS) {
+      const read = target[method]
+      if (typeof read !== "function") continue
+      target[method] = (...args: unknown[]) => Promise.resolve(Reflect.apply(read, response, args)).finally(() => {
+        if (!waiting) return
+        waiting = false
+        onRead()
+      })
+    }
+  } catch {
+    // A response that can't be instrumented still reaches the caller unchanged.
+  }
+}
+
 /**
  * Wraps fetch to time each request by endpoint. Slow and failed requests are logged as they
- * happen; summary() reports counts, latency, and how much the requests overlapped.
- * Times run from sending the request to receiving the response headers.
+ * happen; summary() reports counts, latency, body time, and how much the requests overlapped.
+ * Latency runs from sending the request to receiving the response headers; body time runs from
+ * the headers until the caller finishes reading the body.
  */
 export function createRequestMonitor(
   fetchImpl: typeof globalThis.fetch,
@@ -331,6 +360,8 @@ export function createRequestMonitor(
         statuses: {},
         totalMs: 0,
         maxMs: 0,
+        bodyMs: 0,
+        bodies: 0,
         firstStart: Number.POSITIVE_INFINITY,
         lastEnd: 0,
         inFlight: 0,
@@ -368,14 +399,22 @@ export function createRequestMonitor(
       } else if (elapsed >= slowMs) {
         logger?.warn("request.slow", { endpoint, status, ms })
       }
-      return ms
+      return endedAt
     }
     try {
       const response = await fetchImpl(input, init)
-      finish(String(response.status), !response.ok)
+      const headersAt = finish(String(response.status), !response.ok)
+      onResponseBodyRead(response, () => {
+        const readAt = logNow()
+        stats.bodies += 1
+        stats.bodyMs += readAt - headersAt
+        stats.lastEnd = Math.max(stats.lastEnd, readAt)
+      })
       return response
     } catch (error) {
-      finish("network", true)
+      // A request the caller cancelled because it no longer needed it isn't a failure.
+      const aborted = error instanceof Error && error.name === "AbortError"
+      finish(aborted ? "aborted" : "network", !aborted)
       throw error
     }
   }
@@ -393,8 +432,9 @@ export function createRequestMonitor(
           ...(statuses ? { statuses } : {}),
           avgMs: stats.n ? Math.round(stats.totalMs / stats.n) : 0,
           maxMs: Math.round(stats.maxMs),
+          ...(stats.bodies ? { bodyMs: Math.round(stats.bodyMs / stats.bodies) } : {}),
           wallMs: Math.round(wallMs),
-          parallelism: wallMs > 0 ? Math.round((stats.totalMs / wallMs) * 10) / 10 : 1,
+          parallelism: wallMs > 0 ? Math.round(((stats.totalMs + stats.bodyMs) / wallMs) * 10) / 10 : 1,
           maxInFlight: stats.maxInFlight,
         }
       }
