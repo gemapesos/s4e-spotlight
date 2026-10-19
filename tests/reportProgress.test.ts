@@ -7,7 +7,9 @@ import {
   reportSourceDetail,
   reportSourcePercent,
   shippingQueueProgressPercent,
+  sourcesReadyForWorkbook,
   unfulfillableProgressPercent,
+  type ReportProgressState,
 } from "../src/lib/reportProgress"
 
 describe("report progress helpers", () => {
@@ -57,5 +59,21 @@ describe("report progress helpers", () => {
     expect(next.sources.stranded.status).toBe("active")
     expect(next.sources.suppressed.status).toBe("active")
     expect(next.sources.shippingQueue.status).toBe("active")
+  })
+
+  it("waits only for the chosen sections before building the workbook", () => {
+    const state: ReportProgressState = {
+      ...INITIAL_REPORT_PROGRESS,
+      prepare: "complete",
+      sections: ["stranded", "shippingQueue"],
+      sources: {
+        ...INITIAL_REPORT_PROGRESS.sources,
+        stranded: { status: "complete" },
+        shippingQueue: { status: "active" },
+      },
+    }
+
+    expect(sourcesReadyForWorkbook(state)).toBe(false)
+    expect(sourcesReadyForWorkbook(applyReportProgressEvent(state, { source: "shippingQueue", status: "error" }))).toBe(true)
   })
 })

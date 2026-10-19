@@ -167,7 +167,7 @@ describe("content-script mount", () => {
     })
   })
 
-  it("registers Geist at mount and loads it before first paint", async () => {
+  it("registers Geist and Geist Mono at mount and loads them", async () => {
     const load = vi.fn().mockResolvedValue(undefined)
     class FontFaceMock {
       family: string
@@ -188,10 +188,10 @@ describe("content-script mount", () => {
 
     mounted = mountCommandPalette({ document, shadowMode: "open" })
 
-    expect(add).toHaveBeenCalledOnce()
-    expect(add.mock.calls[0]?.[0]).toBeInstanceOf(FontFaceMock)
-    expect(add.mock.calls[0]?.[0].family).toBe("Geist Variable")
-    expect(load).toHaveBeenCalledOnce()
+    expect(add).toHaveBeenCalledTimes(2)
+    expect(add.mock.calls.map(([face]) => face)).toEqual([expect.any(FontFaceMock), expect.any(FontFaceMock)])
+    expect(add.mock.calls.map(([face]) => face.family)).toEqual(["Geist Mono Variable", "Geist Variable"])
+    expect(load).toHaveBeenCalledTimes(2)
   })
 
   it("renders the first open after settings resolve", async () => {
@@ -322,14 +322,40 @@ describe("content-script mount", () => {
       resolvers.REPORTS_FETCH_SUPPRESSED?.({ ok: true, listings: [] })
       resolvers.REPORTS_FETCH_SHIPPING_QUEUE?.({ ok: true, shipments: [] })
       await pending
-      expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "unfulfillable", status: "complete", loaded: 0, total: 0 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete", loaded: 0, total: 0 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete", loaded: 0, total: 0 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete", loaded: 0, total: 0 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete", loaded: 0, total: 0 })
     } finally {
       click.mockRestore()
     }
+  })
+
+  it("loads only the chosen report sections", async () => {
+    const sendMessage = vi.fn(async (message: { type?: string }) => {
+      if (message.type === "REPORTS_FETCH_STRANDED") return { ok: true, listings: [{ SKU: "ABC-123" }] }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    const onProgress = vi.fn()
+
+    const report = await generateReports(new Date(2026, 7, 14), "JMG Outdoors", onProgress, ["stranded"])
+
+    const reportRequests = sendMessage.mock.calls
+      .map(([message]) => message.type)
+      .filter((type) => type?.startsWith("REPORTS_"))
+    expect(reportRequests).toEqual(["REPORTS_FETCH_STRANDED"])
+    expect(onProgress.mock.calls.map(([event]) => event)).toEqual([
+      { source: "stranded", status: "active" },
+      { source: "stranded", status: "complete", loaded: 1, total: 1 },
+    ])
+    expect(report.sections).toEqual(["stranded"])
+    expect(report.strandedListings).toEqual([{ SKU: "ABC-123" }])
+    expect(report.unfulfillableListings).toEqual([])
+    expect(report.feedbacks).toEqual([])
+    expect(report.suppressedListings).toEqual([])
+    expect(report.shipments).toEqual([])
   })
 
   it("still returns a report when an individual source fails", async () => {
@@ -374,10 +400,10 @@ describe("content-script mount", () => {
         status: "error",
         error: "Couldn’t load unfulfillable inventory.",
       })
-      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete" })
-      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete" })
+      expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete", loaded: 1, total: 1 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "stranded", status: "complete", loaded: 1, total: 1 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "suppressed", status: "complete", loaded: 1, total: 1 })
+      expect(onProgress).toHaveBeenCalledWith({ source: "shippingQueue", status: "complete", loaded: 0, total: 0 })
       expect(clicked.download).toBeUndefined()
       downloadGeneratedReport(report, "raw")
       expect(clicked.download).toBe("JMG Outdoors - 14-Aug-2026.xlsx")

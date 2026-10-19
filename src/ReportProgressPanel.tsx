@@ -1,10 +1,8 @@
-import { CheckIcon, CircleAlertIcon, CircleIcon, TriangleAlertIcon } from "lucide-react"
+import { CheckIcon, CircleAlertIcon, TriangleAlertIcon } from "lucide-react"
 
-import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import {
   REPORT_PROGRESS_ROWS,
-  REPORT_SOURCES,
   reportSourceDetail,
   reportSourcePercent,
   reportWorkbookStatus,
@@ -32,15 +30,16 @@ function sourceLabel(source: ReportSource): string {
 
 function stageIcon(status: ReportStageStatus, stopped: boolean, partial: boolean) {
   if (status === "complete" && partial) return <TriangleAlertIcon aria-hidden="true" className="size-4 text-warning" />
-  if (status === "complete") return <CheckIcon aria-hidden="true" className="size-4 text-foreground" />
+  if (status === "complete") {
+    return (
+      <span aria-hidden="true" className="flex size-4 animate-check-in items-center justify-center rounded-full bg-primary text-primary-foreground">
+        <CheckIcon className="size-2.5" strokeWidth={3.5} />
+      </span>
+    )
+  }
   if (status === "error") return <CircleAlertIcon aria-hidden="true" className="size-4 text-destructive" />
-  if (status === "active" && !stopped) return <Spinner className="size-4" />
-  return (
-    <CircleIcon
-      aria-hidden="true"
-      className={cn("size-4", status === "active" ? "text-foreground" : "text-muted-foreground/50")}
-    />
-  )
+  if (status === "active" && !stopped) return <Spinner aria-hidden="true" className="size-4 text-foreground" role="presentation" />
+  return <span aria-hidden="true" className="size-4 rounded-full border-[0.0938rem] border-dashed border-ring" />
 }
 
 function sourcePercent(source: ReportSource, state: ReportSourceState): number | null {
@@ -65,7 +64,7 @@ function liveSummary(
   if (reportWorkbookStatus(progress, submitting) === "complete") {
     return warnings.length ? `Report ready. ${warnings.map((warning) => warning.text).join(" ")}` : "Report ready."
   }
-  const active = REPORT_SOURCES
+  const active = progress.sections
     .filter((source) => progress.sources[source].status === "active")
     .map(sourceLabel)
   if (active.length > 0) return `${active.join(", ")}.`
@@ -83,7 +82,7 @@ function detailLines(progress: ReportProgressState, failed: boolean, warnings: r
   if (progress.prepare === "active") return failed ? [] : [{ id: "prepare", text: PREPARE_DETAIL }]
   const notes: DetailLine[] = []
   const counted: DetailLine[] = []
-  for (const source of REPORT_SOURCES) {
+  for (const source of progress.sections) {
     const state = progress.sources[source]
     if (state.status === "error") {
       notes.push({ id: source, text: state.error ?? `${sourceLabel(source)} failed.`, tone: "error" })
@@ -99,19 +98,20 @@ function detailLines(progress: ReportProgressState, failed: boolean, warnings: r
 
 export function ReportProgressPanel({ failed = false, progress, submitting, warnings = [] }: ReportProgressPanelProps) {
   const details = detailLines(progress, failed, warnings)
-  const stacked = details.some((detail) => detail.tone)
+  const notes = details.filter((detail) => detail.tone)
   const partialSources = new Set(warnings.map((warning) => warning.source))
 
   return (
-    <div className="grid gap-1 px-2 py-2">
+    <div className="flex flex-col px-1.5 py-2">
       <p aria-live="polite" className="sr-only">{liveSummary(progress, submitting, failed, warnings)}</p>
-      <div className="grid gap-0.5" role="list">
-        {REPORT_PROGRESS_ROWS.map((row) => {
+      <div className="flex flex-col" role="list">
+        {REPORT_PROGRESS_ROWS.filter((row) => progress.sections.includes(row.id)).map((row) => {
           const state = progress.sources[row.id]
           return (
             <ProgressRow
               key={row.id}
-              current={state.status === "active" && !failed}
+              current={state.status === "active" && !failed && progress.prepare !== "active"}
+              detail={rowDetail(row.id, state, progress.prepare === "active")}
               label={row.label}
               partial={partialSources.has(row.id)}
               percent={sourcePercent(row.id, state)}
@@ -121,32 +121,40 @@ export function ReportProgressPanel({ failed = false, progress, submitting, warn
           )
         })}
       </div>
-      <div
-        className={cn(
-          "flex min-h-4 min-w-0 px-1.5 text-xs text-muted-foreground",
-          stacked ? "flex-col gap-0.5" : "items-center gap-3",
-        )}
-      >
-        {details.map((detail) => (
-          <span
-            key={detail.id}
-            className={cn(
-              "min-w-0 truncate",
-              detail.tone === "error" && "text-destructive",
-              detail.tone === "warning" && "text-warning",
-            )}
-            title={detail.tone ? detail.text : undefined}
-          >
-            {detail.text}
-          </span>
-        ))}
-      </div>
+      {progress.prepare === "active" && !failed ? (
+        <p className="m-0 px-2 pt-1 text-xs leading-4 text-muted-foreground">{PREPARE_DETAIL}</p>
+      ) : null}
+      {notes.map((note) => (
+        <div
+          key={note.id}
+          className={cn(
+            "mt-1 flex min-h-8 items-center gap-2.5 rounded-[0.375rem] px-2 py-1.5 text-xs leading-4",
+            note.tone === "error" ? "bg-destructive/10 text-destructive" : "bg-warning/10 text-warning",
+          )}
+        >
+          <CircleAlertIcon aria-hidden="true" className="size-4 shrink-0" />
+          <span className="min-w-0 flex-1">{note.text}</span>
+        </div>
+      ))}
     </div>
   )
 }
 
+/** The short status at the end of a row. */
+function rowDetail(source: ReportSource, state: ReportSourceState, preparing: boolean): string {
+  if (state.status === "pending" || preparing) return "Waiting"
+  if (state.status === "error") return "Failed"
+  if (state.status === "complete") {
+    const rows = state.loaded ?? state.total
+    if (rows == null) return "Done"
+    return `${rows.toLocaleString("en-US")} ${rows === 1 ? "row" : "rows"}`
+  }
+  return reportSourceDetail(source, state)
+}
+
 function ProgressRow({
   current,
+  detail,
   label,
   partial,
   percent,
@@ -154,6 +162,7 @@ function ProgressRow({
   stopped,
 }: {
   current: boolean
+  detail: string
   label: string
   /** Finished, but some of its data couldn't be loaded. */
   partial: boolean
@@ -162,26 +171,29 @@ function ProgressRow({
   /** The run failed, so active rows stop animating. */
   stopped: boolean
 }) {
-  const percentLabel = typeof percent === "number" ? `${percent}%` : null
   return (
     <div
       aria-current={current ? "step" : undefined}
+      aria-label={label}
+      aria-valuetext={typeof percent === "number" ? `${percent}%` : undefined}
       className={cn(
-        "flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors duration-150",
-        current && "bg-muted/50",
+        "flex h-8 items-center gap-2.5 rounded-[0.375rem] px-2 transition-colors duration-150",
+        current && "bg-muted",
       )}
       role="listitem"
     >
       <span className="flex size-4 shrink-0 items-center justify-center">{stageIcon(status, stopped, partial)}</span>
-      <span className={cn("min-w-0 flex-1 truncate text-sm", status === "pending" && "text-muted-foreground")}>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-sm",
+          current ? "font-medium text-foreground" : status === "pending" ? "text-muted-foreground" : "text-foreground/80",
+        )}
+      >
         {label}
       </span>
-      <Progress
-        aria-label={label}
-        className="h-1 w-16 shrink-0"
-        value={status === "pending" || status === "error" || stopped ? percent ?? 0 : percent ?? null}
-      />
-      <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{percentLabel}</span>
+      <span className={cn("shrink-0 text-xs leading-4 tabular-nums", current ? "text-foreground/70" : "text-muted-foreground")}>
+        {detail}
+      </span>
     </div>
   )
 }

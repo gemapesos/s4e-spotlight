@@ -2,7 +2,15 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
+/* Inside the palette's Shadow DOM the .dark class sits on the host, which ancestor selectors can't see. */
+@custom-variant dark {
+  &:is(.dark *) {
+    @slot;
+  }
+  :host(.dark) & {
+    @slot;
+  }
+}
 
 @theme inline {
   --color-background: var(--background);
@@ -20,6 +28,7 @@
   --radius-xl: calc(var(--radius) + 4px);
   --font-heading: var(--font-sans);
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -48,11 +57,13 @@
   --radius-4xl: calc(var(--radius) * 2.6);
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-quad: cubic-bezier(0.4, 0, 1, 1);
-  --animate-dialog-in: s4e-dialog-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-dialog-in: s4e-dialog-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
   --animate-dialog-out: s4e-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
   --animate-overlay-in: s4e-overlay-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
   --animate-overlay-out: s4e-overlay-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
-  --animate-surface-in: s4e-surface-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* A screen change slides in from the side it came from; --surface-shift is set per swap. */
+  --animate-surface-in: s4e-screen-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-check-in: s4e-check-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-download-in: s4e-surface-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
 
   /*
@@ -62,7 +73,7 @@
   @keyframes s4e-dialog-in {
     from {
       opacity: 0;
-      transform: translateY(10px) scale(0.96);
+      transform: translateY(0.5rem) scale(0.985);
     }
   }
 
@@ -89,6 +100,24 @@
     from {
       opacity: 0;
       transform: translateY(6px);
+    }
+  }
+
+  @keyframes s4e-screen-in {
+    from {
+      opacity: 0;
+      transform: translateX(var(--surface-shift, 0.75rem));
+    }
+  }
+
+  @keyframes s4e-check-in {
+    0% {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+    60% {
+      opacity: 1;
+      transform: scale(1.08);
     }
   }
 }
@@ -187,6 +216,56 @@
 }
 
 @layer base {
+  /*
+   * Tailwind gives its utility variables defaults through @property, which Chrome ignores inside a
+   * Shadow DOM, so borders, rings, shadows and transforms in the palette would silently drop.
+   * The same defaults as plain declarations work everywhere.
+   */
+  *,
+  ::before,
+  ::after,
+  ::backdrop {
+    --tw-translate-x: 0;
+    --tw-translate-y: 0;
+    --tw-translate-z: 0;
+    --tw-scale-x: 1;
+    --tw-scale-y: 1;
+    --tw-scale-z: 1;
+    --tw-space-y-reverse: 0;
+    --tw-space-x-reverse: 0;
+    --tw-divide-x-reverse: 0;
+    --tw-divide-y-reverse: 0;
+    --tw-border-style: solid;
+    --tw-outline-style: solid;
+    --tw-shadow: 0 0 #0000;
+    --tw-shadow-alpha: 100%;
+    --tw-inset-shadow: 0 0 #0000;
+    --tw-inset-shadow-alpha: 100%;
+    --tw-ring-shadow: 0 0 #0000;
+    --tw-inset-ring-shadow: 0 0 #0000;
+    --tw-ring-offset-width: 0px;
+    --tw-ring-offset-color: #fff;
+    --tw-ring-offset-shadow: 0 0 #0000;
+    --tw-drop-shadow-alpha: 100%;
+    --tw-content: "";
+    --tw-animation-delay: 0s;
+    --tw-animation-direction: normal;
+    --tw-animation-fill-mode: none;
+    --tw-animation-iteration-count: 1;
+    --tw-enter-blur: 0;
+    --tw-enter-opacity: 1;
+    --tw-enter-rotate: 0;
+    --tw-enter-scale: 1;
+    --tw-enter-translate-x: 0;
+    --tw-enter-translate-y: 0;
+    --tw-exit-blur: 0;
+    --tw-exit-opacity: 1;
+    --tw-exit-rotate: 0;
+    --tw-exit-scale: 1;
+    --tw-exit-translate-x: 0;
+    --tw-exit-translate-y: 0;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
@@ -215,8 +294,13 @@
   [data-slot="dialog-overlay"],
   [data-slot="dialog-content"],
   [data-slot="command"].animate-surface-in,
-  [data-slot="progress-indeterminate"] {
+  [data-slot="progress-indeterminate"],
+  .animate-check-in {
     animation: none !important;
+  }
+
+  [data-slot="command-highlight"] {
+    transition: none !important;
   }
 
   [data-slot="progress-indicator"] {

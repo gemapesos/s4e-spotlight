@@ -81,7 +81,7 @@ describe("Accounts palette", () => {
     await user.keyboard("{Enter}")
 
     expect(await screen.findByRole("option", { name: "JMG Outdoors" })).toBeVisible()
-    expect(screen.getByRole("option", { name: "Manage Accounts" })).toBeVisible()
+    expect(screen.getByRole("option", { name: "Manage accounts" })).toBeVisible()
 
     await user.keyboard("{Enter}")
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
@@ -97,7 +97,7 @@ describe("Accounts palette", () => {
     await user.click(screen.getByRole("button", { name: "Back" }))
 
     expect(screen.getByRole("combobox", { name: "Search commands" })).toHaveValue("accounts")
-    expect(screen.getByRole("option", { name: /^Accounts$/ })).toBeVisible()
+    expect(screen.getByRole("option", { name: /^Switch store$/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: /Billing/ })).not.toBeInTheDocument()
   })
 
@@ -120,7 +120,7 @@ describe("Accounts palette", () => {
   it("shows configured stores and starts an unlocked switch", async () => {
     const user = userEvent.setup()
     const props = renderAccounts()
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
     expect(props.onGetAccountsStatus).toHaveBeenCalled()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
@@ -131,7 +131,7 @@ describe("Accounts palette", () => {
     const user = userEvent.setup()
     const getStatus = vi.fn().mockResolvedValue({ initialized: true, unlocked: false, stores: [{ id: "store-1", name: "JMG Outdoors" }] })
     const props = renderAccounts({ onGetAccountsStatus: getStatus })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
     await user.type(await screen.findByLabelText("Master password"), "master password")
     await user.keyboard("{Enter}")
@@ -190,7 +190,7 @@ describe("Accounts palette", () => {
       onStartAccountSwitch: vi.fn(() => new Promise<void>((resolve) => { finishSwitch = resolve })),
     })
 
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
     const password = await screen.findByLabelText("Master password")
     await user.type(password, "master password")
@@ -213,15 +213,15 @@ describe("Accounts palette", () => {
   it("opens Manage Accounts from an empty vault", async () => {
     const user = userEvent.setup()
     const props = renderAccounts({ onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: false, unlocked: false, stores: [] }) })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
-    await user.click(await screen.findByRole("option", { name: "Manage Accounts" }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("option", { name: "Manage accounts" }))
     expect(props.onManageAccounts).toHaveBeenCalledOnce()
   })
 
   it("filters stores and distinguishes no matches from an empty vault", async () => {
     const user = userEvent.setup()
     renderAccounts({ onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: true, unlocked: true, stores: [{ id: "one", name: "JMG Outdoors" }, { id: "two", name: "North Shop" }] }) })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     const search = await screen.findByRole("combobox", { name: "Search accounts" })
     await user.type(search, "north")
     expect(screen.getByRole("option", { name: "North Shop" })).toBeVisible()
@@ -241,40 +241,40 @@ describe("Accounts palette", () => {
         stores: [{ id: "one", name: "JMG Outdoors" }, { id: "two", name: "North Shop" }],
       }),
     })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     const search = await screen.findByRole("combobox", { name: "Search accounts" })
     await user.type(search, "outdors")
-    expect(screen.getByRole("option", { name: "JMG Outdoors" })).toBeVisible()
+    expect(screen.getByRole("option", { name: /^JMG Outdoors/ })).toBeVisible()
     expect(screen.queryByRole("option", { name: "North Shop" })).not.toBeInTheDocument()
   })
 
   it("keeps account-loading and Manage Accounts errors visible", async () => {
     const user = userEvent.setup()
     renderAccounts({ onGetAccountsStatus: vi.fn().mockRejectedValue(new Error("Vault unavailable")) })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     expect(await screen.findByRole("alert")).toHaveTextContent("Vault unavailable")
 
     document.body.replaceChildren()
     renderAccounts({ onManageAccounts: vi.fn().mockRejectedValue(new Error("Options unavailable")) })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
-    await user.click(await screen.findByRole("option", { name: "Manage Accounts" }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("option", { name: "Manage accounts" }))
     expect(await screen.findByRole("alert")).toHaveTextContent("Options unavailable")
   })
 
   it("focuses or cancels an active switch", async () => {
     const user = userEvent.setup()
     const props = renderAccounts({ onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: true, unlocked: true, stores: [], activeSwitch: { storeId: "one", storeName: "JMG Outdoors", stage: "otp", startedAt: Date.now() } }) })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
-    await user.click(await screen.findByRole("button", { name: "Go to login" }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("button", { name: "Show sign-in" }))
     expect(props.onFocusAccountSwitch).toHaveBeenCalledOnce()
-    await user.click(screen.getByRole("button", { name: "Cancel switch" }))
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
     expect(props.onCancelAccountSwitch).toHaveBeenCalledOnce()
   })
 
   it("shows Unknown when the current store cannot be detected", async () => {
     const user = userEvent.setup()
     renderAccounts()
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     expect(await screen.findByRole("status", { name: /Current store: Unknown/ })).toBeVisible()
   })
 
@@ -288,12 +288,12 @@ describe("Accounts palette", () => {
         currentStore: { id: "store-1", name: "JMG Outdoors" },
       }),
     })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     expect(await screen.findByRole("status", { name: /Current store: JMG Outdoors/ })).toBeVisible()
-    expect(screen.getByRole("option", { name: "JMG Outdoors" })).toHaveAttribute("data-checked", "true")
+    expect(screen.getByRole("option", { name: /^JMG Outdoors/ })).toHaveAttribute("data-checked", "true")
     expect(screen.getByRole("option", { name: "North Shop" })).not.toHaveAttribute("data-checked")
 
-    await user.click(screen.getByRole("option", { name: "JMG Outdoors" }))
+    await user.click(screen.getByRole("option", { name: /^JMG Outdoors/ }))
     expect(props.onFocusCurrentStore).toHaveBeenCalledOnce()
     expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
     expect(props.onOpenChange).toHaveBeenCalledWith(false)
@@ -309,7 +309,7 @@ describe("Accounts palette", () => {
         currentStore: { id: "store-1", name: "JMG Outdoors" },
       }),
     })
-    await user.click(screen.getByRole("option", { name: /^Accounts$/ }))
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "North Shop" }))
     expect(props.onFocusCurrentStore).not.toHaveBeenCalled()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-2")

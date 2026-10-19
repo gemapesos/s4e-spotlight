@@ -12,11 +12,11 @@ export const FEATURE_IDS = [
 export type FeatureId = (typeof FEATURE_IDS)[number]
 
 export const FEATURES: ReadonlyArray<{ id: FeatureId; label: string }> = [
-  { id: "open-case-ids", label: "Open Case ID/s" },
-  { id: "open-shipment-ids", label: "Open Shipment ID/s" },
-  { id: "search-skus", label: "Search SKU/s" },
-  { id: "time-out", label: "Time Out" },
-  { id: "generate-reports", label: "Generate Reports" },
+  { id: "open-case-ids", label: "Open case IDs" },
+  { id: "open-shipment-ids", label: "Open shipment IDs" },
+  { id: "search-skus", label: "Search SKUs" },
+  { id: "time-out", label: "Open Time Out" },
+  { id: "generate-reports", label: "Generate reports" },
   { id: "accounts", label: "Accounts" },
 ]
 

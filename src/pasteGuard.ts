@@ -48,11 +48,23 @@ function isTextEditingKey(event: KeyboardEvent): boolean {
   )
 }
 
+function isEditableTarget(event: Event): boolean {
+  const target = event.composedPath()[0]
+  if (!(target instanceof Element)) return false
+  return target.matches("input, textarea, [contenteditable]:not([contenteditable=false])")
+}
+
+/** Space on a palette list (no text field focused) toggles the selected row, so the palette must receive it. */
+function isListSpace(event: KeyboardEvent): boolean {
+  return event.key === " " && !isEditableTarget(event)
+}
+
 function isGuardedEvent(event: Event): boolean {
   if (event.type === "paste" || event.type === "beforeinput") return true
   if (event.type !== "keydown" && event.type !== "keypress") return false
 
   const keyboardEvent = event as KeyboardEvent
+  if (isListSpace(keyboardEvent)) return false
   return (
     isTextEditingKey(keyboardEvent) ||
     isPasteShortcut(keyboardEvent) ||

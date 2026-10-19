@@ -42,7 +42,7 @@ describe("settings popup", () => {
     const user = userEvent.setup()
     render(<PopupApp />)
 
-    const toggle = await screen.findByRole("switch", { name: "Open Case ID/s" })
+    const toggle = await screen.findByRole("switch", { name: "Open case IDs" })
     expect(toggle).toHaveAttribute("aria-checked", "true")
     await user.click(toggle)
 
@@ -54,7 +54,7 @@ describe("settings popup", () => {
         },
       })
     })
-    expect(screen.getByRole("switch", { name: "Open Case ID/s" })).toHaveAttribute("aria-checked", "false")
+    expect(screen.getByRole("switch", { name: "Open case IDs" })).toHaveAttribute("aria-checked", "false")
   })
 
   it("opens the Time Out form page from the form-values link", async () => {

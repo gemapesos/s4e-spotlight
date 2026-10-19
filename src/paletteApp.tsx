@@ -39,20 +39,22 @@ const HOST_ID = "command-palette-extension-root"
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open"
 const PASTE_GUARD_KEY = "__s4eSpotlightPasteGuard"
 const GEIST_FONT_FILE = "geist-latin-wght-normal.woff2"
+/** IDs in the identifier input and its chips. */
+const GEIST_MONO_FONT_FILE = "geist-mono-latin-wght-normal.woff2"
 const FIRST_OPEN_ASSET_TIMEOUT_MS = 120
 const paletteLog = createLogger("palette")
 
 if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground())
 
-export async function loadPaletteFont(targetDocument: Document): Promise<void> {
+async function addExtensionFont(targetDocument: Document, family: string, file: string): Promise<void> {
   const fontUrl =
     typeof chrome !== "undefined" && typeof chrome.runtime?.getURL === "function"
-      ? chrome.runtime.getURL(GEIST_FONT_FILE)
+      ? chrome.runtime.getURL(file)
       : ""
   if (!fontUrl) return
   if (typeof FontFace === "undefined" || !targetDocument.fonts) return
   try {
-    const face = new FontFace("Geist Variable", `url("${fontUrl}")`, {
+    const face = new FontFace(family, `url("${fontUrl}")`, {
       display: "swap",
       style: "normal",
       weight: "100 900",
@@ -62,6 +64,12 @@ export async function loadPaletteFont(targetDocument: Document): Promise<void> {
   } catch {
     // Best-effort; the UI falls back to the system stack.
   }
+}
+
+/** Waits for Geist, which every screen uses; Geist Mono loads alongside without holding up the first open. */
+export async function loadPaletteFont(targetDocument: Document): Promise<void> {
+  void addExtensionFont(targetDocument, "Geist Mono Variable", GEIST_MONO_FONT_FILE)
+  await addExtensionFont(targetDocument, "Geist Variable", GEIST_FONT_FILE)
 }
 
 function waitWithTimeout(promise: Promise<unknown>, ms: number, targetWindow: Window | null): Promise<void> {
@@ -285,18 +293,24 @@ export async function generateReports(
   now = new Date(),
   currentStoreName?: string,
   onProgress?: (event: ReportProgressEvent) => void,
+  sections: readonly ReportSource[] = REPORT_SOURCES,
 ): Promise<GeneratedReport> {
   const unsubscribe = onProgress ? subscribeReportProgress(onProgress) : () => undefined
   const done = paletteLog.time("report.run")
   const sources: Partial<Record<ReportSource, LogData>> = {}
-  /** Resolves a source to its value, or to `fallback` after reporting the failure. */
-  const track = <T,>(source: ReportSource, request: Promise<T>, fallback: T, count: (value: T) => number) => {
+  /**
+   * Resolves a chosen source to its value, or to `fallback` after reporting the failure.
+   * A source that wasn't chosen resolves to `fallback` without a request.
+   */
+  const track = <T,>(source: ReportSource, request: () => Promise<T>, fallback: T, count: (value: T) => number) => {
+    if (!sections.includes(source)) return Promise.resolve(fallback)
     const startedAt = logNow()
     const elapsed = () => Math.round(logNow() - startedAt)
-    return request.then(
+    return request().then(
       (value) => {
-        sources[source] = { ms: elapsed(), count: count(value) }
-        onProgress?.({ source, status: "complete" })
+        const rows = count(value)
+        sources[source] = { ms: elapsed(), count: rows }
+        onProgress?.({ source, status: "complete", loaded: rows, total: rows })
         return value
       },
       (error: unknown) => {
@@ -313,19 +327,24 @@ export async function generateReports(
       currentStoreName !== undefined
         ? currentStoreName
         : (await getAccountsStatus()).currentStore?.name ?? ""
-    for (const source of REPORT_SOURCES) onProgress?.({ source, status: "active" })
+    for (const source of sections) onProgress?.({ source, status: "active" })
     const length = (items: readonly unknown[]) => items.length
     const [unfulfillable, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
       track(
         "unfulfillable",
-        fetchUnfulfillableFromBackground(),
+        fetchUnfulfillableFromBackground,
         { listings: [], nextRemovalOrderId: null },
         (value) => value.listings.length,
       ),
-      track("feedback", fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks"), [], length),
-      track("stranded", fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings"), [], length),
-      track("suppressed", fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings"), [], length),
-      track("shippingQueue", fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments"), [], length),
+      track("feedback", () => fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks"), [], length),
+      track("stranded", () => fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings"), [], length),
+      track("suppressed", () => fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings"), [], length),
+      track(
+        "shippingQueue",
+        () => fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments"),
+        [],
+        length,
+      ),
     ])
     const timed = Object.entries(sources) as Array<[ReportSource, LogData]>
     const slowest = timed.reduce<[ReportSource, LogData] | undefined>(
@@ -335,6 +354,7 @@ export async function generateReports(
     const report: GeneratedReport = {
       storeName,
       generatedAt: now,
+      sections,
       unfulfillableListings: unfulfillable.listings,
       nextRemovalOrderId: unfulfillable.nextRemovalOrderId,
       feedbacks,
@@ -344,6 +364,7 @@ export async function generateReports(
     }
     const warnings = reportWarnings(report)
     done({
+      sections: [...sections],
       sources,
       slowest: slowest?.[0],
       failed: timed.filter(([, data]) => data.error).map(([source]) => source),
@@ -439,7 +460,7 @@ export function mountCommandPalette({
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
           onPrepareReports={prepareReports}
-          onGenerateReports={(storeName, onProgress) => generateReports(new Date(), storeName, onProgress)}
+          onGenerateReports={(storeName, onProgress, sections) => generateReports(new Date(), storeName, onProgress, sections)}
           onDownloadReport={(report, format) => downloadReport(report, format, targetDocument)}
           onOpenTimeOut={openTimeOut}
           onOpenChange={setOpen}

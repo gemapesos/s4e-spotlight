@@ -1,10 +1,14 @@
 import { formatDayMonthYear, MONTH_ABBREVIATIONS } from "./dates"
 import { FEEDBACK_SHEET_HEADERS, feedbackSheetRows, type SellerFeedback } from "./feedback"
-import { sanitizeStoreName } from "./reports"
+import type { ReportSource } from "./reportProgress"
+import { reportIncludes, sanitizeStoreName } from "./reports"
 import {
   formatShippingQueueDate,
+  oldestShipmentsFirst,
   requiredDocumentLabel,
   shippingQueueLineStatus,
+  SHIPPING_STATUS_MONITORING,
+  SHIPPING_STATUS_NEW,
   SHIPPING_STATUS_UNAVAILABLE,
   type ShippingQueueShipment,
 } from "./shippingQueue"
@@ -133,6 +137,8 @@ const ACTION_UNSUPPORTED = "Temporarily Unavailable"
 const NOT_APPLICABLE = "N/A"
 const CASE_STATUS_NOT_APPLICABLE = "Not Applicable"
 const WORKFLOW_NA_HEADERS = ["Action", "Other Actions", "Date of E-Mail", "Removal Order ID", "Case ID"] as const
+/** The only line statuses the Shipping Queue tab keeps. */
+const SHIPPING_PASTE_STATUSES: ReadonlySet<string> = new Set([SHIPPING_STATUS_MONITORING, SHIPPING_STATUS_NEW])
 
 const UNFULFILLABLE_FIXED_WIDTH_HEADERS = new Set([
   "Carrier Damaged",
@@ -159,6 +165,8 @@ const REMOVAL_UNSUPPORTED = [
 export interface SheetPasteInput {
   storeName: string
   generatedAt: Date
+  /** The sections chosen for this report; all of them when absent. */
+  sections?: readonly ReportSource[]
   unfulfillableListings: readonly UnfulfillableListing[]
   feedbacks: readonly SellerFeedback[]
   strandedListings: readonly StrandedListing[]
@@ -301,7 +309,7 @@ function fillWorkflowDefaults(rows: WorkbookCell[][]): WorkbookCell[][] {
 function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconciliationDate: string): WorkbookCell[][] {
   const rows: WorkbookCell[][] = [SHIPPING_COLUMNS.map((column) => column.header)]
   let previousId = ""
-  for (const shipment of shipments) {
+  for (const shipment of oldestShipmentsFirst(shipments)) {
     const items = (shipment.details?.items ?? []).filter((item) => (
       typeof item.totalDiscrepancyQuantity === "number" && item.totalDiscrepancyQuantity < 0
     ))
@@ -317,15 +325,21 @@ function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconcil
         discrepancy,
         eligible: shipment.details?.eligible,
       })
+      // Failed details read N/A, so every line kept here has its details.
+      if (!SHIPPING_PASTE_STATUSES.has(status)) continue
       const caseId = item.caseId?.trim() || NOT_APPLICABLE
       const sku = item.merchantSKU?.trim() || NOT_APPLICABLE
+      const shipmentDate = duplicate ? "" : toSheetDateText(formatShippingQueueDate(shipment.createdDate))
+      const shipmentIdCell = duplicate ? "" : shipmentId
+      // A line without its own shipment date and ID is not reconciled separately.
+      const lineReconciliationDate = shipmentDate === "" && shipmentIdCell === "" ? "" : reconciliationDate
       rows.push([
-        reconciliationDate,
-        duplicate ? "" : toSheetDateText(formatShippingQueueDate(shipment.createdDate)),
-        duplicate ? "" : shipmentId,
+        lineReconciliationDate,
+        shipmentDate,
+        shipmentIdCell,
         sku,
         discrepancy,
-        detailsFailed || shipment.documentsFetchFailed
+        shipment.documentsFetchFailed
           ? SHIPPING_STATUS_UNAVAILABLE
           : requiredDocumentLabel(shipment.documentTypes, status),
         status,
@@ -333,7 +347,7 @@ function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconcil
         reconciliationDate,
         NOT_APPLICABLE,
         NOT_APPLICABLE,
-        detailsFailed ? NOT_APPLICABLE : caseId,
+        caseId,
         CASE_STATUS_NOT_APPLICABLE,
       ])
       if (shipmentId) previousId = shipmentId
@@ -369,39 +383,57 @@ function projectRows(
 
 export function sheetPasteSheets(input: SheetPasteInput): WorkbookSheet[] {
   const yesterday = yesterdaySheetDate(input.generatedAt)
-  const unfulfillableSource = unfulfillableSheetRows(input.unfulfillableListings)
   const dated = (rows: WorkbookCell[][]) => withFirstColumnDate(rows, yesterday)
-  const unfulfillableRows = dated(finishUnfulfillableRows(
-    projectRows(unfulfillableSource, UNFULFILLABLE_SHEET_HEADERS, unfulfillablePasteColumns(input.storeName)),
-    sourceDataColumn(unfulfillableSource, UNFULFILLABLE_SHEET_HEADERS, "Removal Status"),
-    input.nextRemovalOrderId,
-  ))
-  return [
+  const tabs: ReadonlyArray<{ source: ReportSource; sheet: () => WorkbookSheet }> = [
     {
-      name: "UnfulfillableDisposals",
-      rows: unfulfillableRows,
-      fixedColumns: unfulfillableFixedColumns(unfulfillableRows[0] ?? []),
-      headerRowHeightPx: UNFULFILLABLE_HEADER_HEIGHT_PX,
+      source: "unfulfillable",
+      sheet: () => {
+        const unfulfillableSource = unfulfillableSheetRows(input.unfulfillableListings)
+        const rows = dated(finishUnfulfillableRows(
+          projectRows(unfulfillableSource, UNFULFILLABLE_SHEET_HEADERS, unfulfillablePasteColumns(input.storeName)),
+          sourceDataColumn(unfulfillableSource, UNFULFILLABLE_SHEET_HEADERS, "Removal Status"),
+          input.nextRemovalOrderId,
+        ))
+        return {
+          name: "UnfulfillableDisposals",
+          rows,
+          fixedColumns: unfulfillableFixedColumns(rows[0] ?? []),
+          headerRowHeightPx: UNFULFILLABLE_HEADER_HEIGHT_PX,
+        }
+      },
     },
     {
-      name: "Stranded",
-      rows: dated(fillWorkflowDefaults(projectRows(strandedSheetRows(input.strandedListings), STRANDED_SHEET_HEADERS, STRANDED_COLUMNS))),
+      source: "stranded",
+      sheet: () => ({
+        name: "Stranded",
+        rows: dated(fillWorkflowDefaults(projectRows(strandedSheetRows(input.strandedListings), STRANDED_SHEET_HEADERS, STRANDED_COLUMNS))),
+      }),
     },
     {
-      name: "Feedback",
-      rows: dated(fillWorkflowDefaults(projectRows(
-        feedbackSheetRows(input.feedbacks.filter((feedback) => feedback.suppressed === false)),
-        FEEDBACK_SHEET_HEADERS,
-        FEEDBACK_COLUMNS,
-      ))),
+      source: "feedback",
+      sheet: () => ({
+        name: "Feedback",
+        rows: dated(fillWorkflowDefaults(projectRows(
+          feedbackSheetRows(input.feedbacks.filter((feedback) => feedback.suppressed === false)),
+          FEEDBACK_SHEET_HEADERS,
+          FEEDBACK_COLUMNS,
+        ))),
+      }),
     },
     {
-      name: "SuppressedLE",
-      rows: dated(fillWorkflowDefaults(projectRows(suppressedSheetRows(input.suppressedListings), SUPPRESSED_SHEET_HEADERS, SUPPRESSED_COLUMNS))),
+      source: "suppressed",
+      sheet: () => ({
+        name: "SuppressedLE",
+        rows: dated(fillWorkflowDefaults(projectRows(suppressedSheetRows(input.suppressedListings), SUPPRESSED_SHEET_HEADERS, SUPPRESSED_COLUMNS))),
+      }),
     },
     {
-      name: "Shipping Queue",
-      rows: shippingPasteRows(input.shipments, yesterday),
+      source: "shippingQueue",
+      sheet: () => ({
+        name: "Shipping Queue",
+        rows: shippingPasteRows(input.shipments, yesterday),
+      }),
     },
   ]
+  return tabs.filter(({ source }) => reportIncludes(input, source)).map(({ sheet }) => sheet())
 }
