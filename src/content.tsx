@@ -18,6 +18,7 @@ import { fetchNextRemovalOrderId, fetchUnfulfillableListings } from "./lib/unful
 
 const PALETTE_APP_FILE = "palette-app.js"
 const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated."
+const PALETTE_UNSUPPORTED_PAGE = "The command palette can’t open on this page."
 const contentLog = createLogger("content")
 
 export type PaletteOpenMode = "commands" | "report-login"
@@ -33,9 +34,18 @@ interface PaletteAppModule {
 let mounted: MountedPalette | null = null
 let pending: Promise<MountedPalette> | null = null
 
-async function loadPalette(): Promise<MountedPalette> {
+/**
+ * React DOM reads document.createElement("div").style as it loads. XML documents such as feeds,
+ * sitemaps, and SVG files create elements without one, so the palette runs only on HTML pages.
+ */
+export function canHostPalette(doc: Document = document): boolean {
+  return doc.createElement("div").style !== undefined
+}
+
+export async function loadPalette(doc: Document = document): Promise<MountedPalette> {
   if (mounted) return mounted
   if (!pending) {
+    if (!canHostPalette(doc)) throw new Error(PALETTE_UNSUPPORTED_PAGE)
     if (typeof chrome === "undefined" || !chrome.runtime?.id) {
       throw new Error(EXTENSION_CONTEXT_INVALIDATED)
     }
@@ -47,7 +57,7 @@ async function loadPalette(): Promise<MountedPalette> {
       })
       .catch((error: unknown) => {
         pending = null
-        contentLog.error("palette.loadFailed", { error: describeError(error) })
+        contentLog.error("palette.loadFailed", { contentType: doc.contentType, error: describeError(error) })
         throw error
       })
   }
@@ -197,7 +207,7 @@ export function handleContentMessage(
 }
 
 if (typeof window !== "undefined" && window.top === window) {
-  window.addEventListener("keydown", onKeyDown, true)
+  if (canHostPalette()) window.addEventListener("keydown", onKeyDown, true)
   if (typeof chrome !== "undefined") {
     if (chrome.runtime?.id) setLogSink(forwardLogsToBackground())
     chrome.runtime?.onMessage?.addListener(handleContentMessage)

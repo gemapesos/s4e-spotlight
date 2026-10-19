@@ -73,7 +73,7 @@ export function reportWarnings(report: GeneratedReport): ReportWarning[] {
   const removalMissing = countWhere(unfulfillable, (listing) => listing.removalFetchFailed)
   if (removalMissing) add("unfulfillable", `Removal status is missing for ${plural(removalMissing, "SKU")}.`)
   if (feedbacks.some((feedback) => feedback.feedbackIncomplete)) {
-    add("feedback", `Only the newest ${plural(feedbacks.length, "feedback entry", "feedback entries")} loaded.`)
+    add("feedback", `Only ${plural(feedbacks.length, "feedback entry", "feedback entries")} loaded; Seller Central has more.`)
   }
   if (suppressed.some((listing) => listing.listingsIncomplete)) {
     add("suppressed", "Some search-suppressed listings couldn’t be loaded.")

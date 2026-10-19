@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   asShippingQueueShipment,
@@ -39,8 +39,13 @@ import {
   SHIPPING_STATUS_RECEIVED_IN_FULL,
   SHIPPING_STATUS_REVIEW,
   SHIPPING_STATUS_UNITS_LOCATED,
+  SHIPPING_QUEUE_MAX_SLICES,
+  SHIPPING_QUEUE_SLICE_CONCURRENCY,
+  shipmentDetailsIncomplete,
   shipmentDetailsUrl,
+  shipmentDiscrepanciesUrl,
   shipmentDocumentsUrl,
+  shippingQueueSlices,
   shippingQueueLineStatus,
   shippingQueueNumericCell,
   shippingQueueSheetRow,
@@ -189,36 +194,64 @@ const response = (payload: unknown, status = 200, contentType?: string) => ({
   json: async () => payload,
 }) as unknown as Response
 
+type Route = unknown | number | Error
+
 interface RouteOptions {
-  pages?: unknown[]
-  details?: Record<string, unknown | number | Error>
-  documents?: Record<string, unknown | number | Error>
+  /**
+   * Shipments in Amazon's list order, newest index first. `listIndex` is the update-date index
+   * Amazon sorts and filters by; it defaults to lastUpdatedDate.
+   */
+  list?: Array<Record<string, unknown>>
+  /** Answer for list requests whose slice holds this index date. */
+  listFailure?: { at: number; result: Route }
+  /** Answer for the one-shipment session check. */
+  sessionCheck?: Route
+  details?: Record<string, Route>
+  documents?: Record<string, Route>
+  /** SKU-line pages by shipment ID and starting index. */
+  discrepancies?: Record<string, Record<number, Route>>
 }
 
-/** Serves list pages in order, eligibility details, and document requirements by shipment ID. */
-function routedFetch({ pages = [], details = {}, documents = {} }: RouteOptions) {
-  let pageIndex = 0
+const listIndex = (row: Record<string, unknown>) => Number(row.listIndex ?? row.lastUpdatedDate ?? row.createdDate ?? 0)
+
+function answer(result: Route, fallback: () => unknown) {
+  if (result instanceof Error) throw result
+  if (typeof result === "number") return response({}, result)
+  return response(result === undefined ? fallback() : result)
+}
+
+const isListUrl = (url: unknown) => String(url).startsWith(SHIPPING_QUEUE_URL)
+const isSliceUrl = (url: unknown) => isListUrl(url) && new URL(String(url)).searchParams.has("startTime")
+
+/** Serves list slices by index date, eligibility details, document requirements, and SKU-line pages. */
+function routedFetch({ list = [], listFailure, sessionCheck, details = {}, documents = {}, discrepancies = {} }: RouteOptions = {}) {
   return vi.fn(async (input: unknown, _init?: unknown) => {
     const url = String(input)
-    if (url.startsWith(SHIPPING_QUEUE_URL)) {
-      const page = pages[pageIndex]
-      pageIndex += 1
-      if (page instanceof Error) throw page
-      if (typeof page === "number") return response({}, page)
-      return response(page ?? [])
+    const params = new URL(url).searchParams
+    if (isListUrl(url)) {
+      const pageSize = Number(params.get("pageSize") ?? SHIPPING_QUEUE_DEFAULT_PAGE_SIZE)
+      const ascending = params.get("isOrderAscending") === "true"
+      if (!params.has("startTime") && !ascending && pageSize === 1 && sessionCheck !== undefined) return answer(sessionCheck, () => [])
+      const start = params.has("startTime") ? Number(params.get("startTime")) : Number.NEGATIVE_INFINITY
+      const end = params.has("endTime") ? Number(params.get("endTime")) : Number.POSITIVE_INFINITY
+      if (listFailure && params.has("startTime") && listFailure.at >= start && listFailure.at <= end) return answer(listFailure.result, () => [])
+      let rows = list.filter((row) => listIndex(row) >= start && listIndex(row) <= end)
+      if (ascending) rows = [...rows].reverse()
+      const after = params.get("lastShipmentId")
+      if (after) rows = rows.slice(rows.findIndex((row) => row.shipmentId === after) + 1)
+      return response(rows.slice(0, pageSize).map(({ listIndex: _index, ...row }) => row))
     }
+    const id = (marker: string) => decodeURIComponent(url.split(marker)[1].split("?")[0])
     if (url.includes("/document-requirements/")) {
-      const id = decodeURIComponent(url.split("/document-requirements/")[1].split("?")[0])
-      const result = id in documents ? documents[id] : { documents: [] }
-      if (result instanceof Error) throw result
-      if (typeof result === "number") return response({}, result)
-      return response(result)
+      const shipmentId = id("/document-requirements/")
+      return answer(documents[shipmentId], () => ({ documents: [] }))
     }
-    const id = decodeURIComponent(url.split("/eligibilities/")[1].split("?")[0])
-    const result = id in details ? details[id] : { ...SAMPLE_DETAILS_RESPONSE, shipmentId: id }
-    if (result instanceof Error) throw result
-    if (typeof result === "number") return response({}, result)
-    return response(result)
+    if (url.includes("/discrepancies/")) {
+      const shipmentId = id("/discrepancies/")
+      return answer(discrepancies[shipmentId]?.[Number(params.get("index"))], () => ({ totalRecords: 0, pageSize: 100, items: [] }))
+    }
+    const shipmentId = id("/eligibilities/")
+    return answer(details[shipmentId], () => ({ ...SAMPLE_DETAILS_RESPONSE, shipmentId }))
   })
 }
 
@@ -248,6 +281,38 @@ describe("shippingQueue URL generation", () => {
   it("builds the eligibility URL with inquiry and discrepancies", () => {
     expect(shipmentDetailsUrl("FBA18TNH8GWF")).toBe(
       "https://sellercentral.amazon.com/fba/wmsr/eligibilities/FBA18TNH8GWF?withInquiry=true&withDiscrepancies=true",
+    )
+  })
+
+  it("adds a slice's index dates to the list URL", () => {
+    const url = new URL(shippingQueueUrl(250, undefined, { startTime: 1, endTime: 2 }))
+    expect([...url.searchParams.entries()]).toEqual([
+      ["pageSize", "250"],
+      ["orderBy", SHIPPING_QUEUE_ORDER_BY],
+      ["isOrderAscending", "false"],
+      ["startTime", "1"],
+      ["endTime", "2"],
+      ["t2pLaunched", "true"],
+    ])
+  })
+
+  it("slices the index from a day past now back past the cutoff, overlapping by a millisecond", () => {
+    const day = 86_400_000
+    const now = Date.UTC(2026, 9, 18)
+    const cutoff = Date.UTC(2026, 0, 17)
+    const slices = shippingQueueSlices(cutoff, now)
+    expect(slices[0].endTime).toBe(now + day)
+    for (let i = 1; i < slices.length; i += 1) expect(slices[i].endTime).toBe(slices[i - 1].startTime + 1)
+    expect(slices.some((slice) => slice.startTime === cutoff)).toBe(true)
+    expect(slices.at(-1)?.startTime).toBe(0)
+    expect(slices.length).toBeLessThanOrEqual(SHIPPING_QUEUE_MAX_SLICES)
+    expect(slices[1].endTime - slices[1].startTime).toBe(30 * day + 1)
+    expect(shippingQueueSlices(0, now).length).toBeLessThanOrEqual(SHIPPING_QUEUE_MAX_SLICES)
+  })
+
+  it("builds the SKU-line page URL like the claim page", () => {
+    expect(shipmentDiscrepanciesUrl("FBA19F7B2ZGH", 50)).toBe(
+      "https://sellercentral.amazon.com/fba/wmsr/discrepancies/FBA19F7B2ZGH?filter=NONE&index=50&pageSize=100&isOrderAscending=true&orderBy=MSKU",
     )
   })
 
@@ -532,8 +597,24 @@ describe("shippingQueue sheet generation", () => {
 })
 
 describe("fetchShippingQueueShipments", () => {
+  const callsTo = (fetchImpl: ReturnType<typeof vi.fn>, marker: string) =>
+    fetchImpl.mock.calls.filter(([url]) => String(url).includes(marker))
+  const sliceCalls = (fetchImpl: ReturnType<typeof vi.fn>) => fetchImpl.mock.calls.filter(([url]) => isSliceUrl(url))
+  const ids = (shipments: ShippingQueueShipment[]) => shipments.map((s) => s.shipmentId)
+
+  function captureLogs(): LogEntry[] {
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+    return entries
+  }
+
+  afterEach(() => {
+    setLogSink(null)
+    vi.restoreAllMocks()
+  })
+
   it("loads the list, then each shipment's details, and reports progress", async () => {
-    const fetchImpl = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]], details: ELIGIBLE_DETAILS })
+    const fetchImpl = routedFetch({ list: [SAMPLE_RAW_SHIPMENT], details: ELIGIBLE_DETAILS })
     const events: ReportProgressEvent[] = []
 
     const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, onProgress: (e) => events.push(e) })
@@ -542,12 +623,13 @@ describe("fetchShippingQueueShipments", () => {
     expect(shipments[0].shipmentId).toBe("FBA19RKC646S")
     expect(shipments[0].details?.items).toHaveLength(2)
     expect(shipments[0].detailsFetchFailed).toBeUndefined()
-    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(callsTo(fetchImpl, "/eligibilities/")).toHaveLength(1)
+    expect(callsTo(fetchImpl, "/document-requirements/")).toHaveLength(1)
     expect(shipments[0].documentTypes).toEqual([])
     expect(shipments[0].documentsFetchFailed).toBeUndefined()
 
     const withDocs = routedFetch({
-      pages: [[SAMPLE_RAW_SHIPMENT]],
+      list: [SAMPLE_RAW_SHIPMENT],
       details: ELIGIBLE_DETAILS,
       documents: { FBA19RKC646S: { documents: [{ documentType: "INVOICE" }, { documentType: "POD" }] } },
     })
@@ -555,7 +637,7 @@ describe("fetchShippingQueueShipments", () => {
     expect(documented[0].documentTypes).toEqual(["INVOICE", "POD"])
     expect(documented[0].detailsFetchFailed).toBeUndefined()
 
-    const docsFail = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]], details: ELIGIBLE_DETAILS, documents: { FBA19RKC646S: 500 } })
+    const docsFail = routedFetch({ list: [SAMPLE_RAW_SHIPMENT], details: ELIGIBLE_DETAILS, documents: { FBA19RKC646S: 500 } })
     const failedDocs = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: docsFail })
     expect(failedDocs[0].details?.items).toHaveLength(2)
     expect(failedDocs[0].detailsFetchFailed).toBeUndefined()
@@ -569,17 +651,17 @@ describe("fetchShippingQueueShipments", () => {
   })
 
   it("skips document requirements when no line can need documents", async () => {
-    const ineligible = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
+    const ineligible = routedFetch({ list: [SAMPLE_RAW_SHIPMENT] })
     const [skipped] = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: ineligible })
-    expect(ineligible).toHaveBeenCalledTimes(2)
-    expect(ineligible.mock.calls.some(([url]) => String(url).includes("/document-requirements/"))).toBe(false)
+    expect(callsTo(ineligible, "/eligibilities/")).toHaveLength(1)
+    expect(callsTo(ineligible, "/document-requirements/")).toHaveLength(0)
     expect(skipped.details?.items).toHaveLength(2)
     expect(skipped.documentTypes).toBeUndefined()
     expect(skipped.documentsFetchFailed).toBeUndefined()
 
     const items = SAMPLE_DETAILS_RESPONSE.discrepancies.items.map((item) => ({ ...item, totalDiscrepancyQuantity: 0 }))
     const balanced = routedFetch({
-      pages: [[SAMPLE_RAW_SHIPMENT]],
+      list: [SAMPLE_RAW_SHIPMENT],
       details: {
         FBA19RKC646S: {
           ...SAMPLE_DETAILS_RESPONSE,
@@ -589,24 +671,28 @@ describe("fetchShippingQueueShipments", () => {
       },
     })
     await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: balanced })
-    expect(balanced).toHaveBeenCalledTimes(2)
+    expect(callsTo(balanced, "/document-requirements/")).toHaveLength(0)
   })
 
   it("sends the same requests Seller Central does", async () => {
-    const fetchImpl = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]], details: ELIGIBLE_DETAILS })
+    const fetchImpl = routedFetch({ list: [SAMPLE_RAW_SHIPMENT], details: ELIGIBLE_DETAILS })
     await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl })
 
-    const [listUrl, listInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
-    expect(listUrl).toBe(shippingQueueUrl())
-    expect(listInit).toMatchObject({
+    const [sliceUrl, sliceInit] = sliceCalls(fetchImpl)[0] as unknown as [string, RequestInit]
+    const slice = new URL(sliceUrl).searchParams
+    expect([...slice.keys()]).toEqual(["pageSize", "orderBy", "isOrderAscending", "startTime", "endTime", "t2pLaunched"])
+    expect(slice.get("pageSize")).toBe(String(SHIPPING_QUEUE_DEFAULT_PAGE_SIZE))
+    expect(slice.get("orderBy")).toBe(SHIPPING_QUEUE_ORDER_BY)
+    expect(sliceInit).toMatchObject({
       method: "GET",
       mode: "cors",
       credentials: "include",
       referrer: SHIPPING_QUEUE_REFERRER,
       headers: { accept: "*/*", "accept-language": "en-US,en;q=0.9" },
     })
+    expect(callsTo(fetchImpl, "isOrderAscending=true").map(([url]) => url)).toEqual([shippingQueueUrl(1, undefined, undefined, true)])
 
-    const [detailsUrl, detailsInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit]
+    const [detailsUrl, detailsInit] = callsTo(fetchImpl, "/eligibilities/")[0] as unknown as [string, RequestInit]
     expect(detailsUrl).toBe(shipmentDetailsUrl("FBA19RKC646S"))
     expect(detailsInit).toMatchObject({
       method: "GET",
@@ -615,7 +701,7 @@ describe("fetchShippingQueueShipments", () => {
       referrer: "https://sellercentral.amazon.com/fba/wmsr/FBA19RKC646S",
     })
 
-    const [documentsUrl, documentsInit] = fetchImpl.mock.calls[2] as unknown as [string, RequestInit]
+    const [documentsUrl, documentsInit] = callsTo(fetchImpl, "/document-requirements/")[0] as unknown as [string, RequestInit]
     expect(documentsUrl).toBe(shipmentDocumentsUrl("FBA19RKC646S"))
     expect(documentsUrl.startsWith(SHIPMENT_DOCUMENTS_URL)).toBe(true)
     expect(documentsInit).toMatchObject({
@@ -626,117 +712,191 @@ describe("fetchShippingQueueShipments", () => {
     })
   })
 
-  it("pages with the cursor from the last shipment of the previous page", async () => {
-    const page1 = [
+  it("continues a full slice with the cursor from its last shipment", async () => {
+    const list = [
       { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_0" },
-      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_1", createdDate: 1767122910000, lastUpdatedDate: 1768331292000 },
+      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_1", createdDate: 1767122910000, listIndex: SAMPLE_RAW_SHIPMENT.lastUpdatedDate },
+      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P2_0" },
     ]
-    const page2 = [{ ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P2_0" }]
-    const fetchImpl = routedFetch({ pages: [page1, page2] })
+    const fetchImpl = routedFetch({ list })
 
     const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, pageSize: 2 })
 
-    expect(shipments.map((s) => s.shipmentId)).toEqual(["FBA_P1_0", "FBA_P1_1", "FBA_P2_0"])
-    const listCalls = fetchImpl.mock.calls.map(([url]) => String(url)).filter((url) => url.startsWith(SHIPPING_QUEUE_URL))
-    expect(listCalls).toHaveLength(2)
-    const second = new URL(listCalls[1])
-    expect(second.searchParams.get("lastShipmentId")).toBe("FBA_P1_1")
-    expect(second.searchParams.get("createdDate")).toBe("1767122910000")
-    expect(second.searchParams.get("lastUpdatedDate")).toBe("1768331292000")
+    expect(ids(shipments)).toEqual(["FBA_P1_0", "FBA_P1_1", "FBA_P2_0"])
+    const continued = sliceCalls(fetchImpl).map(([url]) => new URL(String(url)).searchParams).find((params) => params.has("lastShipmentId"))
+    expect(continued?.get("lastShipmentId")).toBe("FBA_P1_1")
+    expect(continued?.get("createdDate")).toBe("1767122910000")
+    expect(continued?.get("lastUpdatedDate")).toBe(String(SAMPLE_RAW_SHIPMENT.lastUpdatedDate))
   })
 
-  it("starts loading details for a page while the next list page loads", async () => {
-    const page1 = [
+  it("starts loading details while later pages of the list load", async () => {
+    const list = [
       { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_0" },
       { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_1" },
+      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P2_0" },
     ]
-    const page2 = [{ ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P2_0" }]
-    const fetchImpl = routedFetch({ pages: [page1, page2] })
-    const entries: LogEntry[] = []
-    setLogSink((entry) => entries.push(entry))
+    const fetchImpl = routedFetch({ list })
+    const entries = captureLogs()
 
-    try {
-      const shipments = await fetchShippingQueueShipments({
-        ...NO_CUTOFF,
-        fetch: fetchImpl,
-        pageSize: 2,
-        log: createLogger("content"),
-      })
+    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, pageSize: 2, log: createLogger("content") })
 
-      const urls = fetchImpl.mock.calls.map(([url]) => String(url))
-      const secondListCall = urls.findIndex((url, index) => index > 0 && url.startsWith(SHIPPING_QUEUE_URL))
-      expect(urls.findIndex((url) => url.includes("/eligibilities/FBA_P1_0"))).toBeLessThan(secondListCall)
-      expect(shipments.map((s) => s.shipmentId)).toEqual(["FBA_P1_0", "FBA_P1_1", "FBA_P2_0"])
-      expect(entries.filter((entry) => entry.event === "shippingQueue.listPage").map((entry) => entry.data)).toEqual([
-        { page: 1, rows: 2, inWindow: 2, added: 2 },
-        { page: 2, rows: 1, inWindow: 1, added: 1 },
-      ])
-    } finally {
-      setLogSink(null)
-    }
+    const urls = fetchImpl.mock.calls.map(([url]) => String(url))
+    const continuation = urls.findIndex((url) => isSliceUrl(url) && url.includes("lastShipmentId"))
+    expect(urls.findIndex((url) => url.includes("/eligibilities/FBA_P1_0"))).toBeLessThan(continuation)
+    expect(ids(shipments)).toEqual(["FBA_P1_0", "FBA_P1_1", "FBA_P2_0"])
+    expect(entries.find((entry) => entry.event === "shippingQueue.list")?.data).toMatchObject({ rows: 3, inWindow: 3, lastInWindowAt: 2 })
   })
 
-  it("stops when a page is short, empty, or only repeats shipments", async () => {
-    const short = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
-    await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: short, pageSize: 2 })
-    expect(short.mock.calls.filter(([url]) => String(url).startsWith(SHIPPING_QUEUE_URL))).toHaveLength(1)
-
-    const repeating = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT, SAMPLE_RAW_SHIPMENT], [SAMPLE_RAW_SHIPMENT, SAMPLE_RAW_SHIPMENT], []] })
-    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: repeating, pageSize: 2 })
-    expect(shipments).toHaveLength(1)
-    expect(repeating.mock.calls.filter(([url]) => String(url).startsWith(SHIPPING_QUEUE_URL))).toHaveLength(2)
-  })
-
-  it("skips shipments updated before the cutoff but keeps recent ones listed after them", async () => {
-    const old = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_OLD", lastUpdatedDate: 1700000000000 }
-    const lagging = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_LAGGING", lastUpdatedDate: 1791000000000 }
-    const fresh = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_FRESH", lastUpdatedDate: 1791500000000 }
-    const fetchImpl = routedFetch({ pages: [[fresh, old, lagging], [{ ...old, shipmentId: "FBA_OLD_2" }, { ...old, shipmentId: "FBA_OLD_3" }, old], [fresh]] })
-
-    const shipments = await fetchShippingQueueShipments({
-      fetch: fetchImpl,
-      sleep: noSleep,
-      pageSize: 3,
-      referenceDate: new Date("2026-10-10T12:00:00Z"),
+  it("reads slices in list order even when they arrive out of order", async () => {
+    const reference = new Date("2026-10-10T12:00:00Z")
+    const day = 86_400_000
+    const newest = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_NEWEST", lastUpdatedDate: reference.getTime() - day }
+    const older = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_OLDER", lastUpdatedDate: reference.getTime() - 100 * day }
+    const base = routedFetch({ list: [newest, older] })
+    const fetchImpl = vi.fn(async (input: unknown, init?: unknown) => {
+      const url = String(input)
+      // The newest slice answers last.
+      if (isSliceUrl(url) && Number(new URL(url).searchParams.get("endTime")) > reference.getTime()) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      return base(input, init)
     })
 
-    expect(shipments.map((s) => s.shipmentId)).toEqual(["FBA_FRESH", "FBA_LAGGING"])
-    // Page 2 holds only pre-cutoff shipments, so page 3 is never requested.
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).startsWith(SHIPPING_QUEUE_URL))).toHaveLength(2)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/eligibilities/"))).toHaveLength(2)
+    const shipments = await fetchShippingQueueShipments({ fetch: fetchImpl, sleep: noSleep, referenceDate: reference })
+
+    expect(ids(shipments)).toEqual(["FBA_NEWEST", "FBA_OLDER"])
   })
 
-  it("keeps earlier pages and flags the list when a later page fails", async () => {
-    const page1 = [
-      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_0" },
-      { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_P1_1" },
-    ]
-    const fetchImpl = routedFetch({ pages: [page1, 500] })
+  it("reads a slice until a page comes back short or only repeats shipments", async () => {
+    const short = routedFetch({ list: [SAMPLE_RAW_SHIPMENT] })
+    await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: short, pageSize: 2 })
+    expect(sliceCalls(short).filter(([url]) => String(url).includes("lastShipmentId"))).toHaveLength(0)
 
-    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, pageSize: 2 })
-
+    const two = [SAMPLE_RAW_SHIPMENT, { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_SECOND" }]
+    const base = routedFetch({ list: two })
+    // Amazon ignoring the cursor would send the same page forever.
+    const repeating = vi.fn(async (input: unknown, init?: unknown) => base(String(input).replace(/&lastShipmentId=[^&]*/, ""), init))
+    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: repeating, pageSize: 2 })
     expect(shipments).toHaveLength(2)
+    expect(sliceCalls(repeating).filter(([url]) => String(url).includes("lastShipmentId"))).toHaveLength(1)
+  })
+
+  it("keeps in-window shipments Amazon lists below the cutoff and stops after 250 older ones", async () => {
+    const reference = new Date("2026-10-10T12:00:00Z")
+    const cutoff = calculateShippingQueueCutoffDate(reference).getTime()
+    const day = 86_400_000
+    const indexed = (id: string, index: number, lastUpdatedDate = index) =>
+      ({ ...SAMPLE_RAW_SHIPMENT, shipmentId: id, createdDate: index - day, lastUpdatedDate, listIndex: index })
+    const older = (id: string, index: number) => indexed(id, index)
+    const fresh = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_FRESH", lastUpdatedDate: 1791500000000 }
+    // Amazon's index lags: this shipment was updated recently but is listed with old ones.
+    const lagging = indexed("FBA_LAGGING", cutoff - 2 * day, 1791000000000)
+    const trailing = Array.from({ length: 250 }, (_, i) => older(`FBA_OLD_${i}`, cutoff - (3 + i) * day))
+    const tooLate = indexed("FBA_TOO_LATE", cutoff - 400 * day, 1791000000000)
+    const fetchImpl = routedFetch({ list: [fresh, older("FBA_OLD", cutoff - day), lagging, ...trailing, tooLate] })
+    const entries = captureLogs()
+
+    const shipments = await fetchShippingQueueShipments({ fetch: fetchImpl, sleep: noSleep, referenceDate: reference, log: createLogger("content") })
+
+    expect(ids(shipments)).toEqual(["FBA_FRESH", "FBA_LAGGING"])
+    expect(callsTo(fetchImpl, "/eligibilities/")).toHaveLength(2)
+    expect(entries.find((entry) => entry.event === "shippingQueue.list")?.data).toMatchObject({
+      rows: 253,
+      inWindow: 2,
+      lastInWindowAt: 2,
+      maxGap: 1,
+    })
+  })
+
+  it("skips slices older than the oldest shipment and reads nothing for an empty store", async () => {
+    const recent = routedFetch({ list: [SAMPLE_RAW_SHIPMENT] })
+    await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: recent })
+    expect(sliceCalls(recent).length).toBeLessThanOrEqual(SHIPPING_QUEUE_SLICE_CONCURRENCY)
+
+    const empty = routedFetch()
+    const events: ReportProgressEvent[] = []
+    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: empty, onProgress: (e) => events.push(e) })
+    expect(shipments).toEqual([])
+    expect(callsTo(empty, "/eligibilities/")).toHaveLength(0)
+    expect(sliceCalls(empty).length).toBeLessThanOrEqual(SHIPPING_QUEUE_SLICE_CONCURRENCY)
+    expect(events.at(-1)).toEqual({ source: "shippingQueue", status: "complete", loaded: 0, total: 0, phase: "listings" })
+  })
+
+  it("loads SKU lines past the first 50 from the discrepancies endpoint", async () => {
+    const item = SAMPLE_DETAILS_RESPONSE.discrepancies.items[0]
+    const lines = (from: number, count: number) => Array.from({ length: count }, (_, i) => ({ ...item, merchantSKU: `SKU-${from + i}` }))
+    const big = (shipmentId: string) => ({
+      ...SAMPLE_DETAILS_RESPONSE,
+      shipmentId,
+      discrepancies: { totalRecords: 182, pageSize: 50, items: lines(0, 50) },
+    })
+    const fetchImpl = routedFetch({
+      list: [{ ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_WHOLE" }, { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_GAP" }],
+      details: { FBA_WHOLE: big("FBA_WHOLE"), FBA_GAP: big("FBA_GAP") },
+      discrepancies: {
+        FBA_WHOLE: { 50: { totalRecords: 182, pageSize: 100, items: lines(50, 100) }, 150: { totalRecords: 182, pageSize: 100, items: lines(150, 32) } },
+        FBA_GAP: { 50: 400, 150: { totalRecords: 182, pageSize: 100, items: lines(150, 32) } },
+      },
+    })
+    const entries = captureLogs()
+
+    const [whole, gap] = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, log: createLogger("content") })
+
+    expect(whole.details?.items.map((line) => line.merchantSKU)).toEqual(lines(0, 182).map((line) => line.merchantSKU))
+    expect(shipmentDetailsIncomplete(whole.details)).toBe(false)
+    // A missing page drops it and every later one, so the lines stay in order.
+    expect(gap.details?.items).toHaveLength(50)
+    expect(shipmentDetailsIncomplete(gap.details)).toBe(true)
+    const url = new URL(String(callsTo(fetchImpl, "/discrepancies/FBA_WHOLE")[0][0]))
+    expect(url.pathname).toBe("/fba/wmsr/discrepancies/FBA_WHOLE")
+    expect(Object.fromEntries(url.searchParams)).toEqual({ filter: "NONE", index: "50", pageSize: "100", isOrderAscending: "true", orderBy: "MSKU" })
+    expect(entries.find((entry) => entry.event === "shippingQueue.details")?.data).toEqual({
+      shipments: 2,
+      failed: 0,
+      documentsSkipped: 2,
+      pauses: 0,
+      lineRequests: 4,
+      linesMax: 182,
+      linesCut: 1,
+    })
+  })
+
+  it("keeps earlier slices and flags the list when a later slice fails", async () => {
+    const reference = new Date("2026-10-10T12:00:00Z")
+    const day = 86_400_000
+    const updated = (id: string, daysAgo: number) => {
+      const at = reference.getTime() - daysAgo * day
+      return { ...SAMPLE_RAW_SHIPMENT, shipmentId: id, createdDate: at - day, lastUpdatedDate: at }
+    }
+    const list = [updated("FBA_P1_0", 1), updated("FBA_P1_1", 1), updated("FBA_OLDER", 200)]
+    const fetchImpl = routedFetch({ list, listFailure: { at: reference.getTime() - 100 * day, result: 500 } })
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const shipments = await fetchShippingQueueShipments({ fetch: fetchImpl, sleep: noSleep, referenceDate: reference })
+
+    expect(ids(shipments)).toEqual(["FBA_P1_0", "FBA_P1_1"])
     expect(shipments.every((s) => s.listingsIncomplete)).toBe(true)
     expect(shippingQueueSheetRows(shipments)[0]).toEqual([SHIPPING_QUEUE_LIST_INCOMPLETE_NOTE])
   })
 
-  it("throws when the first page fails", async () => {
+  it("throws when the list fails before any shipment is read", async () => {
+    const now = Date.now()
     await expect(
-      fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: routedFetch({ pages: [500] }) }),
+      fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: routedFetch({ listFailure: { at: now, result: 500 } }) }),
     ).rejects.toThrow("Couldn’t load shipping queue (500).")
     await expect(
-      fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: routedFetch({ pages: [{ not: "a list" }] }) }),
+      fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: routedFetch({ listFailure: { at: now, result: { not: "a list" } } }) }),
     ).rejects.toThrow("Couldn’t load shipping queue.")
   })
 
   it("marks only the shipments whose details fail", async () => {
-    const pages = [[
+    const list = [
       { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_OK" },
       { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_FORBIDDEN" },
       { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBA_BROKEN" },
-    ]]
+    ]
     const fetchImpl = routedFetch({
-      pages,
+      list,
       details: { FBA_FORBIDDEN: 403, FBA_BROKEN: "not an object" },
     })
     vi.spyOn(console, "error").mockImplementation(() => {})
@@ -748,13 +908,12 @@ describe("fetchShippingQueueShipments", () => {
     expect(shipments[1]).toMatchObject({ shipmentId: "FBA_FORBIDDEN", detailsFetchFailed: true })
     expect(shipments[1].details).toBeUndefined()
     expect(shipments[2]).toMatchObject({ shipmentId: "FBA_BROKEN", detailsFetchFailed: true })
-    // A 403 pauses once, checks the list, and retries that shipment once.
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/eligibilities/FBA_FORBIDDEN"))).toHaveLength(2)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/document-requirements/FBA_FORBIDDEN"))).toHaveLength(0)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/eligibilities/FBA_BROKEN"))).toHaveLength(1)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/document-requirements/FBA_BROKEN"))).toHaveLength(0)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).startsWith(SHIPPING_QUEUE_URL))).toHaveLength(2)
-    vi.restoreAllMocks()
+    // A 403 pauses once, checks the list with one shipment, and retries that shipment once.
+    expect(callsTo(fetchImpl, "/eligibilities/FBA_FORBIDDEN")).toHaveLength(2)
+    expect(callsTo(fetchImpl, "/document-requirements/FBA_FORBIDDEN")).toHaveLength(0)
+    expect(callsTo(fetchImpl, "/eligibilities/FBA_BROKEN")).toHaveLength(1)
+    expect(callsTo(fetchImpl, "/document-requirements/FBA_BROKEN")).toHaveLength(0)
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toContain(shippingQueueUrl(1))
   })
 
   it("pauses on a session response and resumes without launching during the wait", async () => {
@@ -771,7 +930,7 @@ describe("fetchShippingQueueShipments", () => {
     const sleepGate = new Promise<void>((resolve) => {
       releaseSleep = resolve
     })
-    const base = routedFetch({ pages: [rows] })
+    const base = routedFetch({ list: rows })
     const fetchImpl = vi.fn(async (input: unknown, init?: unknown) => {
       const url = String(input)
       if (!url.includes("/eligibilities/")) return base(input, init)
@@ -805,13 +964,12 @@ describe("fetchShippingQueueShipments", () => {
     expect(shipments).toHaveLength(count)
     expect(shipments.every((shipment) => shipment.details && !shipment.detailsFetchFailed)).toBe(true)
     expect(seen.get("FBA_0")).toBe(2)
-    vi.restoreAllMocks()
   })
 
   it("marks shipments not yet started when the list check fails", async () => {
     const count = SHIPMENT_DETAILS_CONCURRENCY + 5
     const rows = Array.from({ length: count }, (_, i) => ({ ...SAMPLE_RAW_SHIPMENT, shipmentId: `FBA_${i}` }))
-    const fetchImpl = routedFetch({ pages: [rows, 500], details: { FBA_0: 401 } })
+    const fetchImpl = routedFetch({ list: rows, sessionCheck: 500, details: { FBA_0: 401 } })
     const sleep = vi.fn(async () => {})
     vi.spyOn(console, "error").mockImplementation(() => {})
     vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -829,9 +987,8 @@ describe("fetchShippingQueueShipments", () => {
       expect(shipments[i].detailsFetchFailed).toBe(true)
       expect(fetchImpl.mock.calls.some(([url]) => String(url).includes(`/eligibilities/FBA_${i}?`))).toBe(false)
     }
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/eligibilities/FBA_0"))).toHaveLength(1)
-    expect(fetchImpl.mock.calls.filter(([url]) => String(url).startsWith(SHIPPING_QUEUE_URL))).toHaveLength(2)
-    vi.restoreAllMocks()
+    expect(callsTo(fetchImpl, "/eligibilities/FBA_0")).toHaveLength(1)
+    expect(fetchImpl.mock.calls.filter(([url]) => url === shippingQueueUrl(1))).toHaveLength(1)
   })
 
   it("does not pause again after the session pause cap", async () => {
@@ -840,7 +997,7 @@ describe("fetchShippingQueueShipments", () => {
     const rows = Array.from({ length: count }, (_, i) => ({ ...SAMPLE_RAW_SHIPMENT, shipmentId: `FBA_${i}` }))
     const sessionIndexes = Array.from({ length: SHIPMENT_DETAILS_SESSION_PAUSES + 1 }, (_, i) => i * wave)
     const attempts = new Map<string, number>()
-    const base = routedFetch({ pages: [rows] })
+    const base = routedFetch({ list: rows })
     const fetchImpl = vi.fn(async (input: unknown, init?: unknown) => {
       const url = String(input)
       if (!url.includes("/eligibilities/")) return base(input, init)
@@ -870,12 +1027,11 @@ describe("fetchShippingQueueShipments", () => {
       expect(attempts.has(`FBA_${i}`)).toBe(false)
     }
     expect(shipments[capped + 1].details).toBeDefined()
-    vi.restoreAllMocks()
   })
 
   it("retries throttled and failing detail requests", async () => {
     let attempts = 0
-    const base = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
+    const base = routedFetch({ list: [SAMPLE_RAW_SHIPMENT] })
     const fetchImpl = vi.fn(async (input: unknown, init?: unknown) => {
       if (String(input).includes("/eligibilities/")) {
         attempts += 1
@@ -896,7 +1052,7 @@ describe("fetchShippingQueueShipments", () => {
 
   it("gives up after the maximum number of attempts", async () => {
     let attempts = 0
-    const base = routedFetch({ pages: [[SAMPLE_RAW_SHIPMENT]] })
+    const base = routedFetch({ list: [SAMPLE_RAW_SHIPMENT] })
     const fetchImpl = vi.fn(async (input: unknown, init?: unknown) => {
       if (String(input).includes("/eligibilities/")) {
         attempts += 1
@@ -910,15 +1066,14 @@ describe("fetchShippingQueueShipments", () => {
 
     expect(attempts).toBe(SHIPMENT_DETAILS_MAX_ATTEMPTS)
     expect(shipments[0].detailsFetchFailed).toBe(true)
-    vi.restoreAllMocks()
   })
 
-  it("loads details forty at a time, in list order", async () => {
+  it("loads details SHIPMENT_DETAILS_CONCURRENCY at a time, in list order", async () => {
     const count = SHIPMENT_DETAILS_CONCURRENCY + 10
-    const pages = [Array.from({ length: count }, (_, i) => ({ ...SAMPLE_RAW_SHIPMENT, shipmentId: `FBA_${String(i).padStart(2, "0")}` }))]
+    const list = Array.from({ length: count }, (_, i) => ({ ...SAMPLE_RAW_SHIPMENT, shipmentId: `FBA_${String(i).padStart(2, "0")}` }))
     let inFlight = 0
     let peak = 0
-    const base = routedFetch({ pages })
+    const base = routedFetch({ list })
     const fetchImpl = vi.fn(async (input: unknown, init?: unknown) => {
       if (!String(input).includes("/eligibilities/")) return base(input, init)
       inFlight += 1
@@ -931,21 +1086,10 @@ describe("fetchShippingQueueShipments", () => {
 
     const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, onProgress: (e) => events.push(e) })
 
-    expect(shipments.map((s) => s.shipmentId)).toEqual(pages[0].map((s) => s.shipmentId))
+    expect(ids(shipments)).toEqual(list.map((s) => s.shipmentId))
     expect(peak).toBe(SHIPMENT_DETAILS_CONCURRENCY)
     const loaded = events.filter((e) => e.phase === "details" && e.status === "active").map((e) => e.loaded)
     expect(loaded).toEqual(Array.from({ length: count + 1 }, (_, i) => i))
-  })
-
-  it("completes without detail requests when there are no shipments", async () => {
-    const fetchImpl = routedFetch({ pages: [[]] })
-    const events: ReportProgressEvent[] = []
-
-    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl, onProgress: (e) => events.push(e) })
-
-    expect(shipments).toEqual([])
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
-    expect(events.at(-1)).toEqual({ source: "shippingQueue", status: "complete", loaded: 0, total: 0, phase: "listings" })
   })
 })
 

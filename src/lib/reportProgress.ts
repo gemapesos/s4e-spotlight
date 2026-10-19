@@ -171,8 +171,7 @@ export function reportSourceDetail(source: ReportSource, state: ReportSourceStat
     return "Loading listings"
   }
   if (source === "feedback") {
-    if (state.total) return `Page ${state.loaded ?? 0} of ${state.total}`
-    if (state.loaded) return `Page ${state.loaded}`
+    if (state.loaded) return `${state.loaded.toLocaleString("en-US")} entries`
     return "Loading"
   }
   if (source === "suppressed") {

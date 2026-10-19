@@ -128,9 +128,46 @@ describe("request monitor", () => {
     expect(summary["GET /fba/wmsr/eligibilities/:id"].parallelism).toBeGreaterThan(1)
     expect(summary["GET /fbmapi/v1/feedbacks"]).toMatchObject({ n: 1, failed: 0, maxInFlight: 1 })
     expect(summary["GET /fbmapi/v1/feedbacks"].statuses).toBeUndefined()
+    expect(summary["GET /fbmapi/v1/feedbacks"].bodyMs).toBeUndefined()
     expect(entries).toEqual([
       expect.objectContaining({ level: "warn", event: "request.failed", data: expect.objectContaining({ status: "503" }) }),
     ])
+  })
+
+  it("times body reads separately from the headers and counts them in wall time", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        return { shipments: [] }
+      },
+    }))
+    const monitor = createRequestMonitor(fetchImpl as unknown as typeof fetch)
+    const url = "https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments"
+
+    const response = await monitor.fetch(url)
+    await expect(response.json()).resolves.toEqual({ shipments: [] })
+    await response.json()
+
+    const summary = monitor.summary()["GET /fba/shippingqueue/api/v1/shipment/listShipments"]
+    expect(summary.bodyMs).toBeGreaterThanOrEqual(20)
+    expect(summary.wallMs).toBeGreaterThanOrEqual(summary.bodyMs ?? 0)
+    expect(summary.avgMs).toBeLessThan(summary.bodyMs ?? 0)
+  })
+
+  it("records requests the caller aborted without counting them as failures", async () => {
+    const entries = captureLogs()
+    const abort = Object.assign(new Error("The operation was aborted."), { name: "AbortError" })
+    const monitor = createRequestMonitor(vi.fn().mockRejectedValue(abort) as unknown as typeof fetch, createLogger("content"))
+
+    await expect(monitor.fetch("https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments")).rejects.toThrow("aborted")
+    expect(monitor.summary()["GET /fba/shippingqueue/api/v1/shipment/listShipments"]).toMatchObject({
+      n: 1,
+      failed: 0,
+      statuses: { aborted: 1 },
+    })
+    expect(entries).toEqual([])
   })
 
   it("counts network errors and rethrows them", async () => {

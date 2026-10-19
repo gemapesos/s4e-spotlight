@@ -4,10 +4,23 @@ import type { ReportProgressEvent } from "./reportProgress"
 
 export const SHIPPING_QUEUE_URL = "https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments"
 export const SHIPPING_QUEUE_REFERRER = "https://sellercentral.amazon.com/manage/shipments?ref=sc_shipments"
+/** Amazon's largest page; bigger pages fail with HTTP 400. */
 export const SHIPPING_QUEUE_DEFAULT_PAGE_SIZE = 250
-export const SHIPPING_QUEUE_MAX_PAGES = 40
 export const SHIPPING_QUEUE_ORDER_BY = "SHIPMENT_UPDATE_DATE"
+/** The list is read in slices of Amazon's update-date index this many days long. */
+export const SHIPPING_QUEUE_SLICE_DAYS = 30
+/** How far before the cutoff the slices reach; one last slice holds everything older. */
+export const SHIPPING_QUEUE_SLICE_YEARS = 4
+export const SHIPPING_QUEUE_SLICE_CONCURRENCY = 10
+/** Slices widen past SHIPPING_QUEUE_SLICE_DAYS when needed to stay within this many. */
+export const SHIPPING_QUEUE_MAX_SLICES = 80
+/** Reading stops once this many shipments in a row, in Amazon's order, fall before the cutoff. */
+export const SHIPPING_QUEUE_TRAILING_ROWS = 250
+export const SHIPPING_QUEUE_MAX_REQUESTS = 200
 export const SHIPMENT_ELIGIBILITY_URL = "https://sellercentral.amazon.com/fba/wmsr/eligibilities"
+export const SHIPMENT_DISCREPANCIES_URL = "https://sellercentral.amazon.com/fba/wmsr/discrepancies"
+/** Amazon's largest page of SKU lines; the eligibility response carries only the first 50. */
+export const SHIPMENT_DISCREPANCY_PAGE_SIZE = 100
 export const SHIPMENT_DOCUMENTS_URL = "https://sellercentral.amazon.com/fba/wmsr/document-requirements"
 export const SHIPMENT_CLAIM_PAGE_URL = "https://sellercentral.amazon.com/fba/wmsr"
 export const SHIPPING_STATUS_OUTSIDE_WINDOW = "Shipment ID - Outside Reconciliation Window"
@@ -21,7 +34,7 @@ export const SHIPPING_STATUS_REVIEW = "Review Needed"
 export const SHIPPING_STATUS_UNAVAILABLE = "N/A"
 export const REQUIRED_DOCUMENT_INVOICE = "Proof of Inventory Ownership"
 export const REQUIRED_DOCUMENT_DELIVERY = "Delivery"
-export const SHIPMENT_DETAILS_CONCURRENCY = 40
+export const SHIPMENT_DETAILS_CONCURRENCY = 60
 export const SHIPMENT_DETAILS_MAX_ATTEMPTS = 3
 export const SHIPMENT_DETAILS_RETRY_DELAY_MS = 500
 export const SHIPMENT_DETAILS_SESSION_WAIT_MS = 60_000
@@ -33,7 +46,7 @@ export const SHIPPING_QUEUE_LIST_INCOMPLETE_NOTE =
 export const SHIPPING_QUEUE_DETAILS_INCOMPLETE_NOTE =
   "Shipment details could not be loaded for some shipments. Those rows are marked “Couldn’t load shipment details”."
 export const SHIPPING_QUEUE_ITEMS_INCOMPLETE_NOTE =
-  "Some shipments have more SKU lines than Amazon returned in one response. Those shipments list only the SKU lines that were obtainable."
+  "Some shipments’ SKU lines couldn’t all be loaded. Those shipments list only the SKU lines that were obtainable."
 
 export const SHIPPING_QUEUE_SHIPMENT_HEADERS = [
   "Shipment Name",
@@ -247,6 +260,12 @@ interface ShipmentCursor {
   lastShipmentId: string
   createdDate: string
   lastUpdatedDate: string
+}
+
+/** A stretch of Amazon's update-date index, in epoch milliseconds. */
+export interface ShippingQueueSlice {
+  startTime: number
+  endTime: number
 }
 
 export function calculateShippingQueueCutoffDate(referenceDate: Date = new Date()): Date {
@@ -708,12 +727,18 @@ function shippingQueueCursor(shipment: ShippingQueueShipment | undefined): Shipm
 export function shippingQueueUrl(
   pageSize = SHIPPING_QUEUE_DEFAULT_PAGE_SIZE,
   cursor?: ShipmentCursor,
+  slice?: ShippingQueueSlice,
+  ascending = false,
 ): string {
   const params = new URLSearchParams({
     pageSize: String(pageSize),
     orderBy: SHIPPING_QUEUE_ORDER_BY,
-    isOrderAscending: "false",
+    isOrderAscending: String(ascending),
   })
+  if (slice) {
+    params.set("startTime", String(slice.startTime))
+    params.set("endTime", String(slice.endTime))
+  }
   if (cursor) {
     params.set("lastShipmentId", cursor.lastShipmentId)
     params.set("createdDate", cursor.createdDate)
@@ -723,8 +748,38 @@ export function shippingQueueUrl(
   return `${SHIPPING_QUEUE_URL}?${params.toString()}`
 }
 
+/**
+ * Slices of Amazon's update-date index, newest first: SHIPPING_QUEUE_SLICE_DAYS at a time from now
+ * back to the cutoff, then on back SHIPPING_QUEUE_SLICE_YEARS, then one slice for everything older.
+ * Each slice ends a millisecond into the next, so a shipment on a boundary is never skipped, and
+ * the newest reaches a day past now in case this computer's clock runs behind Amazon's.
+ */
+export function shippingQueueSlices(cutoffMs: number, nowMs: number): ShippingQueueSlice[] {
+  const oldest = Math.max(0, cutoffMs - SHIPPING_QUEUE_SLICE_YEARS * 365 * DAY_MS)
+  const step = Math.max(SHIPPING_QUEUE_SLICE_DAYS * DAY_MS, Math.ceil((nowMs - oldest) / SHIPPING_QUEUE_MAX_SLICES))
+  const bounds: number[] = []
+  for (let time = nowMs; time > cutoffMs; time -= step) bounds.push(time)
+  for (let time = cutoffMs; time > oldest; time -= step) bounds.push(time)
+  if (bounds.length === 0) bounds.push(nowMs)
+  return bounds.map((end, index) => ({
+    startTime: bounds[index + 1] ?? 0,
+    endTime: index === 0 ? end + DAY_MS : end + 1,
+  }))
+}
+
 export function shipmentDetailsUrl(shipmentId: string): string {
   return `${SHIPMENT_ELIGIBILITY_URL}/${encodeURIComponent(shipmentId)}?withInquiry=true&withDiscrepancies=true`
+}
+
+export function shipmentDiscrepanciesUrl(shipmentId: string, index: number): string {
+  const params = new URLSearchParams({
+    filter: "NONE",
+    index: String(index),
+    pageSize: String(SHIPMENT_DISCREPANCY_PAGE_SIZE),
+    isOrderAscending: "true",
+    orderBy: "MSKU",
+  })
+  return `${SHIPMENT_DISCREPANCIES_URL}/${encodeURIComponent(shipmentId)}?${params.toString()}`
 }
 
 export function shipmentDocumentsUrl(shipmentId: string): string {
@@ -781,6 +836,7 @@ export function requiredDocumentLabel(
   return documents.length > 0 ? documents.join(" AND ") : SHIPPING_STATUS_UNAVAILABLE
 }
 
+const DAY_MS = 86_400_000
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 class SessionInterrupted extends Error {
@@ -799,12 +855,14 @@ function isSessionResponse(response: Response): boolean {
 async function fetchShippingQueuePage(
   fetchImpl: typeof globalThis.fetch,
   url: string,
+  signal?: AbortSignal,
 ): Promise<ShippingQueueShipment[]> {
   const response = await fetchImpl(url, {
     method: "GET",
     mode: "cors",
     credentials: "include",
     referrer: SHIPPING_QUEUE_REFERRER,
+    signal,
     headers: {
       accept: "*/*",
       "accept-language": "en-US,en;q=0.9",
@@ -870,6 +928,71 @@ async function fetchShipmentDetails(
   throw lastError
 }
 
+async function fetchDiscrepancyItems(
+  fetchImpl: typeof globalThis.fetch,
+  shipmentId: string,
+  index: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<ShipmentDiscrepancyItem[]> {
+  let lastError = new Error("Couldn’t load SKU lines.")
+  for (let attempt = 1; attempt <= SHIPMENT_DETAILS_MAX_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) await sleep(SHIPMENT_DETAILS_RETRY_DELAY_MS * (attempt - 1))
+    let response: Response
+    try {
+      response = await fetchImpl(shipmentDiscrepanciesUrl(shipmentId, index), {
+        method: "GET",
+        mode: "cors",
+        credentials: "include",
+        referrer: buildShipmentClaimUrl(shipmentId),
+        headers: {
+          accept: "*/*",
+          "accept-language": "en-US,en;q=0.9",
+        },
+      })
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      continue
+    }
+    if (!response.ok || isSessionResponse(response)) {
+      lastError = new Error(`Couldn’t load SKU lines (${response.status}).`)
+      if (response.status === 429 || response.status >= 500) continue
+      throw lastError
+    }
+    const payload = await response.json() as { items?: unknown }
+    if (!Array.isArray(payload?.items)) throw new Error("Couldn’t load SKU lines.")
+    return payload.items
+      .map(asShipmentDiscrepancyItem)
+      .filter((item): item is ShipmentDiscrepancyItem => item !== undefined)
+  }
+  throw lastError
+}
+
+/**
+ * The eligibility response carries a shipment's first 50 SKU lines. The rest come from the
+ * discrepancies endpoint, SHIPMENT_DISCREPANCY_PAGE_SIZE at a time and all at once, in the same
+ * MSKU order. Lines stay in order: a page that fails drops it and every page after it.
+ */
+async function withAllDiscrepancyItems(
+  fetchImpl: typeof globalThis.fetch,
+  shipmentId: string,
+  details: ShipmentDetails,
+  sleep: (ms: number) => Promise<void>,
+): Promise<{ details: ShipmentDetails; requests: number }> {
+  const total = details.discrepancyTotalRecords
+  if (typeof total !== "number" || total <= details.items.length || details.items.length === 0) {
+    return { details, requests: 0 }
+  }
+  const starts: number[] = []
+  for (let index = details.items.length; index < total; index += SHIPMENT_DISCREPANCY_PAGE_SIZE) starts.push(index)
+  const pages = await Promise.all(starts.map((index) => fetchDiscrepancyItems(fetchImpl, shipmentId, index, sleep).catch(() => undefined)))
+  const items = [...details.items]
+  for (const page of pages) {
+    if (!page) break
+    items.push(...page)
+  }
+  return { details: { ...details, items }, requests: starts.length }
+}
+
 /**
  * Required documents only matter for lines that can be "Shipment ID - New (Send List)": an
  * eligible shipment with a negative discrepancy. Other shipments skip that request.
@@ -915,8 +1038,8 @@ interface ShipmentDetailsLoader {
 }
 
 /**
- * Loads eligibility details SHIPMENT_DETAILS_CONCURRENCY at a time while list pages are still
- * arriving. A session response stops new requests, waits, checks that the list still loads, and
+ * Loads eligibility details SHIPMENT_DETAILS_CONCURRENCY at a time while the list is still being
+ * read. A session response stops new requests, waits, checks that the list still loads, and
  * resumes; after SHIPMENT_DETAILS_SESSION_PAUSES pauses the remaining shipments are marked failed.
  */
 function createShipmentDetailsLoader(
@@ -936,6 +1059,7 @@ function createShipmentDetailsLoader(
   let holdLaunch = false
   let halt = false
   let documentsSkipped = 0
+  let lineRequests = 0
   const failedSample: string[] = []
   let settle: () => void = () => undefined
   const settled = new Promise<void>((resolve) => { settle = resolve })
@@ -976,7 +1100,7 @@ function createShipmentDetailsLoader(
       log?.warn("shippingQueue.sessionPause", { pause: pauseCount, waitMs: SHIPMENT_DETAILS_SESSION_WAIT_MS, processed })
       try {
         await sleep(SHIPMENT_DETAILS_SESSION_WAIT_MS)
-        await fetchShippingQueuePage(fetchImpl, shippingQueueUrl())
+        await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(1))
         return true
       } catch (error) {
         log?.error("shippingQueue.sessionCheckFailed", { error: describeError(error) })
@@ -1000,7 +1124,9 @@ function createShipmentDetailsLoader(
   }
 
   async function loadDetails(shipment: ShippingQueueShipment, id: string, onSession?: () => void) {
-    const details = await fetchShipmentDetails(fetchImpl, id, sleep, onSession)
+    const first = await fetchShipmentDetails(fetchImpl, id, sleep, onSession)
+    const { details, requests } = await withAllDiscrepancyItems(fetchImpl, id, first, sleep)
+    lineRequests += requests
     if (!shipmentNeedsDocumentTypes(details)) {
       documentsSkipped += 1
       return { ...shipment, details }
@@ -1060,16 +1186,194 @@ function createShipmentDetailsLoader(
       reportProgress()
       pump()
       await settled
+      // Shipments whose SKU lines are still short after the extra pages.
+      let linesCut = 0
+      let linesMax = 0
+      for (const { details } of results) {
+        linesMax = Math.max(linesMax, details?.discrepancyTotalRecords ?? 0)
+        if (shipmentDetailsIncomplete(details)) linesCut += 1
+      }
       log?.info("shippingQueue.details", {
         shipments: shipments.length,
         failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
         documentsSkipped,
         pauses: pauseCount,
+        ...(lineRequests ? { lineRequests, linesMax } : {}),
+        ...(linesCut ? { linesCut } : {}),
         ...(failedSample.length ? { failedSample } : {}),
       })
       return results
     },
   }
+}
+
+interface SliceState {
+  slice: ShippingQueueSlice
+  rows: ShippingQueueShipment[]
+  requests: number
+  loading: boolean
+  complete: boolean
+  failure?: unknown
+}
+
+/**
+ * Lists every shipment updated since the cutoff and hands in-window ones to `onShipments` in list
+ * order. Amazon sorts and filters by an update-date index that can lag a shipment's own
+ * lastUpdatedDate, so in-window shipments turn up well below the cutoff. Slices of that index
+ * load SHIPPING_QUEUE_SLICE_CONCURRENCY at a time and are read in order, and reading stops once
+ * SHIPPING_QUEUE_TRAILING_ROWS shipments in a row fall before the cutoff.
+ */
+async function listShippingQueue(
+  fetchImpl: typeof globalThis.fetch,
+  cutoffMs: number,
+  nowMs: number,
+  pageSize: number,
+  onShipments: (shipments: ShippingQueueShipment[]) => void,
+  log?: Logger,
+): Promise<{ listingsIncomplete: boolean }> {
+  const done = log?.time("shippingQueue.list")
+  const controller = new AbortController()
+  const slices: SliceState[] = shippingQueueSlices(cutoffMs, nowMs)
+    .map((slice) => ({ slice, rows: [], requests: 0, loading: false, complete: false }))
+  /** Slices ending before the oldest shipment was created are empty and skipped. */
+  let floor = Number.NEGATIVE_INFINITY
+  const seen = new Set<string>()
+  let current = 0
+  let currentRow = 0
+  let position = 0
+  let outRun = 0
+  let maxGap = 0
+  let lastInWindowAt = -1
+  let inWindow = 0
+  let requests = 0
+  let stopped = false
+  let listingsIncomplete = false
+  let failure: unknown
+
+  const stop = (incomplete: boolean, event?: string, data?: Record<string, unknown>) => {
+    stopped = true
+    listingsIncomplete ||= incomplete
+    if (event) log?.warn(event, { slice: current, loaded: inWindow, ...data })
+  }
+
+  /** Reads loaded slices in order, as far as they go. */
+  const read = () => {
+    while (!stopped && current < slices.length) {
+      const state = slices[current]
+      const added: ShippingQueueShipment[] = []
+      let repeated = currentRow === 0 && state.rows.length > 1
+      for (; currentRow < state.rows.length && !stopped; currentRow += 1) {
+        const shipment = state.rows[currentRow]
+        const id = shipment.shipmentId?.trim()
+        if (id && seen.has(id)) continue
+        repeated = false
+        if (id) seen.add(id)
+        const updatedMs = getShipmentLastUpdatedMs(shipment)
+        if (updatedMs != null && updatedMs < cutoffMs) {
+          outRun += 1
+          if (outRun >= SHIPPING_QUEUE_TRAILING_ROWS) stopped = true
+        } else {
+          maxGap = Math.max(maxGap, outRun)
+          outRun = 0
+          lastInWindowAt = position
+          inWindow += 1
+          added.push(shipment)
+        }
+        position += 1
+      }
+      if (added.length) onShipments(added)
+      if (stopped) return
+      // A slice that only repeats shipments already read means Amazon ignored the date filter.
+      if (repeated && state.complete) stop(true, "shippingQueue.sliceRepeated")
+      else if (state.failure !== undefined) {
+        if (position === 0 && inWindow === 0) failure = state.failure
+        else stop(true, "shippingQueue.listStopped", { error: describeError(state.failure) })
+      } else if (!state.complete) return
+      if (stopped || failure !== undefined) return
+      current += 1
+      currentRow = 0
+    }
+  }
+
+  const load = async (state: SliceState) => {
+    state.loading = true
+    state.requests += 1
+    requests += 1
+    try {
+      const cursor = shippingQueueCursor(state.rows[state.rows.length - 1])
+      const page = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor, state.slice), controller.signal)
+      const before = state.rows.length
+      state.rows.push(...page)
+      const fresh = page.some((shipment) => !state.rows.slice(0, before).some((row) => row.shipmentId === shipment.shipmentId))
+      if (page.length < pageSize || !shippingQueueCursor(page[page.length - 1]) || (before > 0 && !fresh)) state.complete = true
+    } catch (error) {
+      if (!stopped) state.failure = error
+    } finally {
+      state.loading = false
+    }
+  }
+
+  let resolveList: () => void = () => undefined
+  const listed = new Promise<void>((resolve) => { resolveList = resolve })
+  let next = 0
+  let inFlight = 0
+  const pump = () => {
+    read()
+    if (failure === undefined && !stopped && requests >= SHIPPING_QUEUE_MAX_REQUESTS) stop(true, "shippingQueue.listLimit")
+    if (stopped || failure !== undefined || current >= slices.length) {
+      controller.abort()
+      resolveList()
+      return
+    }
+    const queue: SliceState[] = []
+    const reading = slices[current]
+    // The slice being read loads its next page ahead of new slices.
+    if (reading.requests > 0 && !reading.complete && !reading.loading && reading.failure === undefined) queue.push(reading)
+    while (inFlight + queue.length < SHIPPING_QUEUE_SLICE_CONCURRENCY && next < slices.length) {
+      const state = slices[next]
+      next += 1
+      if (state.slice.endTime < floor) state.complete = true
+      else if (state.requests === 0) queue.push(state)
+    }
+    for (const state of queue) {
+      inFlight += 1
+      void load(state).finally(() => {
+        inFlight -= 1
+        pump()
+      })
+    }
+    // Trimmed slices can finish the list with nothing left in flight.
+    if (queue.length === 0 && inFlight === 0) pump()
+  }
+  // The shipment with the oldest index bounds how far back slices are worth reading. A shipment
+  // isn't indexed before it was created; a slice's width of margin covers any exception.
+  requests += 1
+  void fetchShippingQueuePage(fetchImpl, shippingQueueUrl(1, undefined, undefined, true), controller.signal).then(
+    (rows) => {
+      const created = Number(rows[0]?.createdDate)
+      if (!rows.length) floor = Number.POSITIVE_INFINITY
+      else if (Number.isFinite(created)) floor = created - SHIPPING_QUEUE_SLICE_DAYS * DAY_MS
+      pump()
+    },
+    () => undefined,
+  )
+  pump()
+  await listed
+
+  if (failure !== undefined) {
+    done?.({ requests, error: describeError(failure) }, "error")
+    throw failure
+  }
+  done?.({
+    slices: slices.filter((state) => state.requests > 0).length,
+    requests,
+    rows: position,
+    inWindow,
+    ...(inWindow ? { lastInWindowAt } : {}),
+    ...(maxGap ? { maxGap } : {}),
+    ...(listingsIncomplete ? { incomplete: true } : {}),
+  })
+  return { listingsIncomplete }
 }
 
 export async function fetchShippingQueueShipments(
@@ -1088,48 +1392,13 @@ export async function fetchShippingQueueShipments(
   onProgress?.({ source: "shippingQueue", status: "active", loaded: 0, phase: "listings" })
 
   const details = createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log)
-  const seenIds = new Set<string>()
   let listed = 0
-  let cursor: ShipmentCursor | undefined
-  let listingsIncomplete = false
-
-  for (let page = 1; page <= SHIPPING_QUEUE_MAX_PAGES; page += 1) {
-    const pageDone = log?.time("shippingQueue.listPage", { page })
-    let pageShipments: ShippingQueueShipment[]
-    try {
-      pageShipments = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor))
-    } catch (error) {
-      if (page > 1) {
-        log?.warn("shippingQueue.listStopped", { page, loaded: listed, error: describeError(error) })
-        listingsIncomplete = true
-        break
-      }
-      throw error
-    }
-
-    // Amazon orders by an index that can lag the real update time, so an older-looking
-    // row may still be recent. Only stop once a whole page falls before the cutoff.
-    let inWindow = 0
-    const added: ShippingQueueShipment[] = []
-    for (const shipment of pageShipments) {
-      const updatedMs = getShipmentLastUpdatedMs(shipment)
-      if (updatedMs != null && updatedMs < cutoffTimestamp) continue
-      inWindow += 1
-      const id = shipment.shipmentId?.trim()
-      if (id && seenIds.has(id)) continue
-      if (id) seenIds.add(id)
-      added.push(shipment)
-    }
-    pageDone?.({ rows: pageShipments.length, inWindow, added: added.length })
-    if (pageShipments.length === 0) break
-
-    details.add(added)
-    listed += added.length
+  const nowMs = options.referenceDate?.getTime() ?? Date.now()
+  const { listingsIncomplete } = await listShippingQueue(fetchImpl, cutoffTimestamp, nowMs, pageSize, (shipments) => {
+    details.add(shipments)
+    listed += shipments.length
     onProgress?.({ source: "shippingQueue", status: "active", loaded: listed, phase: "listings" })
-
-    cursor = shippingQueueCursor(pageShipments[pageShipments.length - 1])
-    if (inWindow === 0 || added.length === 0 || pageShipments.length < pageSize || !cursor) break
-  }
+  }, log)
 
   const loaded = await details.finish()
   const withDetails = listingsIncomplete ? loaded.map((shipment) => ({ ...shipment, listingsIncomplete: true })) : loaded

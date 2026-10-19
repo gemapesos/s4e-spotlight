@@ -209,10 +209,35 @@ function requestEndpoint(input, init) {
 	const operation = typeof init?.body === "string" ? /"operationName":"([^"]+)"/.exec(init.body)?.[1] : undefined;
 	return `${method} ${path}${operation ? ` ${operation}` : ""}`;
 }
+const RESPONSE_BODY_READERS = [
+	"arrayBuffer",
+	"blob",
+	"bytes",
+	"formData",
+	"json",
+	"text"
+];
+/** Calls `onRead` once, when the first body read (json(), text(), and so on) settles. */
+function onResponseBodyRead(response, onRead) {
+	let waiting = true;
+	const target = response;
+	try {
+		for (const method of RESPONSE_BODY_READERS) {
+			const read = target[method];
+			if (typeof read !== "function") continue;
+			target[method] = (...args) => Promise.resolve(Reflect.apply(read, response, args)).finally(() => {
+				if (!waiting) return;
+				waiting = false;
+				onRead();
+			});
+		}
+	} catch {}
+}
 /**
 * Wraps fetch to time each request by endpoint. Slow and failed requests are logged as they
-* happen; summary() reports counts, latency, and how much the requests overlapped.
-* Times run from sending the request to receiving the response headers.
+* happen; summary() reports counts, latency, body time, and how much the requests overlapped.
+* Latency runs from sending the request to receiving the response headers; body time runs from
+* the headers until the caller finishes reading the body.
 */
 function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 	const endpoints = new Map();
@@ -225,6 +250,8 @@ function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 				statuses: {},
 				totalMs: 0,
 				maxMs: 0,
+				bodyMs: 0,
+				bodies: 0,
 				firstStart: Number.POSITIVE_INFINITY,
 				lastEnd: 0,
 				inFlight: 0,
@@ -269,14 +296,22 @@ function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 					ms
 				});
 			}
-			return ms;
+			return endedAt;
 		};
 		try {
 			const response = await fetchImpl(input, init);
-			finish(String(response.status), !response.ok);
+			const headersAt = finish(String(response.status), !response.ok);
+			onResponseBodyRead(response, () => {
+				const readAt = logNow();
+				stats.bodies += 1;
+				stats.bodyMs += readAt - headersAt;
+				stats.lastEnd = Math.max(stats.lastEnd, readAt);
+			});
 			return response;
 		} catch (error) {
-			finish("network", true);
+			// A request the caller cancelled because it no longer needed it isn't a failure.
+			const aborted = error instanceof Error && error.name === "AbortError";
+			finish(aborted ? "aborted" : "network", !aborted);
 			throw error;
 		}
 	};
@@ -293,8 +328,9 @@ function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 					...statuses ? { statuses } : {},
 					avgMs: stats.n ? Math.round(stats.totalMs / stats.n) : 0,
 					maxMs: Math.round(stats.maxMs),
+					...stats.bodies ? { bodyMs: Math.round(stats.bodyMs / stats.bodies) } : {},
 					wallMs: Math.round(wallMs),
-					parallelism: wallMs > 0 ? Math.round(stats.totalMs / wallMs * 10) / 10 : 1,
+					parallelism: wallMs > 0 ? Math.round((stats.totalMs + stats.bodyMs) / wallMs * 10) / 10 : 1,
 					maxInFlight: stats.maxInFlight
 				};
 			}

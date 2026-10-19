@@ -209,10 +209,35 @@ function requestEndpoint(input, init) {
 	const operation = typeof init?.body === "string" ? /"operationName":"([^"]+)"/.exec(init.body)?.[1] : undefined;
 	return `${method} ${path}${operation ? ` ${operation}` : ""}`;
 }
+const RESPONSE_BODY_READERS = [
+	"arrayBuffer",
+	"blob",
+	"bytes",
+	"formData",
+	"json",
+	"text"
+];
+/** Calls `onRead` once, when the first body read (json(), text(), and so on) settles. */
+function onResponseBodyRead(response, onRead) {
+	let waiting = true;
+	const target = response;
+	try {
+		for (const method of RESPONSE_BODY_READERS) {
+			const read = target[method];
+			if (typeof read !== "function") continue;
+			target[method] = (...args) => Promise.resolve(Reflect.apply(read, response, args)).finally(() => {
+				if (!waiting) return;
+				waiting = false;
+				onRead();
+			});
+		}
+	} catch {}
+}
 /**
 * Wraps fetch to time each request by endpoint. Slow and failed requests are logged as they
-* happen; summary() reports counts, latency, and how much the requests overlapped.
-* Times run from sending the request to receiving the response headers.
+* happen; summary() reports counts, latency, body time, and how much the requests overlapped.
+* Latency runs from sending the request to receiving the response headers; body time runs from
+* the headers until the caller finishes reading the body.
 */
 function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 	const endpoints = new Map();
@@ -225,6 +250,8 @@ function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 				statuses: {},
 				totalMs: 0,
 				maxMs: 0,
+				bodyMs: 0,
+				bodies: 0,
 				firstStart: Number.POSITIVE_INFINITY,
 				lastEnd: 0,
 				inFlight: 0,
@@ -269,14 +296,22 @@ function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 					ms
 				});
 			}
-			return ms;
+			return endedAt;
 		};
 		try {
 			const response = await fetchImpl(input, init);
-			finish(String(response.status), !response.ok);
+			const headersAt = finish(String(response.status), !response.ok);
+			onResponseBodyRead(response, () => {
+				const readAt = logNow();
+				stats.bodies += 1;
+				stats.bodyMs += readAt - headersAt;
+				stats.lastEnd = Math.max(stats.lastEnd, readAt);
+			});
 			return response;
 		} catch (error) {
-			finish("network", true);
+			// A request the caller cancelled because it no longer needed it isn't a failure.
+			const aborted = error instanceof Error && error.name === "AbortError";
+			finish(aborted ? "aborted" : "network", !aborted);
 			throw error;
 		}
 	};
@@ -293,8 +328,9 @@ function createRequestMonitor(fetchImpl, logger, slowMs = SLOW_REQUEST_MS) {
 					...statuses ? { statuses } : {},
 					avgMs: stats.n ? Math.round(stats.totalMs / stats.n) : 0,
 					maxMs: Math.round(stats.maxMs),
+					...stats.bodies ? { bodyMs: Math.round(stats.bodyMs / stats.bodies) } : {},
 					wallMs: Math.round(wallMs),
-					parallelism: wallMs > 0 ? Math.round(stats.totalMs / wallMs * 10) / 10 : 1,
+					parallelism: wallMs > 0 ? Math.round((stats.totalMs + stats.bodyMs) / wallMs * 10) / 10 : 1,
 					maxInFlight: stats.maxInFlight
 				};
 			}
@@ -1054,13 +1090,21 @@ async function fetchUnfulfillableListings(options = {}) {
 }
 
 const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks";
-const FEEDBACK_PAGE_SIZE = 20;
-/** Lifetime 1–3 star entries, newest first; stores with more than this many pages are flagged. */
-const FEEDBACK_MAX_PAGES = 200;
-const FEEDBACK_PAGE_CONCURRENCY = 5;
+/** Amazon's largest page; bigger pages fail with HTTP 500. */
+const FEEDBACK_PAGE_SIZE = 50;
+/** Cursor chains loading at once, each walking its own stretch of dates. */
+const FEEDBACK_CHAINS = 12;
+/** A busy chain is split for an idle one only while about this many entries are left in it. */
+const FEEDBACK_MIN_SPLIT_ENTRIES = 100;
+/** Lifetime 1–3 star entries; stores with more than this many are flagged. */
+const FEEDBACK_MAX_ENTRIES = 2e4;
+const FEEDBACK_ATTEMPTS = 3;
+const FEEDBACK_RETRY_DELAY_MS = 400;
 const FEEDBACK_FROM_RATING = 1;
 const FEEDBACK_TO_RATING = 3;
-const FEEDBACK_INCOMPLETE_NOTE = `Only the newest ${FEEDBACK_MAX_PAGES * FEEDBACK_PAGE_SIZE} feedback entries were loaded. Seller Central has more.`;
+/** Used for the date ranges if Amazon won't say when the oldest entry was left. */
+const FEEDBACK_FALLBACK_OLDEST_MS = Date.UTC(1995, 0, 1);
+const FEEDBACK_INCOMPLETE_NOTE = `Only ${FEEDBACK_MAX_ENTRIES.toLocaleString("en-US")} feedback entries were loaded. Seller Central has more.`;
 const FEEDBACK_SHEET_HEADERS = [
 	"Date",
 	"Rating",
@@ -1186,81 +1230,284 @@ function parseFeedbacksPage(payload) {
 	const record = payload;
 	if (!Array.isArray(record.feedbacks)) throw new Error("Couldn’t load seller feedback.");
 	const feedbacks = record.feedbacks.map(asFeedback).filter((feedback) => feedback !== undefined);
-	const pageNumber = typeof record.pageNumber === "number" && Number.isFinite(record.pageNumber) ? record.pageNumber : 0;
 	return {
 		feedbacks,
+		rows: record.feedbacks.length,
 		lastPage: typeof record.lastPage === "boolean" ? record.lastPage : undefined,
-		pageNumber
+		...typeof record.lastEvaluatedKey === "string" && record.lastEvaluatedKey ? { cursor: record.lastEvaluatedKey } : {}
 	};
 }
-function feedbacksUrl(pageNumber) {
+/** A page of entries newest first (or oldest first), starting after `cursor`. */
+function feedbacksUrl(cursor = "", ascending = false) {
 	const params = new URLSearchParams({
-		pageNumber: String(pageNumber),
+		pageNumber: "0",
 		pageSize: String(FEEDBACK_PAGE_SIZE),
 		fromRating: String(FEEDBACK_FROM_RATING),
 		toRating: String(FEEDBACK_TO_RATING),
 		sortBy: "Date",
-		descendingOrder: "true",
+		descendingOrder: String(!ascending),
 		includePartiallySuppressed: "true",
 		excludeTTRFeedback: "false",
-		lastEvaluatedKey: ""
+		lastEvaluatedKey: cursor
 	});
 	return `${FEEDBACKS_URL}?${params.toString()}`;
 }
-async function getFeedbacksPage(fetchImpl, pageNumber) {
-	const response = await fetchImpl(feedbacksUrl(pageNumber), {
-		method: "GET",
-		credentials: "include",
-		headers: {
-			accept: "application/json, text/plain, */*",
-			"x-requested-with": "XMLHttpRequest"
+const feedbackSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function getFeedbacksPage(fetchImpl, cursor, ascending, sleep) {
+	let lastError = new Error("Couldn’t load seller feedback.");
+	for (let attempt = 1; attempt <= FEEDBACK_ATTEMPTS; attempt += 1) {
+		if (attempt > 1) await sleep(FEEDBACK_RETRY_DELAY_MS * (attempt - 1));
+		let response;
+		try {
+			response = await fetchImpl(feedbacksUrl(cursor, ascending), {
+				method: "GET",
+				credentials: "include",
+				headers: {
+					accept: "application/json, text/plain, */*",
+					"x-requested-with": "XMLHttpRequest"
+				}
+			});
+		} catch (error) {
+			lastError = error instanceof Error ? error : new Error(String(error));
+			continue;
 		}
-	});
-	if (!response.ok) throw new Error(`Couldn’t load seller feedback (${response.status}).`);
-	let payload;
-	try {
-		payload = await response.json();
-	} catch {
-		throw new Error("Couldn’t load seller feedback.");
+		if (!response.ok) {
+			lastError = new Error(`Couldn’t load seller feedback (${response.status}).`);
+			if (response.status === 429 || response.status >= 500) continue;
+			throw lastError;
+		}
+		let payload;
+		try {
+			payload = await response.json();
+		} catch {
+			throw new Error("Couldn’t load seller feedback.");
+		}
+		return parseFeedbacksPage(payload);
 	}
-	return parseFeedbacksPage(payload);
+	throw lastError;
+}
+/** Amazon's cursor is base64 JSON of the last entry's table key. Undefined if that ever changes. */
+function decodeFeedbackCursor(cursor) {
+	try {
+		const key = JSON.parse(atob(cursor));
+		const date = Number(key?.feedbackDateUtcEpoch?.N);
+		return Number.isFinite(date) && date > 0 && typeof key?.feedbackId?.N === "string" ? key : undefined;
+	} catch {
+		return undefined;
+	}
+}
+/** A cursor that resumes the list just below `dateMs`, so the next page holds older entries. */
+function feedbackCursorAt(template, dateMs) {
+	return btoa(JSON.stringify({
+		...template,
+		feedbackId: { N: "0" },
+		feedbackDateUtcEpoch: { N: String(Math.floor(dateMs)) }
+	}));
+}
+function feedbackDateMs(feedback) {
+	return Date.parse(feedback.feedbackDate ?? "");
 }
 function isLastFeedbackPage(page) {
-	return page.lastPage === true || page.feedbacks.length === 0 || page.lastPage !== false && page.feedbacks.length < FEEDBACK_PAGE_SIZE;
+	return page.lastPage === true || page.rows === 0 || !page.cursor;
 }
+/**
+* Loads lifetime 1–3 star feedback, newest first.
+*
+* Amazon pages this list with a cursor; asking for a page number instead re-reads every earlier
+* entry, gets slower with depth, and stops at page 100. A cursor is base64 JSON of an entry's key,
+* so a cursor built for any date starts reading there. The dates between the newest and oldest
+* entries are split among FEEDBACK_CHAINS chains that read at once, and a chain that finishes
+* early takes half of whichever chain has the most left. If the cursor format is unfamiliar or a
+* built cursor fails, one chain reads the list from start to end instead.
+*/
 async function fetchNeutralNegativeFeedbacks(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
+	const sleep = options.sleep ?? feedbackSleep;
 	const onProgress = options.onProgress;
-	const feedbacks = [];
+	const log = options.log;
+	const maxEntries = options.maxEntries ?? FEEDBACK_MAX_ENTRIES;
+	let requests = 0;
+	let kept = 0;
+	let capped = false;
+	const load = (cursor = "", ascending = false) => {
+		requests += 1;
+		return getFeedbacksPage(fetchImpl, cursor, ascending, sleep);
+	};
+	const reportKept = (count) => {
+		kept += count;
+		onProgress?.({
+			source: "feedback",
+			status: "active",
+			loaded: kept
+		});
+	};
 	onProgress?.({
 		source: "feedback",
 		status: "active",
 		loaded: 0
 	});
-	for (let start = 0; start < FEEDBACK_MAX_PAGES; start += FEEDBACK_PAGE_CONCURRENCY) {
-		const batchSize = Math.min(FEEDBACK_PAGE_CONCURRENCY, FEEDBACK_MAX_PAGES - start);
-		const results = await Promise.allSettled(Array.from({ length: batchSize }, (_, offset) => getFeedbacksPage(fetchImpl, start + offset)));
-		for (let offset = 0; offset < results.length; offset += 1) {
-			const result = results[offset];
-			if (result.status === "rejected") throw result.reason;
-			const page = result.value;
-			feedbacks.push(...page.feedbacks.filter((feedback) => isNeutralOrNegativeRating(feedback.numericRating)));
-			const lastPage = isLastFeedbackPage(page);
-			const loaded = start + offset + 1;
-			onProgress?.({
-				source: "feedback",
-				status: lastPage ? "complete" : "active",
-				loaded,
-				total: lastPage ? loaded : undefined
+	// The oldest entry bounds the date ranges, so ask for it alongside the newest page.
+	const [first, oldestPage] = await Promise.all([load(), load("", true).catch((error) => {
+		log?.warn("feedback.oldestUnavailable", { error: describeError(error) });
+		return undefined;
+	})]);
+	reportKept(first.feedbacks.length);
+	let strategy = "single";
+	let chains = [];
+	let splits = 0;
+	let rest = [];
+	/** Reads one chain at a time from `cursor` to the end of the list. */
+	const walk = async (cursor) => {
+		const entries = [];
+		for (let next = cursor; next;) {
+			if (kept >= maxEntries) {
+				capped = true;
+				break;
+			}
+			const page = await load(next);
+			entries.push(...page.feedbacks);
+			reportKept(page.feedbacks.length);
+			next = isLastFeedbackPage(page) ? undefined : page.cursor;
+		}
+		return entries;
+	};
+	if (!isLastFeedbackPage(first)) {
+		const template = decodeFeedbackCursor(first.cursor ?? "");
+		if (!template) {
+			log?.warn("feedback.cursorUnknown");
+			strategy = "sequential";
+			rest = await walk(first.cursor ?? "");
+		} else {
+			strategy = "parallel";
+			const top = Number(template.feedbackDateUtcEpoch?.N);
+			const oldestDate = oldestPage?.feedbacks[0] ? feedbackDateMs(oldestPage.feedbacks[0]) : Number.NaN;
+			const oldest = Number.isFinite(oldestDate) && oldestDate < top ? oldestDate : FEEDBACK_FALLBACK_OLDEST_MS;
+			const span = Math.max(1, top - oldest);
+			chains = Array.from({ length: FEEDBACK_CHAINS }, (_, index) => {
+				const hi = index === 0 ? top : Math.round(top - span * index / FEEDBACK_CHAINS);
+				return {
+					hi,
+					lo: index === FEEDBACK_CHAINS - 1 ? Number.NEGATIVE_INFINITY : Math.round(top - span * (index + 1) / FEEDBACK_CHAINS),
+					// The first chain continues from Amazon's own cursor, so entries sharing page one's last date aren't skipped.
+					cursor: index === 0 ? first.cursor ?? "" : feedbackCursorAt(template, hi),
+					reached: hi,
+					entries: [],
+					done: false,
+					running: false
+				};
 			});
-			if (lastPage) return feedbacks;
+			let failure;
+			const run = async (chain) => {
+				chain.running = true;
+				try {
+					while (!chain.done && failure === undefined) {
+						if (kept >= maxEntries) {
+							capped = true;
+							return;
+						}
+						const page = await load(chain.cursor);
+						let ended = isLastFeedbackPage(page);
+						const before = chain.entries.length;
+						for (const feedback of page.feedbacks) {
+							const date = feedbackDateMs(feedback);
+							if (date < chain.lo) {
+								ended = true;
+								break;
+							}
+							chain.entries.push(feedback);
+							if (Number.isFinite(date)) chain.reached = date;
+						}
+						reportKept(chain.entries.length - before);
+						if (ended) chain.done = true;
+						else chain.cursor = page.cursor ?? "";
+					}
+				} catch (error) {
+					failure ??= error;
+				} finally {
+					chain.running = false;
+				}
+			};
+			/** An idle chain, or half of the busiest one when it still has plenty left. */
+			const nextChain = () => {
+				if (failure !== undefined || capped) return undefined;
+				const idle = chains.find((chain) => !chain.done && !chain.running);
+				if (idle) return idle;
+				let busiest;
+				let busiestLeft = FEEDBACK_MIN_SPLIT_ENTRIES;
+				for (const chain of chains) {
+					if (chain.done || chain.entries.length === 0) continue;
+					const floor = Number.isFinite(chain.lo) ? chain.lo : oldest;
+					const left = chain.entries.length / Math.max(1, chain.hi - chain.reached) * (chain.reached - floor);
+					if (left > busiestLeft) {
+						busiest = chain;
+						busiestLeft = left;
+					}
+				}
+				if (!busiest) return undefined;
+				const floor = Number.isFinite(busiest.lo) ? busiest.lo : oldest - 1;
+				const middle = Math.round(floor + (busiest.reached - floor) / 2);
+				const half = {
+					hi: middle,
+					lo: busiest.lo,
+					cursor: feedbackCursorAt(template, middle),
+					reached: middle,
+					entries: [],
+					done: false,
+					running: false
+				};
+				busiest.lo = middle;
+				chains.push(half);
+				splits += 1;
+				return half;
+			};
+			await Promise.all(Array.from({ length: FEEDBACK_CHAINS }, async () => {
+				for (let chain = nextChain(); chain; chain = nextChain()) await run(chain);
+			}));
+			if (failure !== undefined) {
+				log?.warn("feedback.parallelFailed", {
+					error: describeError(failure),
+					requests
+				});
+				strategy = "sequential";
+				chains = [];
+				kept = first.feedbacks.length;
+				capped = false;
+				rest = await walk(first.cursor ?? "");
+			} else {
+				rest = [...chains].sort((a, b) => b.hi - a.hi).flatMap((chain) => chain.entries);
+			}
 		}
 	}
-	options.log?.warn("feedback.pageLimit", {
-		pages: FEEDBACK_MAX_PAGES,
+	const seen = new Set();
+	const feedbacks = [...first.feedbacks, ...rest].filter((feedback) => {
+		if (!isNeutralOrNegativeRating(feedback.numericRating)) return false;
+		const id = feedback.feedbackId;
+		if (!id) return true;
+		if (seen.has(id)) return false;
+		seen.add(id);
+		return true;
+	});
+	log?.info("feedback.load", {
+		strategy,
+		requests,
+		entries: feedbacks.length,
+		...chains.length ? {
+			chains: chains.length,
+			splits
+		} : {}
+	});
+	onProgress?.({
+		source: "feedback",
+		status: "complete",
+		loaded: feedbacks.length,
+		total: feedbacks.length
+	});
+	if (!capped) return feedbacks;
+	log?.warn("feedback.entryLimit", {
+		limit: maxEntries,
 		entries: feedbacks.length
 	});
-	return feedbacks.map((feedback) => ({
+	return feedbacks.slice(0, maxEntries).map((feedback) => ({
 		...feedback,
 		feedbackIncomplete: true
 	}));
@@ -2560,10 +2807,23 @@ async function fetchSuppressedListings(options = {}) {
 
 const SHIPPING_QUEUE_URL = "https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments";
 const SHIPPING_QUEUE_REFERRER = "https://sellercentral.amazon.com/manage/shipments?ref=sc_shipments";
+/** Amazon's largest page; bigger pages fail with HTTP 400. */
 const SHIPPING_QUEUE_DEFAULT_PAGE_SIZE = 250;
-const SHIPPING_QUEUE_MAX_PAGES = 40;
 const SHIPPING_QUEUE_ORDER_BY = "SHIPMENT_UPDATE_DATE";
+/** The list is read in slices of Amazon's update-date index this many days long. */
+const SHIPPING_QUEUE_SLICE_DAYS = 30;
+/** How far before the cutoff the slices reach; one last slice holds everything older. */
+const SHIPPING_QUEUE_SLICE_YEARS = 4;
+const SHIPPING_QUEUE_SLICE_CONCURRENCY = 10;
+/** Slices widen past SHIPPING_QUEUE_SLICE_DAYS when needed to stay within this many. */
+const SHIPPING_QUEUE_MAX_SLICES = 80;
+/** Reading stops once this many shipments in a row, in Amazon's order, fall before the cutoff. */
+const SHIPPING_QUEUE_TRAILING_ROWS = 250;
+const SHIPPING_QUEUE_MAX_REQUESTS = 200;
 const SHIPMENT_ELIGIBILITY_URL = "https://sellercentral.amazon.com/fba/wmsr/eligibilities";
+const SHIPMENT_DISCREPANCIES_URL = "https://sellercentral.amazon.com/fba/wmsr/discrepancies";
+/** Amazon's largest page of SKU lines; the eligibility response carries only the first 50. */
+const SHIPMENT_DISCREPANCY_PAGE_SIZE = 100;
 const SHIPMENT_DOCUMENTS_URL = "https://sellercentral.amazon.com/fba/wmsr/document-requirements";
 const SHIPMENT_CLAIM_PAGE_URL = "https://sellercentral.amazon.com/fba/wmsr";
 const SHIPPING_STATUS_OUTSIDE_WINDOW = "Shipment ID - Outside Reconciliation Window";
@@ -2577,7 +2837,7 @@ const SHIPPING_STATUS_REVIEW = "Review Needed";
 const SHIPPING_STATUS_UNAVAILABLE = "N/A";
 const REQUIRED_DOCUMENT_INVOICE = "Proof of Inventory Ownership";
 const REQUIRED_DOCUMENT_DELIVERY = "Delivery";
-const SHIPMENT_DETAILS_CONCURRENCY = 40;
+const SHIPMENT_DETAILS_CONCURRENCY = 60;
 const SHIPMENT_DETAILS_MAX_ATTEMPTS = 3;
 const SHIPMENT_DETAILS_RETRY_DELAY_MS = 500;
 const SHIPMENT_DETAILS_SESSION_WAIT_MS = 6e4;
@@ -2586,7 +2846,7 @@ const SHIPPING_QUEUE_DETAILS_LOADED = "Loaded";
 const SHIPPING_QUEUE_DETAILS_UNAVAILABLE = "Couldn’t load shipment details";
 const SHIPPING_QUEUE_LIST_INCOMPLETE_NOTE = "Some shipments could not be loaded. This sheet includes only the shipments that were obtainable.";
 const SHIPPING_QUEUE_DETAILS_INCOMPLETE_NOTE = "Shipment details could not be loaded for some shipments. Those rows are marked “Couldn’t load shipment details”.";
-const SHIPPING_QUEUE_ITEMS_INCOMPLETE_NOTE = "Some shipments have more SKU lines than Amazon returned in one response. Those shipments list only the SKU lines that were obtainable.";
+const SHIPPING_QUEUE_ITEMS_INCOMPLETE_NOTE = "Some shipments’ SKU lines couldn’t all be loaded. Those shipments list only the SKU lines that were obtainable.";
 const SHIPPING_QUEUE_SHIPMENT_HEADERS = [
 	"Shipment Name",
 	"Shipment ID",
@@ -3082,12 +3342,16 @@ function shippingQueueCursor(shipment) {
 		lastUpdatedDate: String(shipment.lastUpdatedDate)
 	};
 }
-function shippingQueueUrl(pageSize = SHIPPING_QUEUE_DEFAULT_PAGE_SIZE, cursor) {
+function shippingQueueUrl(pageSize = SHIPPING_QUEUE_DEFAULT_PAGE_SIZE, cursor, slice, ascending = false) {
 	const params = new URLSearchParams({
 		pageSize: String(pageSize),
 		orderBy: SHIPPING_QUEUE_ORDER_BY,
-		isOrderAscending: "false"
+		isOrderAscending: String(ascending)
 	});
+	if (slice) {
+		params.set("startTime", String(slice.startTime));
+		params.set("endTime", String(slice.endTime));
+	}
 	if (cursor) {
 		params.set("lastShipmentId", cursor.lastShipmentId);
 		params.set("createdDate", cursor.createdDate);
@@ -3096,8 +3360,36 @@ function shippingQueueUrl(pageSize = SHIPPING_QUEUE_DEFAULT_PAGE_SIZE, cursor) {
 	params.set("t2pLaunched", "true");
 	return `${SHIPPING_QUEUE_URL}?${params.toString()}`;
 }
+/**
+* Slices of Amazon's update-date index, newest first: SHIPPING_QUEUE_SLICE_DAYS at a time from now
+* back to the cutoff, then on back SHIPPING_QUEUE_SLICE_YEARS, then one slice for everything older.
+* Each slice ends a millisecond into the next, so a shipment on a boundary is never skipped, and
+* the newest reaches a day past now in case this computer's clock runs behind Amazon's.
+*/
+function shippingQueueSlices(cutoffMs, nowMs) {
+	const oldest = Math.max(0, cutoffMs - SHIPPING_QUEUE_SLICE_YEARS * 365 * DAY_MS);
+	const step = Math.max(SHIPPING_QUEUE_SLICE_DAYS * DAY_MS, Math.ceil((nowMs - oldest) / SHIPPING_QUEUE_MAX_SLICES));
+	const bounds = [];
+	for (let time = nowMs; time > cutoffMs; time -= step) bounds.push(time);
+	for (let time = cutoffMs; time > oldest; time -= step) bounds.push(time);
+	if (bounds.length === 0) bounds.push(nowMs);
+	return bounds.map((end, index) => ({
+		startTime: bounds[index + 1] ?? 0,
+		endTime: index === 0 ? end + DAY_MS : end + 1
+	}));
+}
 function shipmentDetailsUrl(shipmentId) {
 	return `${SHIPMENT_ELIGIBILITY_URL}/${encodeURIComponent(shipmentId)}?withInquiry=true&withDiscrepancies=true`;
+}
+function shipmentDiscrepanciesUrl(shipmentId, index) {
+	const params = new URLSearchParams({
+		filter: "NONE",
+		index: String(index),
+		pageSize: String(SHIPMENT_DISCREPANCY_PAGE_SIZE),
+		isOrderAscending: "true",
+		orderBy: "MSKU"
+	});
+	return `${SHIPMENT_DISCREPANCIES_URL}/${encodeURIComponent(shipmentId)}?${params.toString()}`;
 }
 function shipmentDocumentsUrl(shipmentId) {
 	return `${SHIPMENT_DOCUMENTS_URL}/${encodeURIComponent(shipmentId)}?evaluateOption=DOCUMENT`;
@@ -3140,6 +3432,7 @@ function requiredDocumentLabel(documentTypes, status) {
 	if (documentTypes?.includes("POD")) documents.push(REQUIRED_DOCUMENT_DELIVERY);
 	return documents.length > 0 ? documents.join(" AND ") : SHIPPING_STATUS_UNAVAILABLE;
 }
+const DAY_MS = 864e5;
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 class SessionInterrupted extends Error {
 	constructor() {
@@ -3152,12 +3445,13 @@ function isSessionResponse(response) {
 	const type = response.headers?.get("content-type") ?? "";
 	return /text\/html/i.test(type);
 }
-async function fetchShippingQueuePage(fetchImpl, url) {
+async function fetchShippingQueuePage(fetchImpl, url, signal) {
 	const response = await fetchImpl(url, {
 		method: "GET",
 		mode: "cors",
 		credentials: "include",
 		referrer: SHIPPING_QUEUE_REFERRER,
+		signal,
 		headers: {
 			accept: "*/*",
 			"accept-language": "en-US,en;q=0.9"
@@ -3211,6 +3505,66 @@ async function fetchShipmentDetails(fetchImpl, shipmentId, sleep, onSession) {
 	}
 	throw lastError;
 }
+async function fetchDiscrepancyItems(fetchImpl, shipmentId, index, sleep) {
+	let lastError = new Error("Couldn’t load SKU lines.");
+	for (let attempt = 1; attempt <= SHIPMENT_DETAILS_MAX_ATTEMPTS; attempt += 1) {
+		if (attempt > 1) await sleep(SHIPMENT_DETAILS_RETRY_DELAY_MS * (attempt - 1));
+		let response;
+		try {
+			response = await fetchImpl(shipmentDiscrepanciesUrl(shipmentId, index), {
+				method: "GET",
+				mode: "cors",
+				credentials: "include",
+				referrer: buildShipmentClaimUrl(shipmentId),
+				headers: {
+					accept: "*/*",
+					"accept-language": "en-US,en;q=0.9"
+				}
+			});
+		} catch (error) {
+			lastError = error instanceof Error ? error : new Error(String(error));
+			continue;
+		}
+		if (!response.ok || isSessionResponse(response)) {
+			lastError = new Error(`Couldn’t load SKU lines (${response.status}).`);
+			if (response.status === 429 || response.status >= 500) continue;
+			throw lastError;
+		}
+		const payload = await response.json();
+		if (!Array.isArray(payload?.items)) throw new Error("Couldn’t load SKU lines.");
+		return payload.items.map(asShipmentDiscrepancyItem).filter((item) => item !== undefined);
+	}
+	throw lastError;
+}
+/**
+* The eligibility response carries a shipment's first 50 SKU lines. The rest come from the
+* discrepancies endpoint, SHIPMENT_DISCREPANCY_PAGE_SIZE at a time and all at once, in the same
+* MSKU order. Lines stay in order: a page that fails drops it and every page after it.
+*/
+async function withAllDiscrepancyItems(fetchImpl, shipmentId, details, sleep) {
+	const total = details.discrepancyTotalRecords;
+	if (typeof total !== "number" || total <= details.items.length || details.items.length === 0) {
+		return {
+			details,
+			requests: 0
+		};
+	}
+	const starts = [];
+	for (let index = details.items.length; index < total; index += SHIPMENT_DISCREPANCY_PAGE_SIZE) starts.push(index);
+	const pages = await Promise.all(starts.map((index) => fetchDiscrepancyItems(fetchImpl, shipmentId, index, sleep).catch(() => undefined)));
+	const items = [...details.items];
+	for (const page of pages) {
+		if (!page) break;
+		items.push(...page);
+	}
+	return {
+		details: {
+			...details,
+			items
+		},
+		requests: starts.length
+	};
+}
 /**
 * Required documents only matter for lines that can be "Shipment ID - New (Send List)": an
 * eligible shipment with a negative discrepancy. Other shipments skip that request.
@@ -3244,8 +3598,8 @@ async function fetchShipmentDocumentTypes(fetchImpl, shipmentId) {
 	}
 }
 /**
-* Loads eligibility details SHIPMENT_DETAILS_CONCURRENCY at a time while list pages are still
-* arriving. A session response stops new requests, waits, checks that the list still loads, and
+* Loads eligibility details SHIPMENT_DETAILS_CONCURRENCY at a time while the list is still being
+* read. A session response stops new requests, waits, checks that the list still loads, and
 * resumes; after SHIPMENT_DETAILS_SESSION_PAUSES pauses the remaining shipments are marked failed.
 */
 function createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log) {
@@ -3260,6 +3614,7 @@ function createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log) {
 	let holdLaunch = false;
 	let halt = false;
 	let documentsSkipped = 0;
+	let lineRequests = 0;
 	const failedSample = [];
 	let settle = () => undefined;
 	const settled = new Promise((resolve) => {
@@ -3310,7 +3665,7 @@ function createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log) {
 			});
 			try {
 				await sleep(SHIPMENT_DETAILS_SESSION_WAIT_MS);
-				await fetchShippingQueuePage(fetchImpl, shippingQueueUrl());
+				await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(1));
 				return true;
 			} catch (error) {
 				log?.error("shippingQueue.sessionCheckFailed", { error: describeError(error) });
@@ -3338,7 +3693,9 @@ function createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log) {
 		};
 	}
 	async function loadDetails(shipment, id, onSession) {
-		const details = await fetchShipmentDetails(fetchImpl, id, sleep, onSession);
+		const first = await fetchShipmentDetails(fetchImpl, id, sleep, onSession);
+		const { details, requests } = await withAllDiscrepancyItems(fetchImpl, id, first, sleep);
+		lineRequests += requests;
 		if (!shipmentNeedsDocumentTypes(details)) {
 			documentsSkipped += 1;
 			return {
@@ -3408,16 +3765,186 @@ function createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log) {
 			reportProgress();
 			pump();
 			await settled;
+			// Shipments whose SKU lines are still short after the extra pages.
+			let linesCut = 0;
+			let linesMax = 0;
+			for (const { details } of results) {
+				linesMax = Math.max(linesMax, details?.discrepancyTotalRecords ?? 0);
+				if (shipmentDetailsIncomplete(details)) linesCut += 1;
+			}
 			log?.info("shippingQueue.details", {
 				shipments: shipments.length,
 				failed: results.filter((shipment) => shipment.detailsFetchFailed).length,
 				documentsSkipped,
 				pauses: pauseCount,
+				...lineRequests ? {
+					lineRequests,
+					linesMax
+				} : {},
+				...linesCut ? { linesCut } : {},
 				...failedSample.length ? { failedSample } : {}
 			});
 			return results;
 		}
 	};
+}
+/**
+* Lists every shipment updated since the cutoff and hands in-window ones to `onShipments` in list
+* order. Amazon sorts and filters by an update-date index that can lag a shipment's own
+* lastUpdatedDate, so in-window shipments turn up well below the cutoff. Slices of that index
+* load SHIPPING_QUEUE_SLICE_CONCURRENCY at a time and are read in order, and reading stops once
+* SHIPPING_QUEUE_TRAILING_ROWS shipments in a row fall before the cutoff.
+*/
+async function listShippingQueue(fetchImpl, cutoffMs, nowMs, pageSize, onShipments, log) {
+	const done = log?.time("shippingQueue.list");
+	const controller = new AbortController();
+	const slices = shippingQueueSlices(cutoffMs, nowMs).map((slice) => ({
+		slice,
+		rows: [],
+		requests: 0,
+		loading: false,
+		complete: false
+	}));
+	/** Slices ending before the oldest shipment was created are empty and skipped. */
+	let floor = Number.NEGATIVE_INFINITY;
+	const seen = new Set();
+	let current = 0;
+	let currentRow = 0;
+	let position = 0;
+	let outRun = 0;
+	let maxGap = 0;
+	let lastInWindowAt = -1;
+	let inWindow = 0;
+	let requests = 0;
+	let stopped = false;
+	let listingsIncomplete = false;
+	let failure;
+	const stop = (incomplete, event, data) => {
+		stopped = true;
+		listingsIncomplete ||= incomplete;
+		if (event) log?.warn(event, {
+			slice: current,
+			loaded: inWindow,
+			...data
+		});
+	};
+	/** Reads loaded slices in order, as far as they go. */
+	const read = () => {
+		while (!stopped && current < slices.length) {
+			const state = slices[current];
+			const added = [];
+			let repeated = currentRow === 0 && state.rows.length > 1;
+			for (; currentRow < state.rows.length && !stopped; currentRow += 1) {
+				const shipment = state.rows[currentRow];
+				const id = shipment.shipmentId?.trim();
+				if (id && seen.has(id)) continue;
+				repeated = false;
+				if (id) seen.add(id);
+				const updatedMs = getShipmentLastUpdatedMs(shipment);
+				if (updatedMs != null && updatedMs < cutoffMs) {
+					outRun += 1;
+					if (outRun >= SHIPPING_QUEUE_TRAILING_ROWS) stopped = true;
+				} else {
+					maxGap = Math.max(maxGap, outRun);
+					outRun = 0;
+					lastInWindowAt = position;
+					inWindow += 1;
+					added.push(shipment);
+				}
+				position += 1;
+			}
+			if (added.length) onShipments(added);
+			if (stopped) return;
+			// A slice that only repeats shipments already read means Amazon ignored the date filter.
+			if (repeated && state.complete) stop(true, "shippingQueue.sliceRepeated");
+			else if (state.failure !== undefined) {
+				if (position === 0 && inWindow === 0) failure = state.failure;
+				else stop(true, "shippingQueue.listStopped", { error: describeError(state.failure) });
+			} else if (!state.complete) return;
+			if (stopped || failure !== undefined) return;
+			current += 1;
+			currentRow = 0;
+		}
+	};
+	const load = async (state) => {
+		state.loading = true;
+		state.requests += 1;
+		requests += 1;
+		try {
+			const cursor = shippingQueueCursor(state.rows[state.rows.length - 1]);
+			const page = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor, state.slice), controller.signal);
+			const before = state.rows.length;
+			state.rows.push(...page);
+			const fresh = page.some((shipment) => !state.rows.slice(0, before).some((row) => row.shipmentId === shipment.shipmentId));
+			if (page.length < pageSize || !shippingQueueCursor(page[page.length - 1]) || before > 0 && !fresh) state.complete = true;
+		} catch (error) {
+			if (!stopped) state.failure = error;
+		} finally {
+			state.loading = false;
+		}
+	};
+	let resolveList = () => undefined;
+	const listed = new Promise((resolve) => {
+		resolveList = resolve;
+	});
+	let next = 0;
+	let inFlight = 0;
+	const pump = () => {
+		read();
+		if (failure === undefined && !stopped && requests >= SHIPPING_QUEUE_MAX_REQUESTS) stop(true, "shippingQueue.listLimit");
+		if (stopped || failure !== undefined || current >= slices.length) {
+			controller.abort();
+			resolveList();
+			return;
+		}
+		const queue = [];
+		const reading = slices[current];
+		// The slice being read loads its next page ahead of new slices.
+		if (reading.requests > 0 && !reading.complete && !reading.loading && reading.failure === undefined) queue.push(reading);
+		while (inFlight + queue.length < SHIPPING_QUEUE_SLICE_CONCURRENCY && next < slices.length) {
+			const state = slices[next];
+			next += 1;
+			if (state.slice.endTime < floor) state.complete = true;
+			else if (state.requests === 0) queue.push(state);
+		}
+		for (const state of queue) {
+			inFlight += 1;
+			void load(state).finally(() => {
+				inFlight -= 1;
+				pump();
+			});
+		}
+		// Trimmed slices can finish the list with nothing left in flight.
+		if (queue.length === 0 && inFlight === 0) pump();
+	};
+	// The shipment with the oldest index bounds how far back slices are worth reading. A shipment
+	// isn't indexed before it was created; a slice's width of margin covers any exception.
+	requests += 1;
+	void fetchShippingQueuePage(fetchImpl, shippingQueueUrl(1, undefined, undefined, true), controller.signal).then((rows) => {
+		const created = Number(rows[0]?.createdDate);
+		if (!rows.length) floor = Number.POSITIVE_INFINITY;
+		else if (Number.isFinite(created)) floor = created - SHIPPING_QUEUE_SLICE_DAYS * DAY_MS;
+		pump();
+	}, () => undefined);
+	pump();
+	await listed;
+	if (failure !== undefined) {
+		done?.({
+			requests,
+			error: describeError(failure)
+		}, "error");
+		throw failure;
+	}
+	done?.({
+		slices: slices.filter((state) => state.requests > 0).length,
+		requests,
+		rows: position,
+		inWindow,
+		...inWindow ? { lastInWindowAt } : {},
+		...maxGap ? { maxGap } : {},
+		...listingsIncomplete ? { incomplete: true } : {}
+	});
+	return { listingsIncomplete };
 }
 async function fetchShippingQueueShipments(options = {}) {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
@@ -3433,57 +3960,18 @@ async function fetchShippingQueueShipments(options = {}) {
 		phase: "listings"
 	});
 	const details = createShipmentDetailsLoader(fetchImpl, sleep, onProgress, log);
-	const seenIds = new Set();
 	let listed = 0;
-	let cursor;
-	let listingsIncomplete = false;
-	for (let page = 1; page <= SHIPPING_QUEUE_MAX_PAGES; page += 1) {
-		const pageDone = log?.time("shippingQueue.listPage", { page });
-		let pageShipments;
-		try {
-			pageShipments = await fetchShippingQueuePage(fetchImpl, shippingQueueUrl(pageSize, cursor));
-		} catch (error) {
-			if (page > 1) {
-				log?.warn("shippingQueue.listStopped", {
-					page,
-					loaded: listed,
-					error: describeError(error)
-				});
-				listingsIncomplete = true;
-				break;
-			}
-			throw error;
-		}
-		// Amazon orders by an index that can lag the real update time, so an older-looking
-		// row may still be recent. Only stop once a whole page falls before the cutoff.
-		let inWindow = 0;
-		const added = [];
-		for (const shipment of pageShipments) {
-			const updatedMs = getShipmentLastUpdatedMs(shipment);
-			if (updatedMs != null && updatedMs < cutoffTimestamp) continue;
-			inWindow += 1;
-			const id = shipment.shipmentId?.trim();
-			if (id && seenIds.has(id)) continue;
-			if (id) seenIds.add(id);
-			added.push(shipment);
-		}
-		pageDone?.({
-			rows: pageShipments.length,
-			inWindow,
-			added: added.length
-		});
-		if (pageShipments.length === 0) break;
-		details.add(added);
-		listed += added.length;
+	const nowMs = options.referenceDate?.getTime() ?? Date.now();
+	const { listingsIncomplete } = await listShippingQueue(fetchImpl, cutoffTimestamp, nowMs, pageSize, (shipments) => {
+		details.add(shipments);
+		listed += shipments.length;
 		onProgress?.({
 			source: "shippingQueue",
 			status: "active",
 			loaded: listed,
 			phase: "listings"
 		});
-		cursor = shippingQueueCursor(pageShipments[pageShipments.length - 1]);
-		if (inWindow === 0 || added.length === 0 || pageShipments.length < pageSize || !cursor) break;
-	}
+	}, log);
 	const loaded = await details.finish();
 	const withDetails = listingsIncomplete ? loaded.map((shipment) => ({
 		...shipment,
@@ -3501,12 +3989,21 @@ async function fetchShippingQueueShipments(options = {}) {
 
 const PALETTE_APP_FILE = "palette-app.js";
 const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated.";
+const PALETTE_UNSUPPORTED_PAGE = "The command palette can’t open on this page.";
 const contentLog = createLogger("content");
 let mounted = null;
 let pending = null;
-async function loadPalette() {
+/**
+* React DOM reads document.createElement("div").style as it loads. XML documents such as feeds,
+* sitemaps, and SVG files create elements without one, so the palette runs only on HTML pages.
+*/
+function canHostPalette(doc = document) {
+	return doc.createElement("div").style !== undefined;
+}
+async function loadPalette(doc = document) {
 	if (mounted) return mounted;
 	if (!pending) {
+		if (!canHostPalette(doc)) throw new Error(PALETTE_UNSUPPORTED_PAGE);
 		if (typeof chrome === "undefined" || !chrome.runtime?.id) {
 			throw new Error(EXTENSION_CONTEXT_INVALIDATED);
 		}
@@ -3516,7 +4013,10 @@ async function loadPalette() {
 			return mounted;
 		}).catch((error) => {
 			pending = null;
-			contentLog.error("palette.loadFailed", { error: describeError(error) });
+			contentLog.error("palette.loadFailed", {
+				contentType: doc.contentType,
+				error: describeError(error)
+			});
 			throw error;
 		});
 	}
@@ -3663,7 +4163,7 @@ function handleContentMessage(message, _sender, sendResponse, load = loadPalette
 	return true;
 }
 if (typeof window !== "undefined" && window.top === window) {
-	window.addEventListener("keydown", onKeyDown, true);
+	if (canHostPalette()) window.addEventListener("keydown", onKeyDown, true);
 	if (typeof chrome !== "undefined") {
 		if (chrome.runtime?.id) setLogSink(forwardLogsToBackground());
 		chrome.runtime?.onMessage?.addListener(handleContentMessage);

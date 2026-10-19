@@ -1,17 +1,18 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { dailyTasksSheetRows } from "../src/lib/dailyTasks"
 import { createLogger, setLogSink, type LogEntry } from "../src/lib/log"
 import {
   FEEDBACKS_URL,
+  FEEDBACK_CHAINS,
   FEEDBACK_FROM_RATING,
   FEEDBACK_INCOMPLETE_NOTE,
-  FEEDBACK_MAX_PAGES,
-  FEEDBACK_PAGE_CONCURRENCY,
   FEEDBACK_PAGE_SIZE,
   FEEDBACK_SHEET_HEADERS,
   FEEDBACK_TO_RATING,
+  decodeFeedbackCursor,
   decodeHtmlEntities,
+  feedbackCursorAt,
   feedbackSentiment,
   feedbackSheetRows,
   feedbacksUrl,
@@ -70,50 +71,82 @@ function jsonResponse(payload: unknown, status = 200) {
   }
 }
 
-function feedbacksPayload(feedbacks: SellerFeedback[], extras: { lastPage?: boolean; pageNumber?: number } = {}) {
+function feedbacksPayload(feedbacks: SellerFeedback[], extras: { lastPage?: boolean; lastEvaluatedKey?: string | null } = {}) {
   return {
     feedbacks,
     pageSize: FEEDBACK_PAGE_SIZE,
-    pageNumber: extras.pageNumber ?? 0,
+    pageNumber: 0,
     fromRating: FEEDBACK_FROM_RATING,
     toRating: FEEDBACK_TO_RATING,
+    lastEvaluatedKey: extras.lastEvaluatedKey ?? null,
     lastPage: extras.lastPage ?? true,
   }
 }
 
-function pageNumberFromUrl(input: unknown): number {
-  return Number(new URL(String(input)).searchParams.get("pageNumber"))
-}
+const DAY = 86_400_000
 
-function requestedPageNumbers(fetchImpl: ReturnType<typeof vi.fn>): number[] {
-  return fetchImpl.mock.calls.map(([url]) => pageNumberFromUrl(url)).sort((a, b) => a - b)
-}
-
-function fetchByPage(
-  pages: Record<number, { payload: unknown; status?: number }>,
-  fallback?: { payload: unknown; status?: number },
-) {
-  return vi.fn(async (input: unknown) => {
-    const pageNumber = pageNumberFromUrl(input)
-    const handler = pages[pageNumber] ?? fallback
-    if (!handler) throw new Error(`Unexpected feedback page ${pageNumber}`)
-    return jsonResponse(handler.payload, handler.status ?? 200)
+/**
+ * `count` 1–3 star entries spread unevenly from `newest` back over about `years` years, most of
+ * them recent, like a store whose sales grew.
+ */
+function feedbackHistory(count: number, newest = Date.UTC(2026, 9, 18), years = 15): SellerFeedback[] {
+  return Array.from({ length: count }, (_, index) => {
+    const age = Math.round(((index / count) ** 2) * years * 365 * DAY)
+    return {
+      ...negativeFeedback,
+      feedbackId: `F${String(index).padStart(5, "0")}`,
+      numericRating: 1 + (index % 3),
+      feedbackDate: new Date(newest - age - (index % 7) * 1000).toISOString(),
+    }
   })
 }
 
-function continuingPage(feedback: SellerFeedback, pageNumber: number) {
-  return {
-    payload: feedbacksPayload([feedback], { lastPage: false, pageNumber }),
-  }
+interface ServerOptions {
+  /** Status to answer instead of a page, given the request's cursor key (undefined for page one). */
+  fail?: (key: { date: number; id: number } | undefined, ascending: boolean) => number | undefined
 }
 
-function lastPage(feedback: SellerFeedback, pageNumber: number) {
-  return {
-    payload: feedbacksPayload([feedback], { lastPage: true, pageNumber }),
-  }
+/**
+ * Amazon's feedback list: newest first (or oldest first), 50 entries a page, paged by a base64
+ * JSON cursor of the last entry's key. Any key works as a cursor, as on the real endpoint.
+ */
+function feedbackServer(entries: SellerFeedback[], options: ServerOptions = {}) {
+  const rows = entries
+    .map((feedback, index) => ({ feedback, id: 2_000_000_000 + index, date: Date.parse(feedback.feedbackDate ?? "") }))
+    .sort((a, b) => b.date - a.date || b.id - a.id)
+  const keyOf = (row: (typeof rows)[number]) => btoa(JSON.stringify({
+    encryptedRateeId: { S: "A1B2C3D4E5F6G" },
+    feedbackId: { N: String(row.id) },
+    feedbackDateUtcEpoch: { N: String(row.date) },
+  }))
+  return vi.fn(async (input: unknown, _init?: unknown) => {
+    const params = new URL(String(input)).searchParams
+    const ascending = params.get("descendingOrder") === "false"
+    const cursor = params.get("lastEvaluatedKey") ?? ""
+    const parsed = cursor ? JSON.parse(atob(cursor)) as Record<string, { N: string }> : undefined
+    const key = parsed ? { date: Number(parsed.feedbackDateUtcEpoch.N), id: Number(parsed.feedbackId.N) } : undefined
+    const status = options.fail?.(key, ascending)
+    if (status) return jsonResponse({}, status)
+    const ordered = ascending ? [...rows].reverse() : rows
+    let start = 0
+    if (key) {
+      start = ordered.findIndex((row) => ascending
+        ? row.date > key.date || (row.date === key.date && row.id > key.id)
+        : row.date < key.date || (row.date === key.date && row.id < key.id))
+      if (start === -1) start = ordered.length
+    }
+    const page = ordered.slice(start, start + FEEDBACK_PAGE_SIZE)
+    const last = start + page.length >= ordered.length
+    return jsonResponse(feedbacksPayload(page.map((row) => row.feedback), {
+      lastPage: last,
+      lastEvaluatedKey: last || page.length === 0 ? null : keyOf(page[page.length - 1]),
+    }))
+  })
 }
 
-const emptyLastPage = { payload: feedbacksPayload([], { lastPage: true }) }
+const newestFirst = (entries: SellerFeedback[]) =>
+  [...entries].sort((a, b) => Date.parse(b.feedbackDate ?? "") - Date.parse(a.feedbackDate ?? "") || (b.feedbackId ?? "").localeCompare(a.feedbackId ?? ""))
+const idsOf = (entries: SellerFeedback[]) => entries.map((entry) => entry.feedbackId)
 
 describe("feedback sentiment", () => {
   it("maps 1-2 to Negative and 3 to Neutral", () => {
@@ -184,11 +217,20 @@ describe("feedback sheet rows", () => {
 })
 
 describe("parseFeedbacksPage", () => {
-  it("reads HAR-shaped payloads and keeps lastPage", () => {
-    expect(parseFeedbacksPage(feedbacksPayload([negativeFeedback, positiveFeedback], { lastPage: false, pageNumber: 0 }))).toEqual({
+  it("reads HAR-shaped payloads and keeps lastPage and the cursor", () => {
+    expect(parseFeedbacksPage(feedbacksPayload([negativeFeedback, positiveFeedback], { lastPage: false, lastEvaluatedKey: "abc=" }))).toEqual({
       feedbacks: [negativeFeedback, positiveFeedback],
+      rows: 2,
       lastPage: false,
-      pageNumber: 0,
+      cursor: "abc=",
+    })
+    expect(parseFeedbacksPage(feedbacksPayload([negativeFeedback]))).toEqual({ feedbacks: [negativeFeedback], rows: 1, lastPage: true })
+  })
+
+  it("counts malformed entries as rows", () => {
+    expect(parseFeedbacksPage({ feedbacks: [negativeFeedback, null, "x"] })).toMatchObject({
+      feedbacks: [negativeFeedback],
+      rows: 3,
     })
   })
 
@@ -198,20 +240,79 @@ describe("parseFeedbacksPage", () => {
   })
 })
 
-describe("fetchNeutralNegativeFeedbacks", () => {
-  it("requests ratings 1-3 and paginates until lastPage", async () => {
-    const fetchImpl = fetchByPage({
-      0: continuingPage(negativeFeedback, 0),
-      1: lastPage(suppressedNeutral, 1),
-    }, emptyLastPage)
+describe("feedback cursors", () => {
+  const key = { encryptedRateeId: { S: "A1B2C3D4E5F6G" }, feedbackId: { N: "2000000123" }, feedbackDateUtcEpoch: { N: "1786000000000" } }
 
-    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
-      negativeFeedback,
-      suppressedNeutral,
-    ])
-    expect(requestedPageNumbers(fetchImpl)).toEqual([0, 1, 2, 3, 4])
-    expect(FEEDBACK_PAGE_CONCURRENCY).toBe(5)
-    expect(fetchImpl).toHaveBeenNthCalledWith(1, feedbacksUrl(0), expect.objectContaining({
+  it("reads Amazon's cursor and builds one for any date", () => {
+    const template = decodeFeedbackCursor(btoa(JSON.stringify(key)))
+    expect(template).toEqual(key)
+    expect(JSON.parse(atob(feedbackCursorAt(template!, Date.UTC(2015, 0, 1))))).toEqual({
+      encryptedRateeId: { S: "A1B2C3D4E5F6G" },
+      feedbackId: { N: "0" },
+      feedbackDateUtcEpoch: { N: String(Date.UTC(2015, 0, 1)) },
+    })
+  })
+
+  it("rejects cursors in any other format", () => {
+    expect(decodeFeedbackCursor("not base64!")).toBeUndefined()
+    expect(decodeFeedbackCursor(btoa("{}"))).toBeUndefined()
+    expect(decodeFeedbackCursor(btoa(JSON.stringify({ ...key, feedbackDateUtcEpoch: { N: "soon" } })))).toBeUndefined()
+  })
+
+  it("asks for 50 entries newest or oldest first after a cursor", () => {
+    const url = new URL(feedbacksUrl("abc=", true))
+    expect(url.href.startsWith(`${FEEDBACKS_URL}?`)).toBe(true)
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      pageNumber: "0",
+      pageSize: "50",
+      fromRating: "1",
+      toRating: "3",
+      sortBy: "Date",
+      descendingOrder: "false",
+      includePartiallySuppressed: "true",
+      excludeTTRFeedback: "false",
+      lastEvaluatedKey: "abc=",
+    })
+    expect(new URL(feedbacksUrl()).searchParams.get("descendingOrder")).toBe("true")
+  })
+})
+
+describe("fetchNeutralNegativeFeedbacks", () => {
+  afterEach(() => setLogSink(null))
+
+  function captureLogs(): LogEntry[] {
+    const logged: LogEntry[] = []
+    setLogSink((entry) => logged.push(entry))
+    return logged
+  }
+
+  it("reads every entry, newest first, with cursor chains working in parallel", async () => {
+    const history = feedbackHistory(1234)
+    const fetchImpl = feedbackServer(history)
+    const logged = captureLogs()
+    let inFlight = 0
+    let peak = 0
+    const counted = vi.fn(async (input: unknown, init?: unknown) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 1))
+      try {
+        return await fetchImpl(input, init)
+      } finally {
+        inFlight -= 1
+      }
+    })
+
+    const feedbacks = await fetchNeutralNegativeFeedbacks({ fetch: counted as unknown as typeof fetch, log: createLogger("content") })
+
+    expect(idsOf(feedbacks)).toEqual(idsOf(newestFirst(history)))
+    expect(peak).toBe(FEEDBACK_CHAINS)
+    expect(counted.mock.calls.every(([url]) => new URL(String(url)).searchParams.get("pageSize") === "50")).toBe(true)
+    expect(logged.find((entry) => entry.event === "feedback.load")).toMatchObject({
+      level: "info",
+      data: { strategy: "parallel", entries: 1234 },
+    })
+    expect(fetchImpl).toHaveBeenNthCalledWith(1, feedbacksUrl(), expect.objectContaining({
       method: "GET",
       credentials: "include",
       headers: expect.objectContaining({
@@ -219,32 +320,91 @@ describe("fetchNeutralNegativeFeedbacks", () => {
         "x-requested-with": "XMLHttpRequest",
       }),
     }))
-    expect(fetchImpl.mock.calls[0][0]).toContain(`${FEEDBACKS_URL}?`)
-    expect(fetchImpl.mock.calls[0][0]).toContain("fromRating=1")
-    expect(fetchImpl.mock.calls[0][0]).toContain("toRating=3")
-    expect(FEEDBACK_PAGE_SIZE).toBe(20)
-    expect(fetchImpl.mock.calls[0][0]).toContain("pageSize=20")
-    expect(fetchImpl.mock.calls.map(([url]) => url)).toContain(feedbacksUrl(1))
   })
 
-  it("reports page progress including the last page total", async () => {
-    const onProgress = vi.fn()
-    const fetchImpl = fetchByPage({
-      0: continuingPage(negativeFeedback, 0),
-      1: lastPage(suppressedNeutral, 1),
-    }, emptyLastPage)
+  it("stops after one page when the store has no more", async () => {
+    const history = feedbackHistory(30)
+    const fetchImpl = feedbackServer(history)
+    const logged = captureLogs()
 
-    await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, onProgress })
-    expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "active", loaded: 0 })
-    expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "active", loaded: 1, total: undefined })
-    expect(onProgress).toHaveBeenCalledWith({ source: "feedback", status: "complete", loaded: 2, total: 2 })
+    const feedbacks = await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, log: createLogger("content") })
+
+    expect(idsOf(feedbacks)).toEqual(idsOf(newestFirst(history)))
+    // Page one, and the oldest-first page asked for alongside it.
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(logged.find((entry) => entry.event === "feedback.load")?.data).toMatchObject({ strategy: "single", requests: 2 })
   })
 
-  it("drops 4-5 star feedback if the API returns them", async () => {
+  it("reads one chain at a time when Amazon's cursor format is unfamiliar", async () => {
+    const history = newestFirst(feedbackHistory(120))
+    const fetchImpl = vi.fn(async (input: unknown) => {
+      const cursor = new URL(String(input)).searchParams.get("lastEvaluatedKey") ?? ""
+      const start = cursor ? Number(cursor.slice("opaque-".length)) : 0
+      const page = history.slice(start, start + FEEDBACK_PAGE_SIZE)
+      const last = start + page.length >= history.length
+      return jsonResponse(feedbacksPayload(page, { lastPage: last, lastEvaluatedKey: last ? null : `opaque-${start + page.length}` }))
+    })
+    const logged = captureLogs()
+
+    const feedbacks = await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, log: createLogger("content") })
+
+    expect(idsOf(feedbacks)).toEqual(idsOf(history))
+    expect(logged).toContainEqual(expect.objectContaining({ level: "warn", event: "feedback.cursorUnknown" }))
+    expect(logged.find((entry) => entry.event === "feedback.load")?.data).toMatchObject({ strategy: "sequential" })
+  })
+
+  it("starts over with one chain when Amazon rejects a built cursor", async () => {
+    const history = feedbackHistory(400)
+    const fetchImpl = feedbackServer(history, { fail: (key) => (key?.id === 0 ? 400 : undefined) })
+    const logged = captureLogs()
+
+    const feedbacks = await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, log: createLogger("content") })
+
+    expect(idsOf(feedbacks)).toEqual(idsOf(newestFirst(history)))
+    expect(logged).toContainEqual(expect.objectContaining({ level: "warn", event: "feedback.parallelFailed" }))
+    expect(logged.find((entry) => entry.event === "feedback.load")?.data).toMatchObject({ strategy: "sequential", entries: 400 })
+  })
+
+  it("retries pages Amazon fails or throttles", async () => {
+    const history = feedbackHistory(200)
+    let failures = 0
+    const fetchImpl = feedbackServer(history, {
+      fail: (key) => {
+        if (!key || failures >= 2) return undefined
+        failures += 1
+        return failures === 1 ? 500 : 429
+      },
+    })
+    const sleep = vi.fn(async () => {})
+
+    const feedbacks = await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, sleep })
+
+    expect(feedbacks).toHaveLength(200)
+    expect(sleep).toHaveBeenCalled()
+  })
+
+  it("throws when page one keeps failing", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}, 503))
+    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, sleep: async () => {} })).rejects.toThrow(
+      "Couldn’t load seller feedback (503).",
+    )
+  })
+
+  it("throws at once when Seller Central refuses the request", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}, 403))
+    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).rejects.toThrow(
+      "Couldn’t load seller feedback (403).",
+    )
+    // Page one and the oldest-first page, each tried once.
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it("drops 4-5 star feedback and repeated entries if the API returns them", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(feedbacksPayload([
       negativeFeedback,
       positiveFeedback,
       suppressedNeutral,
+      negativeFeedback,
     ])))
 
     await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
@@ -253,102 +413,31 @@ describe("fetchNeutralNegativeFeedbacks", () => {
     ])
   })
 
-  it("stops when lastPage is missing and the page is short", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ feedbacks: [negativeFeedback] }),
+  it("reports progress as entries load", async () => {
+    const onProgress = vi.fn()
+    const fetchImpl = feedbackServer(feedbackHistory(260))
+
+    await fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch, onProgress })
+
+    expect(onProgress).toHaveBeenNthCalledWith(1, { source: "feedback", status: "active", loaded: 0 })
+    expect(onProgress).toHaveBeenNthCalledWith(2, { source: "feedback", status: "active", loaded: 50 })
+    expect(onProgress).toHaveBeenLastCalledWith({ source: "feedback", status: "complete", loaded: 260, total: 260 })
+  })
+
+  it("flags every entry and logs a warning when the entry limit stops loading", async () => {
+    const fetchImpl = feedbackServer(feedbackHistory(1000))
+    const logged = captureLogs()
+
+    const feedbacks = await fetchNeutralNegativeFeedbacks({
+      fetch: fetchImpl as unknown as typeof fetch,
+      log: createLogger("content"),
+      maxEntries: 120,
     })
 
-    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
-      negativeFeedback,
-    ])
-    expect(requestedPageNumbers(fetchImpl)).toEqual([0, 1, 2, 3, 4])
-  })
-
-  it("does not start the next window after lastPage and ignores later-window overshoot", async () => {
-    const fetchImpl = fetchByPage({
-      0: continuingPage(negativeFeedback, 0),
-      1: continuingPage(suppressedNeutral, 1),
-      2: continuingPage(negativeFeedback, 2),
-      3: continuingPage(suppressedNeutral, 3),
-      4: continuingPage(negativeFeedback, 4),
-      5: lastPage(suppressedNeutral, 5),
-      6: { payload: {}, status: 500 },
-      7: { payload: {}, status: 500 },
-      8: { payload: {}, status: 500 },
-      9: { payload: {}, status: 500 },
-    })
-
-    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
-      negativeFeedback,
-      suppressedNeutral,
-      negativeFeedback,
-      suppressedNeutral,
-      negativeFeedback,
-      suppressedNeutral,
-    ])
-    expect(requestedPageNumbers(fetchImpl)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-  })
-
-  it("ignores a failed page after lastPage", async () => {
-    const fetchImpl = fetchByPage({
-      0: continuingPage(negativeFeedback, 0),
-      1: lastPage(suppressedNeutral, 1),
-      2: { payload: {}, status: 500 },
-      3: { payload: {}, status: 403 },
-      4: { payload: {}, status: 429 },
-    })
-
-    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).resolves.toEqual([
-      negativeFeedback,
-      suppressedNeutral,
-    ])
-  })
-
-  it("throws when a needed page fails", async () => {
-    const fetchImpl = fetchByPage({
-      0: continuingPage(negativeFeedback, 0),
-      1: { payload: {}, status: 403 },
-      2: lastPage(suppressedNeutral, 2),
-      3: lastPage(suppressedNeutral, 3),
-      4: lastPage(suppressedNeutral, 4),
-    })
-
-    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).rejects.toThrow(
-      "Couldn’t load seller feedback (403).",
-    )
-  })
-
-  it("throws when Seller Central returns a failed response", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}, 403))
-    await expect(fetchNeutralNegativeFeedbacks({ fetch: fetchImpl as unknown as typeof fetch })).rejects.toThrow(
-      "Couldn’t load seller feedback (403).",
-    )
-  })
-
-  it("flags every entry and logs a warning when the page limit stops before the last page", async () => {
-    const fetchImpl = fetchByPage({}, continuingPage(negativeFeedback, 0))
-    const entries: LogEntry[] = []
-    setLogSink((entry) => entries.push(entry))
-
-    try {
-      const feedbacks = await fetchNeutralNegativeFeedbacks({
-        fetch: fetchImpl as unknown as typeof fetch,
-        log: createLogger("content"),
-      })
-
-      expect(fetchImpl).toHaveBeenCalledTimes(FEEDBACK_MAX_PAGES)
-      expect(feedbacks).toHaveLength(FEEDBACK_MAX_PAGES)
-      expect(feedbacks.every((feedback) => feedback.feedbackIncomplete)).toBe(true)
-      expect(dailyTasksSheetRows(feedbacks).slice(0, 2)).toEqual([["Feedback Manager"], [FEEDBACK_INCOMPLETE_NOTE]])
-      expect(entries).toContainEqual(expect.objectContaining({
-        level: "warn",
-        event: "feedback.pageLimit",
-        data: { pages: FEEDBACK_MAX_PAGES, entries: FEEDBACK_MAX_PAGES },
-      }))
-    } finally {
-      setLogSink(null)
-    }
+    expect(feedbacks).toHaveLength(120)
+    expect(feedbacks.every((feedback) => feedback.feedbackIncomplete)).toBe(true)
+    expect(FEEDBACK_INCOMPLETE_NOTE).toBe("Only 20,000 feedback entries were loaded. Seller Central has more.")
+    expect(dailyTasksSheetRows(feedbacks).slice(0, 2)).toEqual([["Feedback Manager"], [FEEDBACK_INCOMPLETE_NOTE]])
+    expect(logged).toContainEqual(expect.objectContaining({ level: "warn", event: "feedback.entryLimit" }))
   })
 })
