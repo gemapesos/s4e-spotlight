@@ -27,8 +27,8 @@ describe("popup diagnostics", () => {
     expect(summarizeLastReport(entries)).toEqual({
       at: 3,
       ms: 48_200,
-      slowest: { label: "Shipping queue", ms: 47_500 },
-      failed: ["Stranded inventory"],
+      slowest: { label: "Shipping Queue", ms: 47_500 },
+      failed: ["Stranded"],
     })
     expect(summarizeLastReport([])).toBeNull()
   })

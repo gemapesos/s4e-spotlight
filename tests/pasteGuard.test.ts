@@ -114,6 +114,34 @@ describe("early paste guard", () => {
     window.removeEventListener(event.type, pageHandler)
   })
 
+  it("still isolates Space typed into a palette text field", () => {
+    const { textarea } = createFocusedPalette()
+    const pageHandler = vi.fn()
+    window.addEventListener("keydown", pageHandler)
+
+    textarea.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, composed: true, key: " " }))
+
+    expect(pageHandler).not.toHaveBeenCalled()
+    window.removeEventListener("keydown", pageHandler)
+  })
+
+  it("lets Space reach a palette list so it can toggle the selected row", () => {
+    const host = document.createElement("div")
+    host.id = HOST_ID
+    host.setAttribute(OPEN_ATTRIBUTE, "true")
+    const list = document.createElement("div")
+    list.tabIndex = -1
+    host.attachShadow({ mode: "open" }).append(list)
+    document.documentElement.append(host)
+    list.focus()
+    const paletteHandler = vi.fn()
+    list.addEventListener("keydown", paletteHandler)
+
+    list.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, composed: true, key: " " }))
+
+    expect(paletteHandler).toHaveBeenCalledOnce()
+  })
+
   it("does not intercept guarded input when the palette is closed", () => {
     const { textarea } = createFocusedPalette(false)
     const keyHandler = vi.fn()

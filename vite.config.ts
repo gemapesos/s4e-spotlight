@@ -11,6 +11,7 @@ import { defineConfig } from "vitest/config"
 const root = fileURLToPath(new URL(".", import.meta.url))
 const fromRoot = (path: string) => resolve(root, path)
 const GEIST_FONT_PATH = "node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2"
+const GEIST_MONO_FONT_PATH = "node_modules/@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2"
 
 /** Modules Chrome loads without bundling: compiled one by one, then emitted or concatenated. */
 const SCRIPT_SOURCES = {
@@ -135,6 +136,11 @@ function extensionScriptsPlugin(): Plugin {
         type: "asset",
         fileName: "geist-latin-wght-normal.woff2",
         source: await readFile(fromRoot(GEIST_FONT_PATH)),
+      })
+      this.emitFile({
+        type: "asset",
+        fileName: "geist-mono-latin-wght-normal.woff2",
+        source: await readFile(fromRoot(GEIST_MONO_FONT_PATH)),
       })
     },
   }

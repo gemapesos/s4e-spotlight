@@ -14,10 +14,20 @@ function isTextEditingKey(event) {
 	const usesPrimaryShortcut = event.metaKey || event.ctrlKey && !event.altKey;
 	return !usesPrimaryShortcut && canProduceText || event.key === "Backspace" || event.key === "Delete";
 }
+function isEditableTarget(event) {
+	const target = event.composedPath()[0];
+	if (!(target instanceof Element)) return false;
+	return target.matches("input, textarea, [contenteditable]:not([contenteditable=false])");
+}
+/** Space on a palette list (no text field focused) toggles the selected row, so the palette must receive it. */
+function isListSpace(event) {
+	return event.key === " " && !isEditableTarget(event);
+}
 function isGuardedEvent(event) {
 	if (event.type === "paste" || event.type === "beforeinput") return true;
 	if (event.type !== "keydown" && event.type !== "keypress") return false;
 	const keyboardEvent = event;
+	if (isListSpace(keyboardEvent)) return false;
 	return isTextEditingKey(keyboardEvent) || isPasteShortcut(keyboardEvent) || isSelectAllShortcut(keyboardEvent);
 }
 function paletteOwnsEvent(targetDocument, event) {

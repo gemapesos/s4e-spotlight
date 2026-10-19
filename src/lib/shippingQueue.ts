@@ -693,6 +693,11 @@ export function shippingQueueShipmentRows(shipment: ShippingQueueShipment): Arra
   return items.map((item) => shippingQueueSheetRow(shipment, item))
 }
 
+/** Amazon lists shipments newest first; sheets show them oldest first, newest at the bottom. */
+export function oldestShipmentsFirst(shipments: readonly ShippingQueueShipment[]): ShippingQueueShipment[] {
+  return [...shipments].reverse()
+}
+
 function shippingQueueSheetNotes(shipments: readonly ShippingQueueShipment[]): Array<Array<string | number>> {
   const notes: Array<Array<string | number>> = []
   if (shipments.some((shipment) => shipment.listingsIncomplete)) notes.push([SHIPPING_QUEUE_LIST_INCOMPLETE_NOTE])
@@ -710,7 +715,7 @@ export function shippingQueueSheetRows(
   return [
     ...shippingQueueSheetNotes(shipments),
     [...SHIPPING_QUEUE_SHEET_HEADERS],
-    ...shipments.flatMap(shippingQueueShipmentRows),
+    ...oldestShipmentsFirst(shipments).flatMap(shippingQueueShipmentRows),
   ]
 }
 

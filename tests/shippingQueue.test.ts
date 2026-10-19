@@ -569,6 +569,18 @@ describe("shippingQueue sheet generation", () => {
     expect(rows[0][column("SKU")]).toBe("")
   })
 
+  it("lists shipments oldest first and keeps each shipment's SKU lines in order", () => {
+    // Amazon's list order: newest first.
+    const newer: ShippingQueueShipment = { ...withDetails(), shipmentId: "FBA200000000" }
+    const older: ShippingQueueShipment = { ...shipment(), shipmentId: "FBA100000000" }
+    const rows = shippingQueueSheetRows([newer, older]).slice(1)
+    expect(rows.map((row) => [row[column("Shipment ID")], row[column("SKU")]])).toEqual([
+      ["FBA100000000", ""],
+      ["FBA200000000", "1065261408"],
+      ["FBA200000000", "1066915973 - WTube"],
+    ])
+  })
+
   it("marks shipments whose details could not be loaded", () => {
     const rows = shippingQueueSheetRows([{ ...shipment(), detailsFetchFailed: true }])
     expect(rows[0]).toEqual([SHIPPING_QUEUE_DETAILS_INCOMPLETE_NOTE])

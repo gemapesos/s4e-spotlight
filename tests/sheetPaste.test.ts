@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { SHIPPING_QUEUE_LIST_INCOMPLETE_NOTE, SHIPPING_STATUS_NEW, SHIPPING_STATUS_REVIEW } from "../src/lib/shippingQueue"
+import {
+  SHIPPING_QUEUE_LIST_INCOMPLETE_NOTE,
+  SHIPPING_STATUS_MONITORING,
+  SHIPPING_STATUS_NEW,
+  type ShippingQueueShipment,
+} from "../src/lib/shippingQueue"
 import { SHEET_PASTE_SHEETS, sheetPasteSheets, type SheetPasteInput } from "../src/lib/sheetPaste"
 import { buildWorkbook, readStoredZip } from "../src/lib/xlsxWorkbook"
 import {
@@ -94,6 +99,17 @@ describe("sheet paste workbook", () => {
     expect(unfulfillable[1]).toEqual(filledUnfulfillableRow)
     expect(unfulfillable[1]).not.toContain("B000TEST")
     expect(unfulfillable[1]).not.toContain(9)
+  })
+
+  it("builds only the tabs of the chosen sections", () => {
+    const sheets = paste({
+      storeName: "Cherrylane Enterprises",
+      sections: ["feedback", "unfulfillable"],
+      unfulfillableListings: [listing],
+    })
+
+    expect(sheets.map((sheet) => sheet.name)).toEqual(["UnfulfillableDisposals", "Feedback"])
+    expect(sheets[0].rows?.[1]).toEqual(filledUnfulfillableRow)
   })
 
   it("fixes unfulfillable quantity columns at 60px and wraps a 32px header", () => {
@@ -276,6 +292,7 @@ describe("sheet paste workbook", () => {
         createdDate: "2026-08-14T00:00:00.000Z",
         listingsIncomplete: true,
         details: {
+          ineligibilityReason: "NOT_ALL_SHIPPED",
           items: [{ merchantSKU: "SKU-1", totalDiscrepancyQuantity: -3, caseId: "CASE-9" }],
         },
       }],
@@ -290,7 +307,7 @@ describe("sheet paste workbook", () => {
       "SKU-1",
       -3,
       "N/A",
-      SHIPPING_STATUS_REVIEW,
+      SHIPPING_STATUS_MONITORING,
       "N/A",
       yesterday,
       "N/A",
@@ -339,10 +356,73 @@ describe("sheet paste workbook", () => {
     expect(shipping[0][6]).toBe(SHIPPING_STATUS_NEW)
     expect(shipping[0][8]).toBe(yesterday)
     expect(shipping[0][11]).toBe("N/A")
-    expect(shipping[1][0]).toBe(yesterday)
+    expect(shipping[1][0]).toBe("")
     expect(shipping[1][1]).toBe("")
     expect(shipping[1][2]).toBe("")
     expect(shipping[1][3]).toBe("SKU-2")
     expect(shipping[1][5]).toBe("Proof of Inventory Ownership AND Delivery")
+  })
+
+  it("keeps only for-monitoring and new send-list shipping lines", () => {
+    const sheets = paste({
+      storeName: "Loving Home USA",
+      shipments: [{
+        shipmentId: "FBA222222222",
+        createdDate: "2026-08-20T00:00:00.000Z",
+        details: {
+          eligible: true,
+          ineligibilityReason: "NONE",
+          items: [
+            { merchantSKU: "SKU-COUNTED", totalDiscrepancyQuantity: -2, ineligibilityReason: "ITEM_LEVEL_AUTHORITATIVE_RECEIVE" },
+            { merchantSKU: "SKU-LOCATED", totalDiscrepancyQuantity: -1, ineligibilityReason: "RESEARCHED" },
+            { merchantSKU: "SKU-NEW", totalDiscrepancyQuantity: -4 },
+          ],
+        },
+      }, {
+        shipmentId: "FBA333333333",
+        details: { ineligibilityReason: "NOT_ALL_SHIPPED", items: [{ merchantSKU: "SKU-WAIT", totalDiscrepancyQuantity: -3 }] },
+      }, {
+        shipmentId: "FBA444444444",
+        details: { ineligibilityReason: "NINE_MONTH_STATUTE_OF_LIMITATIONS", items: [{ merchantSKU: "SKU-OLD", totalDiscrepancyQuantity: -5 }] },
+      }, {
+        shipmentId: "FBA555555555",
+        details: { eligible: false, ineligibilityReason: "OTHER", items: [{ merchantSKU: "SKU-OTHER", totalDiscrepancyQuantity: -1 }] },
+      }, {
+        shipmentId: "FBA666666666",
+        details: { items: [{ merchantSKU: "SKU-REVIEW", totalDiscrepancyQuantity: -1 }] },
+      }],
+    })
+    const shipping = (sheets[4].rows ?? []).slice(1)
+    expect(shipping.map((row) => [row[2], row[3], row[6]])).toEqual([
+      ["FBA333333333", "SKU-WAIT", SHIPPING_STATUS_MONITORING],
+      ["FBA222222222", "SKU-NEW", SHIPPING_STATUS_NEW],
+    ])
+    // The first kept line names its shipment even when earlier lines were left out.
+    expect(shipping[1][1]).toBe("20-Aug-2026")
+  })
+
+  it("lists shipments oldest first and keeps each shipment's SKU lines in order", () => {
+    const sendList = (shipmentId: string, createdDate: string, skus: string[]): ShippingQueueShipment => ({
+      shipmentId,
+      createdDate,
+      details: { eligible: true, items: skus.map((merchantSKU) => ({ merchantSKU, totalDiscrepancyQuantity: -1 })) },
+    })
+    const sheets = paste({
+      storeName: "Loving Home USA",
+      // Amazon's list order: newest first.
+      shipments: [
+        sendList("FBA300000000", "2026-09-03T00:00:00.000Z", ["C-1", "C-2"]),
+        sendList("FBA200000000", "2026-09-02T00:00:00.000Z", ["B-1"]),
+        sendList("FBA100000000", "2026-09-01T00:00:00.000Z", ["A-1", "A-2"]),
+      ],
+    })
+    const shipping = (sheets[4].rows ?? []).slice(1)
+    expect(shipping.map((row) => row.slice(1, 4))).toEqual([
+      ["01-Sep-2026", "FBA100000000", "A-1"],
+      ["", "", "A-2"],
+      ["02-Sep-2026", "FBA200000000", "B-1"],
+      ["03-Sep-2026", "FBA300000000", "C-1"],
+      ["", "", "C-2"],
+    ])
   })
 })
