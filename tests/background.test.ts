@@ -3,14 +3,17 @@ import { describe, expect, it, vi } from "vitest"
 import {
   handleLogMessage,
   buildCaseUrl,
+  buildRemovalOrderUrl,
   buildShipmentUrl,
   buildSkuUrl,
   buildTimeOutFormUrl,
   createOpenIdsMessageListener,
   normalizeCaseIds,
+  normalizeRemovalOrderIds,
   normalizeShipmentIds,
   normalizeSkuIds,
   openCaseTabs,
+  openRemovalOrderTabs,
   openShipmentTabs,
   openSkuTabs,
   openTimeOutTabs,
@@ -151,6 +154,55 @@ describe("background Case ID handling", () => {
   it("enforces the fifty-ID limit in the background", async () => {
     const ids = Array.from({ length: 51 }, (_, index) => String(50_000_000_000 + index))
     await expect(openCaseTabs(ids, senderTab, vi.fn())).rejects.toThrow(/no more than 50/i)
+  })
+})
+
+describe("background Removal Order ID handling", () => {
+  it("normalizes, validates, and deduplicates Removal Order IDs", () => {
+    expect(normalizeRemovalOrderIds(["s4ekm0127", "S4EKM0126", "S4EKM0127", "86RmssEGx+", 123])).toEqual([
+      "S4EKM0127",
+      "S4EKM0126",
+    ])
+  })
+
+  it("builds the Seller Central removal order detail URL", () => {
+    expect(buildRemovalOrderUrl("S4EKM0127")).toBe(
+      "https://sellercentral.amazon.com/recoveryui/removal-order/detail?sourceRemovalOrderId=S4EKM0127",
+    )
+  })
+
+  it("opens a single removal order in an active originating-window tab", async () => {
+    const createTab = vi.fn().mockResolvedValueOnce({ id: 301 } as chrome.tabs.Tab)
+
+    await openRemovalOrderTabs(["S4EKM0127"], senderTab, createTab)
+
+    expect(createTab).toHaveBeenCalledWith({
+      active: true,
+      openerTabId: 42,
+      url: buildRemovalOrderUrl("S4EKM0127"),
+      windowId: 7,
+    })
+  })
+
+  it("routes removal order messages to the removal order opener", async () => {
+    const unused = vi.fn().mockResolvedValue({ openedCount: 0 })
+    const openRemovalOrders = vi.fn().mockResolvedValue({ openedCount: 1 })
+    const sendResponse = vi.fn()
+    const listener = createOpenIdsMessageListener(unused, unused, unused, unused, openRemovalOrders)
+
+    expect(
+      listener(
+        { type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds: ["S4EKM0127"] },
+        { tab: senderTab } as chrome.runtime.MessageSender,
+        sendResponse,
+      ),
+    ).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
+    })
+    expect(openRemovalOrders).toHaveBeenCalledWith(["S4EKM0127"], senderTab)
+    expect(unused).not.toHaveBeenCalled()
   })
 })
 

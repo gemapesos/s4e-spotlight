@@ -25,20 +25,23 @@ export type ReportSourceState = {
 
 export type ReportProgressState = {
   prepare: ReportStageStatus
+  /** The sections chosen for this run, in REPORT_SOURCES order. */
+  sections: readonly ReportSource[]
   sources: Record<ReportSource, ReportSourceState>
   workbook: ReportStageStatus
 }
 
 export const REPORT_PROGRESS_ROWS = [
-  { id: "unfulfillable", label: "Unfulfillable listings" },
-  { id: "feedback", label: "Seller feedback" },
-  { id: "stranded", label: "Stranded inventory" },
-  { id: "suppressed", label: "Search suppressed listings" },
-  { id: "shippingQueue", label: "Shipping queue" },
+  { id: "unfulfillable", label: "Unfulfillable" },
+  { id: "feedback", label: "Seller Feedback" },
+  { id: "stranded", label: "Stranded" },
+  { id: "suppressed", label: "Suppressed" },
+  { id: "shippingQueue", label: "Shipping Queue" },
 ] as const
 
 export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
   prepare: "active",
+  sections: REPORT_SOURCES,
   sources: {
     unfulfillable: { status: "pending" },
     feedback: { status: "pending" },
@@ -96,7 +99,7 @@ export function applyReportProgressEvent(
 }
 
 export function sourcesReadyForWorkbook(state: ReportProgressState): boolean {
-  return REPORT_SOURCES.every((source) => {
+  return state.sections.every((source) => {
     const status = state.sources[source].status
     return status === "complete" || status === "error"
   })

@@ -3,6 +3,7 @@ import { createLogger, createLogRunId, createLogStore, describeError, errorMessa
 import { DEFAULT_TIME_OUT_FORM_VALUES, loadSettings, TIME_OUT_FORM_BASE_URL, TIME_OUT_FORM_ENTRY_IDS } from "./lib/settings.js";
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=";
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/";
+const REMOVAL_ORDER_URL = "https://sellercentral.amazon.com/recoveryui/removal-order/detail?sourceRemovalOrderId=";
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm=";
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx";
 const OPENID_SPEC = "http://specs.openid.net/auth/2.0";
@@ -44,6 +45,9 @@ export function normalizeCaseIds(value) {
 export function normalizeShipmentIds(value) {
 	return uniqueStrings(value, (id) => id.toUpperCase(), (id) => /^FBA[A-Z0-9]{9}$/u.test(id));
 }
+export function normalizeRemovalOrderIds(value) {
+	return uniqueStrings(value, (id) => id.toUpperCase(), (id) => /^S4E[A-Z]{2}\d{4}$/u.test(id));
+}
 export function normalizeSkuIds(value) {
 	return uniqueStrings(value, (id) => id.trim(), (id) => id.length > 0 && id.length <= 40);
 }
@@ -52,6 +56,9 @@ export function buildCaseUrl(id) {
 }
 export function buildShipmentUrl(id) {
 	return `${SHIPMENT_URL}${id}/contents`;
+}
+export function buildRemovalOrderUrl(id) {
+	return `${REMOVAL_ORDER_URL}${encodeURIComponent(id)}`;
 }
 export function buildSkuUrl(id) {
 	return `${SKU_URL}${encodeURIComponent(id)}${SKU_URL_SUFFIX}`;
@@ -137,6 +144,7 @@ function idTabOpener(normalize, buildUrl, noun) {
 export const openCaseTabs = idTabOpener(normalizeCaseIds, buildCaseUrl, "Case IDs");
 export const openShipmentTabs = idTabOpener(normalizeShipmentIds, buildShipmentUrl, "Shipment IDs");
 export const openSkuTabs = idTabOpener(normalizeSkuIds, buildSkuUrl, "SKUs");
+export const openRemovalOrderTabs = idTabOpener(normalizeRemovalOrderIds, buildRemovalOrderUrl, "Removal Order IDs");
 export async function openTimeOutTabs(senderTab, createTab = createChromeTab, removeTabs = removeChromeTabs, date = new Date(), loadFormValues = async () => (await loadSettings()).timeOutForm) {
 	const sender = requireSenderTab(senderTab);
 	const values = await loadFormValues();
@@ -160,7 +168,7 @@ function openTabsFailure(error, fallback) {
 		} : {}
 	};
 }
-export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipments = openShipmentTabs, openSkus = openSkuTabs, openTimeOut = openTimeOutTabs) {
+export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipments = openShipmentTabs, openSkus = openSkuTabs, openTimeOut = openTimeOutTabs, openRemovalOrders = openRemovalOrderTabs) {
 	const openers = {
 		OPEN_CASE_IDS: {
 			kind: "case",
@@ -176,6 +184,11 @@ export function createOpenIdsMessageListener(openCases = openCaseTabs, openShipm
 			kind: "sku",
 			idsKey: "skuIds",
 			open: openSkus
+		},
+		OPEN_REMOVAL_ORDER_IDS: {
+			kind: "removalOrder",
+			idsKey: "removalOrderIds",
+			open: openRemovalOrders
 		}
 	};
 	return (message, sender, sendResponse) => {

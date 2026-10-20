@@ -45,6 +45,7 @@ import {
 
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID="
 const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summary/"
+const REMOVAL_ORDER_URL = "https://sellercentral.amazon.com/recoveryui/removal-order/detail?sourceRemovalOrderId="
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm="
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
 const OPENID_SPEC = "http://specs.openid.net/auth/2.0"
@@ -100,11 +101,15 @@ export function normalizeCaseIds(value: unknown): string[] {
 export function normalizeShipmentIds(value: unknown): string[] {
   return uniqueStrings(value, (id) => id.toUpperCase(), (id) => /^FBA[A-Z0-9]{9}$/u.test(id))
 }
+export function normalizeRemovalOrderIds(value: unknown): string[] {
+  return uniqueStrings(value, (id) => id.toUpperCase(), (id) => /^S4E[A-Z]{2}\d{4}$/u.test(id))
+}
 export function normalizeSkuIds(value: unknown): string[] {
   return uniqueStrings(value, (id) => id.trim(), (id) => id.length > 0 && id.length <= 40)
 }
 export function buildCaseUrl(id: string): string { return `${CASE_URL}${id}` }
 export function buildShipmentUrl(id: string): string { return `${SHIPMENT_URL}${id}/contents` }
+export function buildRemovalOrderUrl(id: string): string { return `${REMOVAL_ORDER_URL}${encodeURIComponent(id)}` }
 export function buildSkuUrl(id: string): string { return `${SKU_URL}${encodeURIComponent(id)}${SKU_URL_SUFFIX}` }
 export function buildTimeOutFormUrl(date: Date, values: TimeOutFormValues = DEFAULT_TIME_OUT_FORM_VALUES): string {
   const year = date.getFullYear()
@@ -205,6 +210,7 @@ function idTabOpener(normalize: (ids: unknown) => string[], buildUrl: (id: strin
 export const openCaseTabs = idTabOpener(normalizeCaseIds, buildCaseUrl, "Case IDs")
 export const openShipmentTabs = idTabOpener(normalizeShipmentIds, buildShipmentUrl, "Shipment IDs")
 export const openSkuTabs = idTabOpener(normalizeSkuIds, buildSkuUrl, "SKUs")
+export const openRemovalOrderTabs = idTabOpener(normalizeRemovalOrderIds, buildRemovalOrderUrl, "Removal Order IDs")
 
 export async function openTimeOutTabs(
   senderTab: chrome.tabs.Tab | undefined,
@@ -240,11 +246,13 @@ export function createOpenIdsMessageListener(
   openShipments: OpenTabs = openShipmentTabs,
   openSkus: OpenTabs = openSkuTabs,
   openTimeOut: OpenTimeOut = openTimeOutTabs,
+  openRemovalOrders: OpenTabs = openRemovalOrderTabs,
 ) {
   const openers: Record<string, { kind: string; idsKey: string; open: OpenTabs }> = {
     OPEN_CASE_IDS: { kind: "case", idsKey: "caseIds", open: openCases },
     OPEN_SHIPMENT_IDS: { kind: "shipment", idsKey: "shipmentIds", open: openShipments },
     OPEN_SKU_IDS: { kind: "sku", idsKey: "skuIds", open: openSkus },
+    OPEN_REMOVAL_ORDER_IDS: { kind: "removalOrder", idsKey: "removalOrderIds", open: openRemovalOrders },
   }
   return (
     message: unknown,

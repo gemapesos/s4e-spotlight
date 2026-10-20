@@ -4,7 +4,7 @@ import { commandFilter } from "../src/lib/searchScore"
 
 const shipment = "Open Shipment IDs"
 const shipmentKeywords = ["shipment", "fba", "inbound", "transfer"]
-const caseLabel = "Open Case ID/s"
+const caseLabel = "Open case IDs"
 
 describe("commandFilter", () => {
   it("shows every candidate for an empty search", () => {
