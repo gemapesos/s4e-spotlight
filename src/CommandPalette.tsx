@@ -10,6 +10,7 @@ import {
   FileText,
   FolderOpen,
   Package,
+  PackageMinus,
   Settings,
   Truck,
 } from "lucide-react"
@@ -54,6 +55,7 @@ import {
   isFeatureEnabled,
   type EnabledFeatures,
 } from "@/lib/settings"
+import { extractRemovalOrderIds, findRemovalOrderIds } from "@/lib/removalOrderIds"
 import { extractShipmentIds, findShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds, findSkuIds } from "@/lib/skuIds"
 import { ReportProgressPanel } from "@/ReportProgressPanel"
@@ -69,7 +71,8 @@ export type PaletteMode =
   | "report-login"
   | "report-options"
   | "generating-reports"
-type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids"
+/** Removal orders have no screen of their own; they're only opened from the Detected row. */
+type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "removal-order-ids"
 
 const CONFIRM_THRESHOLD = 10
 const MAX_BULK_IDS = 50
@@ -110,7 +113,7 @@ interface InputModeDefinition {
   unit: string
 }
 
-function isIdentifierInputMode(mode: PaletteMode): mode is IdentifierMode {
+function isIdentifierInputMode(mode: PaletteMode): mode is Extract<IdentifierMode, PaletteMode> {
   return mode === "case-ids" || mode === "shipment-ids" || mode === "sku-ids"
 }
 
@@ -248,6 +251,7 @@ export interface CommandPaletteProps {
   initialMode?: PaletteMode
   onOpenCaseIds: (caseIds: string[]) => Promise<void> | void
   onOpenShipmentIds: (shipmentIds: string[]) => Promise<void> | void
+  onOpenRemovalOrderIds?: (removalOrderIds: string[]) => Promise<void> | void
   onOpenSkuIds?: (skuIds: string[]) => Promise<void> | void
   onGetAccountsStatus?: () => Promise<AccountsStatus>
   onUnlockAccounts?: (masterPassword: string) => Promise<void>
@@ -274,6 +278,7 @@ export function CommandPalette({
   initialMode,
   onOpenCaseIds,
   onOpenShipmentIds,
+  onOpenRemovalOrderIds = async () => undefined,
   onOpenSkuIds = async () => undefined,
   onGetAccountsStatus = defaultGetAccountsStatus,
   onUnlockAccounts = async () => undefined,
@@ -343,6 +348,19 @@ export function CommandPalette({
       title: "Open shipment IDs",
       unit: "shipment ID",
     },
+    "removal-order-ids": {
+      ariaLabel: "Removal order IDs",
+      description: "Enter one or more S4E removal order IDs.",
+      extractIds: extractRemovalOrderIds,
+      findIds: findRemovalOrderIds,
+      invalidError: "Enter at least one valid removal order ID.",
+      label: "Paste one or more removal order IDs",
+      noun: "removal order",
+      placeholder: "Paste removal order IDs, links or text…",
+      submit: onOpenRemovalOrderIds,
+      title: "Open removal orders",
+      unit: "removal order ID",
+    },
     "sku-ids": {
       ariaLabel: "SKUs",
       description: "Enter one or more Amazon Seller Central SKUs, one per line.",
@@ -356,8 +374,9 @@ export function CommandPalette({
       title: "Search SKUs",
       unit: "SKU",
     },
-  }), [onOpenCaseIds, onOpenShipmentIds, onOpenSkuIds])
+  }), [onOpenCaseIds, onOpenRemovalOrderIds, onOpenShipmentIds, onOpenSkuIds])
   const inputMode = inputModes[identifierMode]
+  const confirmBackMode: PaletteMode = identifierMode === "removal-order-ids" ? "commands" : identifierMode
   const warnings = React.useMemo(() => (generatedReport ? reportWarnings(generatedReport) : []), [generatedReport])
 
   const visibleGroups = React.useMemo(
@@ -377,6 +396,8 @@ export function CommandPalette({
   )
   const detectedCaseIds = React.useMemo(() => extractCaseIds(commandSearch), [commandSearch])
   const detectedShipmentIds = React.useMemo(() => extractShipmentIds(commandSearch), [commandSearch])
+  const detectedRemovalOrderIds = React.useMemo(() => extractRemovalOrderIds(commandSearch), [commandSearch])
+  const hasDetectedIds = detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || detectedRemovalOrderIds.length > 0
   const skuFallbackQuery = commandSearch.trim()
   const accountsEnabled = isFeatureEnabled(enabledFeatures, "accounts")
   const matchedStores = React.useMemo(() => {
@@ -385,16 +406,15 @@ export function CommandPalette({
   }, [accountsEnabled, skuFallbackQuery, stores])
   const showSkuFallback = React.useMemo(() => {
     if (!isFeatureEnabled(enabledFeatures, "search-skus")) return false
-    if (detectedCaseIds.length > 0 || detectedShipmentIds.length > 0) return false
+    if (hasDetectedIds) return false
     if (matchedStores.length > 0) return false
     if (skuFallbackQuery.length < 1 || skuFallbackQuery.length > 40 || /\s/u.test(skuFallbackQuery)) return false
     return !visibleGroups.some((group) =>
       group.commands.some((command) => commandFilter(command.label, skuFallbackQuery, command.keywords) > 0),
     )
   }, [
-    detectedCaseIds.length,
-    detectedShipmentIds.length,
     enabledFeatures,
+    hasDetectedIds,
     matchedStores.length,
     skuFallbackQuery,
     visibleGroups,
@@ -680,7 +700,7 @@ export function CommandPalette({
       if (identifierInput) return setIdentifierInput("")
       return setMode("commands")
     }
-    if (mode === "confirm-ids") return setMode(identifierMode)
+    if (mode === "confirm-ids") return setMode(confirmBackMode)
     if (mode === "report-options") return returnToCommands()
     if (mode === "report-login") return setMode("commands")
     if (mode === "unlock") {
@@ -689,7 +709,7 @@ export function CommandPalette({
     }
     if (accountSearch) return setAccountSearch("")
     setMode("commands")
-  }, [accountSearch, commandSearch, identifierInput, identifierMode, masterPassword, mode, onOpenChange, returnToCommands, submitting])
+  }, [accountSearch, commandSearch, confirmBackMode, identifierInput, masterPassword, mode, onOpenChange, returnToCommands, submitting])
 
   const screens: Record<Exclude<PaletteMode, IdentifierMode>, { title: string; description: string }> = {
     commands: { title: "Command Palette", description: "Search for a command to run." },
@@ -809,10 +829,10 @@ export function CommandPalette({
             value={commandSearch}
           />
           <CommandList aria-label="Commands">
-            {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 || showSkuFallback || matchedStores.length > 0 ? null : (
+            {hasDetectedIds || showSkuFallback || matchedStores.length > 0 ? null : (
               <CommandEmpty>No results found.</CommandEmpty>
             )}
-            {detectedCaseIds.length > 0 || detectedShipmentIds.length > 0 ? (
+            {hasDetectedIds ? (
               <>
                 <CommandGroup forceMount heading="Detected">
                   {detectedCaseIds.length > 0 ? (
@@ -839,6 +859,19 @@ export function CommandPalette({
                     >
                       <Truck aria-hidden="true" />
                       <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("shipment", detectedShipmentIds)}</span>
+                    </CommandItem>
+                  ) : null}
+                  {detectedRemovalOrderIds.length > 0 ? (
+                    <CommandItem
+                      disabled={submitting}
+                      forceMount
+                      keywords={detectedRemovalOrderIds}
+                      onSelect={() => submitIdBatch("removal-order-ids", detectedRemovalOrderIds)}
+                      selectedHint="↵"
+                      value={detectedIdentifierLabel("removal order", detectedRemovalOrderIds)}
+                    >
+                      <PackageMinus aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("removal order", detectedRemovalOrderIds)}</span>
                     </CommandItem>
                   ) : null}
                 </CommandGroup>
@@ -1035,15 +1068,18 @@ export function CommandPalette({
             <CommandHint keys={["esc"]}>{masterPassword ? "Clear" : "Back"}</CommandHint>
           </CommandFooter>
         </> : mode === "confirm-ids" ? <>
-          <CommandHeader backDisabled={submitting} onBack={() => { setMode(identifierMode); setError(null) }} parent={inputMode.title} title="Confirm" />
+          <CommandHeader backDisabled={submitting} onBack={() => { setMode(confirmBackMode); setError(null) }} parent={inputMode.title} title="Confirm" />
           {notice(
-            identifierMode === "shipment-ids" ? Truck : identifierMode === "sku-ids" ? Package : FolderOpen,
+            identifierMode === "shipment-ids" ? Truck
+              : identifierMode === "sku-ids" ? Package
+              : identifierMode === "removal-order-ids" ? PackageMinus
+              : FolderOpen,
             `Open ${pendingIds.length} ${inputMode.noun} tabs in the background?`,
             "Opening this many tabs can slow the browser for a few seconds.",
           )}
           {errorAlert()}
           <CommandFooter action end={<>
-            {cancelAction(() => setMode(identifierMode))}
+            {cancelAction(() => setMode(confirmBackMode))}
             {primaryAction(submitting ? "Opening…" : `Open ${pendingIds.length} tabs`, () => void runIdentifiers(pendingIds), { autoFocus: true })}
           </>} />
         </> : mode === "report-options" ? <>

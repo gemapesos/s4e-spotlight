@@ -200,6 +200,25 @@ describe("CommandPalette", () => {
     expect(onOpenCaseIds).toHaveBeenCalledWith(["21476974831"])
   })
 
+  it("offers a detected Removal Order ID action instead of a SKU search", async () => {
+    const user = userEvent.setup()
+    const onOpenRemovalOrderIds = vi.fn<(removalOrderIds: string[]) => Promise<void>>().mockResolvedValue()
+    const { onOpenChange, onOpenSkuIds } = renderPalette(
+      true, undefined, undefined, undefined, undefined, undefined, undefined, { onOpenRemovalOrderIds },
+    )
+    const input = screen.getByRole("combobox", { name: "Search commands" })
+
+    await user.type(input, "s4ekm0127")
+    const detected = screen.getByRole("option", { name: /Open removal order S4EKM0127/ })
+    expect(detected).toBeVisible()
+    expect(screen.queryByRole("option", { name: /as SKU/ })).not.toBeInTheDocument()
+
+    await user.click(detected)
+    expect(onOpenRemovalOrderIds).toHaveBeenCalledWith(["S4EKM0127"])
+    expect(onOpenSkuIds).not.toHaveBeenCalled()
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
   it("opens an enabled workflow without closing the palette", async () => {
     const user = userEvent.setup()
     const { onOpenChange } = renderPalette()

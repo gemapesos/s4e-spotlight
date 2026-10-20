@@ -13,15 +13,15 @@ import {
 } from "@/components/ui/dialog"
 import { SearchIcon, CheckIcon, ChevronLeftIcon, ExternalLinkIcon } from "lucide-react"
 
-const SURFACE_HEIGHT_DURATION_MS = 280
+const SURFACE_HEIGHT_DURATION_MS = 200
 const SURFACE_HEIGHT_EASING = "cubic-bezier(0.16, 1, 0.3, 1)"
 /** In rem, so the slide matches the design on pages that shrink the root font (Seller Central). */
 const SURFACE_SHIFT_REM = 0.75
 /** Rows fade up one after another when a screen opens; only the first few, so long lists don't drag. */
 const ROW_STAGGER_LIMIT = 8
-const ROW_STAGGER_STEP_MS = 18
-const ROW_ENTER_DURATION_MS = 200
-const HIGHLIGHT_DURATION_MS = 140
+const ROW_STAGGER_STEP_MS = 12
+const ROW_ENTER_DURATION_MS = 150
+const HIGHLIGHT_DURATION_MS = 110
 
 function prefersReducedMotion(targetWindow: Window | null): boolean {
   return Boolean(targetWindow?.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
@@ -114,62 +114,76 @@ function PaletteSurface({
     staggerRows(commandRef.current)
   }, [commandRef, contentKey])
 
+  // A new screen's height isn't final in its first commit: cmdk registers rows a render later
+  // (until then CommandEmpty shows), and some screens fill in after mount. So the height
+  // animation follows the screen's natural height, retargeting from wherever it is mid-flight
+  // instead of gliding to a stale height and snapping at the end.
   React.useLayoutEffect(() => {
-    const el = contentRef.current
-    if (!el) return
+    const command = commandRef.current
+    // On first mount the dialog's ref isn't attached yet (parents attach after child effects).
+    const el = contentRef.current ?? command?.parentElement
+    if (!el || !command) return
 
-    heightAnimationRef.current?.cancel()
-    heightAnimationRef.current = null
-
-    const nextHeight = el.offsetHeight
-    const prevHeight = previousHeightRef.current
-    previousHeightRef.current = nextHeight
-
+    const fromHeight = previousHeightRef.current
     const targetWindow = el.ownerDocument.defaultView
-    if (
-      prevHeight == null ||
-      prevHeight === nextHeight ||
-      prefersReducedMotion(targetWindow) ||
-      typeof el.animate !== "function"
-    ) {
-      return
+    const canAnimate =
+      fromHeight != null && !prefersReducedMotion(targetWindow) && typeof el.animate === "function"
+    let swapEndsAt = canAnimate ? performance.now() + SURFACE_HEIGHT_DURATION_MS : 0
+    let target = fromHeight
+
+    const animateTo = (nextHeight: number) => {
+      if (nextHeight === target) return
+      // Start from the height on screen right now, which mid-animation is the animated height.
+      const current = heightAnimationRef.current ? el.offsetHeight : (target ?? nextHeight)
+      heightAnimationRef.current?.cancel()
+      heightAnimationRef.current = null
+      target = nextHeight
+      previousHeightRef.current = nextHeight
+      if (current === nextHeight) return
+      const animation = el.animate(
+        [{ height: `${current}px` }, { height: `${nextHeight}px` }],
+        { duration: SURFACE_HEIGHT_DURATION_MS, easing: SURFACE_HEIGHT_EASING },
+      )
+      heightAnimationRef.current = animation
+      const settle = () => {
+        if (heightAnimationRef.current === animation) heightAnimationRef.current = null
+      }
+      animation.onfinish = settle
+      animation.oncancel = settle
     }
 
-    const animation = el.animate(
-      [{ height: `${prevHeight}px` }, { height: `${nextHeight}px` }],
-      { duration: SURFACE_HEIGHT_DURATION_MS, easing: SURFACE_HEIGHT_EASING },
-    )
-    heightAnimationRef.current = animation
-    animation.onfinish = () => {
-      if (heightAnimationRef.current === animation) heightAnimationRef.current = null
-      previousHeightRef.current = el.offsetHeight
-    }
-    animation.oncancel = () => {
-      if (heightAnimationRef.current === animation) heightAnimationRef.current = null
+    const follow = () => {
+      const nextHeight = command.offsetHeight
+      if (heightAnimationRef.current || performance.now() < swapEndsAt) {
+        animateTo(nextHeight)
+      } else {
+        swapEndsAt = 0
+        target = nextHeight
+        previousHeightRef.current = nextHeight
+      }
     }
 
+    if (canAnimate) animateTo(command.offsetHeight)
+    else previousHeightRef.current = command.offsetHeight
+
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(follow)
+    observer?.observe(command)
     return () => {
-      animation.cancel()
+      observer?.disconnect()
+      // Switching again mid-flight: the next screen starts from the height on screen now.
+      if (heightAnimationRef.current) previousHeightRef.current = el.offsetHeight
+      heightAnimationRef.current?.cancel()
+      heightAnimationRef.current = null
     }
-  }, [contentKey, contentRef])
-
-  React.useEffect(() => {
-    const el = contentRef.current
-    if (!el || typeof ResizeObserver === "undefined") return
-    const observer = new ResizeObserver(() => {
-      if (heightAnimationRef.current) return
-      previousHeightRef.current = el.offsetHeight
-    })
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [contentRef])
+  }, [commandRef, contentKey, contentRef])
 
   return (
     <Command
       key={contentKey}
       ref={commandRef}
       className={animateSwap ? "animate-surface-in motion-reduce:animate-none!" : undefined}
-      style={{ "--surface-shift": `${shiftRef.current}rem` } as React.CSSProperties}
+      // Natural height, not the dialog's: the dialog's height animates toward it and clips the rest.
+      style={{ "--surface-shift": `${shiftRef.current}rem`, height: "auto", alignSelf: "start" } as React.CSSProperties}
       defaultValue={defaultValue}
       filter={filter}
       label={title === "Accounts" ? "Search accounts" : "Search commands"}
@@ -445,7 +459,7 @@ function CommandItem({
   const trailing = end !== undefined ? end : external ? (
     <ExternalLinkIcon aria-hidden="true" className="size-3.5! text-ring" />
   ) : selectedHint ? (
-    <CommandKbd aria-hidden="true" className="opacity-0 transition-opacity duration-150 group-data-selected/command-item:opacity-100">{selectedHint}</CommandKbd>
+    <CommandKbd aria-hidden="true" className="opacity-0 transition-opacity duration-100 group-data-selected/command-item:opacity-100">{selectedHint}</CommandKbd>
   ) : (
     <CheckIcon className="opacity-0 group-has-data-[slot=command-checkbox]/command-item:hidden group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100" />
   )
@@ -454,7 +468,7 @@ function CommandItem({
     <CommandPrimitive.Item
       data-slot="command-item"
       className={cn(
-        "group/command-item relative flex h-8 scroll-my-1 cursor-default items-center gap-2 rounded-[0.375rem] px-2 text-sm text-foreground/80 outline-hidden transition-colors duration-150 select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-selected:bg-muted in-data-[glide=on]:data-selected:bg-transparent! data-selected:font-medium data-selected:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[svg]:text-muted-foreground data-selected:*:[svg]:text-foreground",
+        "group/command-item relative flex h-8 scroll-my-1 cursor-default items-center gap-2 rounded-[0.375rem] px-2 text-sm text-foreground/80 outline-hidden transition-colors duration-100 select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-selected:bg-muted in-data-[glide=on]:data-selected:bg-transparent! data-selected:font-medium data-selected:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[svg]:text-muted-foreground data-selected:*:[svg]:text-foreground",
         className
       )}
       {...props}
