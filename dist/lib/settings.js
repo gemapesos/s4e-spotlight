@@ -10,23 +10,23 @@ export const FEATURE_IDS = [
 export const FEATURES = [
 	{
 		id: "open-case-ids",
-		label: "Open Case ID/s"
+		label: "Open case IDs"
 	},
 	{
 		id: "open-shipment-ids",
-		label: "Open Shipment ID/s"
+		label: "Open shipment IDs"
 	},
 	{
 		id: "search-skus",
-		label: "Search SKU/s"
+		label: "Search SKUs"
 	},
 	{
 		id: "time-out",
-		label: "Time Out"
+		label: "Open Time Out"
 	},
 	{
 		id: "generate-reports",
-		label: "Generate Reports"
+		label: "Generate reports"
 	},
 	{
 		id: "accounts",

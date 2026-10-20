@@ -38,6 +38,8 @@ export function sheetsReportFileName(storeName: string, date: Date = new Date())
 export interface GeneratedReport {
   storeName: string
   generatedAt: Date
+  /** The sections chosen for this report; all of them when absent. */
+  sections?: readonly ReportSource[]
   unfulfillableListings: readonly UnfulfillableListing[]
   nextRemovalOrderId?: string | null
   feedbacks: readonly SellerFeedback[]
@@ -47,6 +49,11 @@ export interface GeneratedReport {
 }
 
 export type ReportDownloadFormat = "raw" | "sheets"
+
+/** Whether a section was chosen. Workbooks leave out the rest rather than show them empty. */
+export function reportIncludes(report: { sections?: readonly ReportSource[] }, source: ReportSource): boolean {
+  return !report.sections || report.sections.includes(source)
+}
 
 export interface ReportWarning {
   source: ReportSource
@@ -90,16 +97,18 @@ export function reportWarnings(report: GeneratedReport): ReportWarning[] {
 
 export function reportWorkbookSheets(report: Partial<Pick<
   GeneratedReport,
-  "unfulfillableListings" | "feedbacks" | "strandedListings" | "suppressedListings" | "shipments"
+  "sections" | "unfulfillableListings" | "feedbacks" | "strandedListings" | "suppressedListings" | "shipments"
 >> = {}): WorkbookSheet[] {
-  const rowsBySheet: Record<(typeof REPORT_SHEETS)[number], () => WorkbookSheet["rows"]> = {
-    "Daily Tasks": () => dailyTasksSheetRows(report.feedbacks ?? []),
-    Unfulfillable: () => unfulfillableSheetRows(report.unfulfillableListings ?? []),
-    Stranded: () => strandedSheetRows(report.strandedListings ?? []),
-    Suppressed: () => suppressedSheetRows(report.suppressedListings ?? []),
-    "Shipping Queue": () => shippingQueueSheetRows(report.shipments ?? []),
+  const sheets: Record<(typeof REPORT_SHEETS)[number], { source: ReportSource; rows: () => WorkbookSheet["rows"] }> = {
+    "Daily Tasks": { source: "feedback", rows: () => dailyTasksSheetRows(report.feedbacks ?? []) },
+    Unfulfillable: { source: "unfulfillable", rows: () => unfulfillableSheetRows(report.unfulfillableListings ?? []) },
+    Stranded: { source: "stranded", rows: () => strandedSheetRows(report.strandedListings ?? []) },
+    Suppressed: { source: "suppressed", rows: () => suppressedSheetRows(report.suppressedListings ?? []) },
+    "Shipping Queue": { source: "shippingQueue", rows: () => shippingQueueSheetRows(report.shipments ?? []) },
   }
-  return REPORT_SHEETS.map((name) => ({ name, rows: rowsBySheet[name]() }))
+  return REPORT_SHEETS
+    .filter((name) => reportIncludes(report, sheets[name].source))
+    .map((name) => ({ name, rows: sheets[name].rows() }))
 }
 
 export function buildReportWorkbook(sheets: readonly WorkbookSheet[] = REPORT_SHEETS.map((name) => ({ name }))): Uint8Array {

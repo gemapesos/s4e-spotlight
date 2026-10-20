@@ -39,20 +39,22 @@ const HOST_ID = "command-palette-extension-root"
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open"
 const PASTE_GUARD_KEY = "__s4eSpotlightPasteGuard"
 const GEIST_FONT_FILE = "geist-latin-wght-normal.woff2"
+/** IDs in the identifier input and its chips. */
+const GEIST_MONO_FONT_FILE = "geist-mono-latin-wght-normal.woff2"
 const FIRST_OPEN_ASSET_TIMEOUT_MS = 120
 const paletteLog = createLogger("palette")
 
 if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground())
 
-export async function loadPaletteFont(targetDocument: Document): Promise<void> {
+async function addExtensionFont(targetDocument: Document, family: string, file: string): Promise<void> {
   const fontUrl =
     typeof chrome !== "undefined" && typeof chrome.runtime?.getURL === "function"
-      ? chrome.runtime.getURL(GEIST_FONT_FILE)
+      ? chrome.runtime.getURL(file)
       : ""
   if (!fontUrl) return
   if (typeof FontFace === "undefined" || !targetDocument.fonts) return
   try {
-    const face = new FontFace("Geist Variable", `url("${fontUrl}")`, {
+    const face = new FontFace(family, `url("${fontUrl}")`, {
       display: "swap",
       style: "normal",
       weight: "100 900",
@@ -62,6 +64,12 @@ export async function loadPaletteFont(targetDocument: Document): Promise<void> {
   } catch {
     // Best-effort; the UI falls back to the system stack.
   }
+}
+
+/** Waits for Geist, which every screen uses; Geist Mono loads alongside without holding up the first open. */
+export async function loadPaletteFont(targetDocument: Document): Promise<void> {
+  void addExtensionFont(targetDocument, "Geist Mono Variable", GEIST_MONO_FONT_FILE)
+  await addExtensionFont(targetDocument, "Geist Variable", GEIST_FONT_FILE)
 }
 
 function waitWithTimeout(promise: Promise<unknown>, ms: number, targetWindow: Window | null): Promise<void> {
@@ -100,6 +108,11 @@ export interface OpenShipmentIdsMessage {
   shipmentIds: string[]
 }
 
+export interface OpenRemovalOrderIdsMessage {
+  type: "OPEN_REMOVAL_ORDER_IDS"
+  removalOrderIds: string[]
+}
+
 export interface OpenSkuIdsMessage {
   type: "OPEN_SKU_IDS"
   skuIds: string[]
@@ -125,31 +138,75 @@ export interface MountCommandPaletteOptions {
   shadowMode?: ShadowRootMode
 }
 
-interface OverflowStyles {
-  overflow: string
-  overflowX: string
-  overflowY: string
-}
+/** Sets inline styles and returns a function that puts the previous inline values back. */
+function setInlineStyles(element: HTMLElement, styles: Record<string, [value: string, priority?: string]>): () => void {
+  const previous = Object.keys(styles).map((property) => [
+    property,
+    element.style.getPropertyValue(property),
+    element.style.getPropertyPriority(property),
+  ] as const)
 
-function lockDocumentScroll(document: Document): () => void {
-  const elements = [document.documentElement, document.body]
-  const previousStyles = elements.map<OverflowStyles>((element) => ({
-    overflow: element.style.overflow,
-    overflowX: element.style.overflowX,
-    overflowY: element.style.overflowY,
-  }))
-
-  for (const element of elements) {
-    element.style.overflow = "hidden"
+  for (const [property, [value, priority = ""]] of Object.entries(styles)) {
+    element.style.setProperty(property, value, priority)
   }
 
   return () => {
-    elements.forEach((element, index) => {
-      const previous = previousStyles[index]
-      element.style.overflow = previous.overflow
-      element.style.overflowX = previous.overflowX
-      element.style.overflowY = previous.overflowY
-    })
+    for (const [property, value, priority] of previous) {
+      if (value) element.style.setProperty(property, value, priority)
+      else element.style.removeProperty(property)
+    }
+  }
+}
+
+/** Radix Dialog marks body while its own scroll lock is mounted. */
+const RADIX_SCROLL_LOCK_ATTRIBUTE = "data-scroll-locked"
+
+/** Body styles Radix's scroll lock overrides (see react-remove-scroll-bar). */
+const RADIX_LOCKED_BODY_PROPERTIES = [
+  "overflow-x",
+  "overflow-y",
+  "position",
+  "margin-top",
+  "margin-right",
+  "margin-left",
+  "padding-top",
+  "padding-right",
+  "padding-left",
+] as const
+
+/**
+ * Locks page scroll without touching layout. Hiding the scrollbar (Radix's approach, or
+ * `overflow: hidden`) changes the viewport's width, and no padding or gutter trick looks the
+ * same as the real scrollbar, so the scrollbar stays exactly as it is:
+ * - Radix's lock styles on body are pinned to body's current values, so they change nothing.
+ * - Radix's lock still cancels wheel and touch scrolling outside the palette, and focus stays
+ *   trapped in the palette, so keys can't scroll the page.
+ * - Dragging the scrollbar itself is undone as it happens.
+ */
+function lockDocumentScroll(document: Document): () => void {
+  const { body } = document
+  const view = document.defaultView
+  if (!view) return () => {}
+
+  const computed = view.getComputedStyle(body)
+  const restoreBody = setInlineStyles(body, Object.fromEntries(
+    RADIX_LOCKED_BODY_PROPERTIES.map((property) => [property, [computed.getPropertyValue(property), "important"]]),
+  ))
+
+  const scroller = document.scrollingElement ?? document.documentElement
+  const { scrollLeft, scrollTop } = scroller
+  const keepScrollPosition = (event: Event) => {
+    const target = event.target === document ? scroller : event.target
+    if (target !== scroller) return
+    if (scroller.scrollTop !== scrollTop || scroller.scrollLeft !== scrollLeft) {
+      scroller.scrollTo({ left: scrollLeft, top: scrollTop, behavior: "instant" })
+    }
+  }
+  document.addEventListener("scroll", keepScrollPosition, { capture: true, passive: true })
+
+  return () => {
+    document.removeEventListener("scroll", keepScrollPosition, { capture: true })
+    restoreBody()
   }
 }
 
@@ -193,6 +250,9 @@ export async function openCaseIds(caseIds: string[]): Promise<void> {
 }
 export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SHIPMENT_IDS", shipmentIds } satisfies OpenShipmentIdsMessage)
+}
+export async function openRemovalOrderIds(removalOrderIds: string[]): Promise<void> {
+  await requestBackground<OpenIdsResponse>({ type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds } satisfies OpenRemovalOrderIdsMessage)
 }
 export async function openSkuIds(skuIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SKU_IDS", skuIds } satisfies OpenSkuIdsMessage)
@@ -285,18 +345,24 @@ export async function generateReports(
   now = new Date(),
   currentStoreName?: string,
   onProgress?: (event: ReportProgressEvent) => void,
+  sections: readonly ReportSource[] = REPORT_SOURCES,
 ): Promise<GeneratedReport> {
   const unsubscribe = onProgress ? subscribeReportProgress(onProgress) : () => undefined
   const done = paletteLog.time("report.run")
   const sources: Partial<Record<ReportSource, LogData>> = {}
-  /** Resolves a source to its value, or to `fallback` after reporting the failure. */
-  const track = <T,>(source: ReportSource, request: Promise<T>, fallback: T, count: (value: T) => number) => {
+  /**
+   * Resolves a chosen source to its value, or to `fallback` after reporting the failure.
+   * A source that wasn't chosen resolves to `fallback` without a request.
+   */
+  const track = <T,>(source: ReportSource, request: () => Promise<T>, fallback: T, count: (value: T) => number) => {
+    if (!sections.includes(source)) return Promise.resolve(fallback)
     const startedAt = logNow()
     const elapsed = () => Math.round(logNow() - startedAt)
-    return request.then(
+    return request().then(
       (value) => {
-        sources[source] = { ms: elapsed(), count: count(value) }
-        onProgress?.({ source, status: "complete" })
+        const rows = count(value)
+        sources[source] = { ms: elapsed(), count: rows }
+        onProgress?.({ source, status: "complete", loaded: rows, total: rows })
         return value
       },
       (error: unknown) => {
@@ -313,19 +379,24 @@ export async function generateReports(
       currentStoreName !== undefined
         ? currentStoreName
         : (await getAccountsStatus()).currentStore?.name ?? ""
-    for (const source of REPORT_SOURCES) onProgress?.({ source, status: "active" })
+    for (const source of sections) onProgress?.({ source, status: "active" })
     const length = (items: readonly unknown[]) => items.length
     const [unfulfillable, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
       track(
         "unfulfillable",
-        fetchUnfulfillableFromBackground(),
+        fetchUnfulfillableFromBackground,
         { listings: [], nextRemovalOrderId: null },
         (value) => value.listings.length,
       ),
-      track("feedback", fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks"), [], length),
-      track("stranded", fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings"), [], length),
-      track("suppressed", fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings"), [], length),
-      track("shippingQueue", fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments"), [], length),
+      track("feedback", () => fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks"), [], length),
+      track("stranded", () => fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings"), [], length),
+      track("suppressed", () => fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings"), [], length),
+      track(
+        "shippingQueue",
+        () => fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments"),
+        [],
+        length,
+      ),
     ])
     const timed = Object.entries(sources) as Array<[ReportSource, LogData]>
     const slowest = timed.reduce<[ReportSource, LogData] | undefined>(
@@ -335,6 +406,7 @@ export async function generateReports(
     const report: GeneratedReport = {
       storeName,
       generatedAt: now,
+      sections,
       unfulfillableListings: unfulfillable.listings,
       nextRemovalOrderId: unfulfillable.nextRemovalOrderId,
       feedbacks,
@@ -344,6 +416,7 @@ export async function generateReports(
     }
     const warnings = reportWarnings(report)
     done({
+      sections: [...sections],
       sources,
       slowest: slowest?.[0],
       failed: timed.filter(([, data]) => data.error).map(([source]) => source),
@@ -406,6 +479,36 @@ export function mountCommandPalette({
   let openMode: PaletteMode = "commands"
   let previousFocus: HTMLElement | null = null
   let unlockDocumentScroll: (() => void) | null = null
+  let cancelPendingUnlock: (() => void) | null = null
+
+  const unlockNow = () => {
+    cancelPendingUnlock?.()
+    unlockDocumentScroll?.()
+    unlockDocumentScroll = null
+  }
+
+  // Radix keeps its own scroll lock mounted until the close animation ends. Unpinning body
+  // first would let its styles hide the scrollbar for a moment, so release both together.
+  const unlockAfterRadixScrollLock = () => {
+    const body = targetDocument.body
+    if (!unlockDocumentScroll || !body?.hasAttribute(RADIX_SCROLL_LOCK_ATTRIBUTE)) {
+      unlockNow()
+      return
+    }
+
+    const view = targetDocument.defaultView ?? window
+    const observer = new MutationObserver(() => {
+      if (!body.hasAttribute(RADIX_SCROLL_LOCK_ATTRIBUTE)) unlockNow()
+    })
+    // Fallback in case the close animation never finishes.
+    const timeout = view.setTimeout(unlockNow, 1000)
+    observer.observe(body, { attributes: true, attributeFilter: [RADIX_SCROLL_LOCK_ATTRIBUTE] })
+    cancelPendingUnlock = () => {
+      observer.disconnect()
+      view.clearTimeout(timeout)
+      cancelPendingUnlock = null
+    }
+  }
   let enabledFeatures: EnabledFeatures = DEFAULT_ENABLED_FEATURES
   let openGeneration = 0
   let firstOpenAssetsSettled = false
@@ -430,6 +533,7 @@ export function mountCommandPalette({
           open={isOpen}
           onOpenCaseIds={openCaseIds}
           onOpenShipmentIds={openShipmentIds}
+          onOpenRemovalOrderIds={openRemovalOrderIds}
           onOpenSkuIds={openSkuIds}
           onGetAccountsStatus={getAccountsStatus}
           onUnlockAccounts={unlockAccounts}
@@ -439,7 +543,7 @@ export function mountCommandPalette({
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
           onPrepareReports={prepareReports}
-          onGenerateReports={(storeName, onProgress) => generateReports(new Date(), storeName, onProgress)}
+          onGenerateReports={(storeName, onProgress, sections) => generateReports(new Date(), storeName, onProgress, sections)}
           onDownloadReport={(report, format) => downloadReport(report, format, targetDocument)}
           onOpenTimeOut={openTimeOut}
           onOpenChange={setOpen}
@@ -461,15 +565,16 @@ export function mountCommandPalette({
 
     if (nextOpen) {
       previousFocus = getDeepActiveElement(targetDocument)
-      unlockDocumentScroll = lockDocumentScroll(targetDocument)
+      applyPaletteRemScale(host, targetDocument)
+      // Reopened during the close animation: the page is still locked.
+      if (cancelPendingUnlock) cancelPendingUnlock()
+      else unlockDocumentScroll = lockDocumentScroll(targetDocument)
     } else {
-      unlockDocumentScroll?.()
-      unlockDocumentScroll = null
+      unlockAfterRadixScrollLock()
     }
     isOpen = nextOpen
     host.setAttribute(PALETTE_OPEN_ATTRIBUTE, String(nextOpen))
     host.style.pointerEvents = nextOpen ? "auto" : "none"
-    if (nextOpen) applyPaletteRemScale(host, targetDocument)
 
     const render = () => {
       if (generation !== openGeneration) return
@@ -529,8 +634,7 @@ export function mountCommandPalette({
     setOpen,
     destroy: () => {
       host.setAttribute(PALETTE_OPEN_ATTRIBUTE, "false")
-      unlockDocumentScroll?.()
-      unlockDocumentScroll = null
+      unlockNow()
       targetDocument.defaultView?.removeEventListener("keydown", onKeyDown, true)
       if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.removeListener(onRuntimeMessage)
       ;(targetDocument.defaultView as PasteGuardWindow | null)?.[

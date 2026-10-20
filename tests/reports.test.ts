@@ -55,6 +55,15 @@ describe("report workbook", () => {
     }
   })
 
+  it("leaves out the sheets of sections that weren't chosen", () => {
+    const names = (report: Parameters<typeof reportWorkbookSheets>[0]) =>
+      reportWorkbookSheets(report).map((sheet) => sheet.name)
+
+    expect(names({ sections: ["stranded", "shippingQueue"] })).toEqual(["Stranded", "Shipping Queue"])
+    expect(names({ sections: ["unfulfillable", "suppressed"] })).toEqual(["Unfulfillable", "Suppressed"])
+    expect(names({ sections: ["feedback"] })).toEqual(["Daily Tasks"])
+  })
+
   it("stacks Daily Tasks sections with Feedback Manager data and reserved titles", () => {
     const rows = dailyTasksSheetRows([
       {

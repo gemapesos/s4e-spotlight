@@ -28,7 +28,7 @@
   "options_page": "options.html",
   "web_accessible_resources": [
     {
-      "resources": ["geist-latin-wght-normal.woff2", "palette-app.js"],
+      "resources": ["geist-latin-wght-normal.woff2", "geist-mono-latin-wght-normal.woff2", "palette-app.js"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ],
