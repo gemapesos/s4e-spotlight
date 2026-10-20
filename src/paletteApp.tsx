@@ -108,6 +108,11 @@ export interface OpenShipmentIdsMessage {
   shipmentIds: string[]
 }
 
+export interface OpenRemovalOrderIdsMessage {
+  type: "OPEN_REMOVAL_ORDER_IDS"
+  removalOrderIds: string[]
+}
+
 export interface OpenSkuIdsMessage {
   type: "OPEN_SKU_IDS"
   skuIds: string[]
@@ -245,6 +250,9 @@ export async function openCaseIds(caseIds: string[]): Promise<void> {
 }
 export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SHIPMENT_IDS", shipmentIds } satisfies OpenShipmentIdsMessage)
+}
+export async function openRemovalOrderIds(removalOrderIds: string[]): Promise<void> {
+  await requestBackground<OpenIdsResponse>({ type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds } satisfies OpenRemovalOrderIdsMessage)
 }
 export async function openSkuIds(skuIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SKU_IDS", skuIds } satisfies OpenSkuIdsMessage)
@@ -525,6 +533,7 @@ export function mountCommandPalette({
           open={isOpen}
           onOpenCaseIds={openCaseIds}
           onOpenShipmentIds={openShipmentIds}
+          onOpenRemovalOrderIds={openRemovalOrderIds}
           onOpenSkuIds={openSkuIds}
           onGetAccountsStatus={getAccountsStatus}
           onUnlockAccounts={unlockAccounts}

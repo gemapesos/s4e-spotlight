@@ -57,12 +57,12 @@
   --radius-4xl: calc(var(--radius) * 2.6);
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-quad: cubic-bezier(0.4, 0, 1, 1);
-  --animate-dialog-in: s4e-dialog-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
-  --animate-dialog-out: s4e-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
-  --animate-overlay-in: s4e-overlay-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
-  --animate-overlay-out: s4e-overlay-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  --animate-dialog-in: s4e-dialog-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-dialog-out: s4e-dialog-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  --animate-overlay-in: s4e-overlay-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-overlay-out: s4e-overlay-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
   /* A screen change slides in from the side it came from; --surface-shift is set per swap. */
-  --animate-surface-in: s4e-screen-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-surface-in: s4e-screen-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
   --animate-check-in: s4e-check-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-download-in: s4e-surface-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
 
