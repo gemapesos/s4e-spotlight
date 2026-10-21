@@ -33,6 +33,30 @@ export interface EncryptedVault {
   ciphertext: string
 }
 
+export const SHARE_FILE_KIND = "s4e-spotlight-vault-share"
+export const SHARE_FILE_NAME = "s4e-spotlight-vault-share.json"
+export const SHARE_DECRYPT_ERROR = "Incorrect share password or damaged file."
+
+export interface SharedVaultFile {
+  kind: typeof SHARE_FILE_KIND
+  version: 1
+  iterations: number
+  salt: string
+  iv: string
+  ciphertext: string
+}
+
+export interface VaultMergeCounts {
+  credentials: number
+  stores: number
+}
+
+export interface VaultMergeResult {
+  vault: AccountVault
+  added: VaultMergeCounts
+  updated: VaultMergeCounts
+}
+
 export interface StoreIndexRecord {
   id: string
   name: string
@@ -40,6 +64,7 @@ export interface StoreIndexRecord {
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+const SHARED_ID_ERROR = /^Shared (credential|store) ids must be present and unique\.$/
 
 function asBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
@@ -148,6 +173,156 @@ export async function decryptVaultWithKey(
     throw new Error("The account vault has an unsupported format.")
   }
   return vault
+}
+
+function shareableVault(vault: AccountVault): AccountVault {
+  return {
+    version: 1,
+    credentials: vault.credentials.map(({ id, domain, password, otpAuthUri }) => ({ id, domain, password, otpAuthUri })),
+    stores: vault.stores.map(({ id, name, credentialId, storeUrl }) => ({ id, name, credentialId, storeUrl })),
+  }
+}
+
+function parseSharedVaultFile(file: unknown): SharedVaultFile {
+  if (!file || typeof file !== "object" || Array.isArray(file)) throw new Error("This file is not a shared vault.")
+  const record = file as Record<string, unknown>
+  if (record.kind !== SHARE_FILE_KIND || record.version !== 1) throw new Error("This file is not a shared vault.")
+  const { iterations, salt, iv, ciphertext } = record
+  if (
+    typeof iterations !== "number" ||
+    !Number.isInteger(iterations) ||
+    iterations < 1 ||
+    iterations > PBKDF2_ITERATIONS ||
+    typeof salt !== "string" ||
+    typeof iv !== "string" ||
+    typeof ciphertext !== "string" ||
+    !salt ||
+    !iv ||
+    !ciphertext
+  ) {
+    throw new Error(SHARE_DECRYPT_ERROR)
+  }
+  return { kind: SHARE_FILE_KIND, version: 1, iterations, salt, iv, ciphertext }
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key]
+  return typeof value === "string" ? value : undefined
+}
+
+function assertUniqueIds(ids: string[], label: string): void {
+  const seen = new Set<string>()
+  for (const id of ids) {
+    if (!id || seen.has(id)) throw new Error(`Shared ${label} ids must be present and unique.`)
+    seen.add(id)
+  }
+}
+
+function normalizeSharedVault(vault: AccountVault): AccountVault {
+  const credentials = vault.credentials.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(SHARE_DECRYPT_ERROR)
+    const record = item as unknown as Record<string, unknown>
+    const id = stringField(record, "id")
+    const domain = stringField(record, "domain")
+    const password = stringField(record, "password")
+    const otpAuthUri = stringField(record, "otpAuthUri")
+    if (id === undefined || domain === undefined || password === undefined || otpAuthUri === undefined) {
+      throw new Error(SHARE_DECRYPT_ERROR)
+    }
+    return { id, domain, password, otpAuthUri }
+  })
+  const stores = vault.stores.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(SHARE_DECRYPT_ERROR)
+    const record = item as unknown as Record<string, unknown>
+    const id = stringField(record, "id")
+    const name = stringField(record, "name")
+    const credentialId = stringField(record, "credentialId")
+    const storeUrl = stringField(record, "storeUrl")
+    if (id === undefined || name === undefined || credentialId === undefined || storeUrl === undefined) {
+      throw new Error(SHARE_DECRYPT_ERROR)
+    }
+    return { id, name, credentialId, storeUrl }
+  })
+  assertUniqueIds(credentials.map(({ id }) => id), "credential")
+  assertUniqueIds(stores.map(({ id }) => id), "store")
+  return { version: 1, credentials, stores }
+}
+
+export async function encryptSharedVault(
+  vault: AccountVault,
+  sharePassword: string,
+  iterations = PBKDF2_ITERATIONS,
+): Promise<SharedVaultFile> {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const keyBytes = await deriveVaultKey(sharePassword, salt, iterations)
+  const envelope = await encryptVaultWithKey(shareableVault(vault), keyBytes, salt, iterations)
+  return {
+    kind: SHARE_FILE_KIND,
+    version: 1,
+    iterations: envelope.iterations,
+    salt: envelope.salt,
+    iv: envelope.iv,
+    ciphertext: envelope.ciphertext,
+  }
+}
+
+export async function decryptSharedVault(file: unknown, sharePassword: string): Promise<AccountVault> {
+  const parsed = parseSharedVaultFile(file)
+  try {
+    const { vault } = await decryptVault(parsed, sharePassword)
+    return normalizeSharedVault(vault)
+  } catch (error) {
+    if (error instanceof Error && SHARED_ID_ERROR.test(error.message)) throw error
+    throw new Error(SHARE_DECRYPT_ERROR)
+  }
+}
+
+function rejectLabelClash(records: ReadonlyArray<{ id: string; label: string }>, incomingId: string, label: string, message: string): void {
+  const normalized = label.trim().toLowerCase()
+  if (records.some((item) => item.id !== incomingId && item.label.trim().toLowerCase() === normalized)) throw new Error(message)
+}
+
+export function mergeVaults(current: AccountVault, incoming: AccountVault): VaultMergeResult {
+  const credentials = current.credentials.map((item) => ({ ...item }))
+  const stores = current.stores.map((item) => ({ ...item }))
+  const added: VaultMergeCounts = { credentials: 0, stores: 0 }
+  const updated: VaultMergeCounts = { credentials: 0, stores: 0 }
+
+  for (const incomingCredential of incoming.credentials) {
+    rejectLabelClash(
+      credentials.map(({ id, domain }) => ({ id, label: domain })),
+      incomingCredential.id,
+      incomingCredential.domain,
+      `A different credential already uses “${incomingCredential.domain.trim()}”.`,
+    )
+    const index = credentials.findIndex(({ id }) => id === incomingCredential.id)
+    if (index === -1) {
+      credentials.push({ ...incomingCredential })
+      added.credentials += 1
+    } else {
+      credentials[index] = { ...incomingCredential }
+      updated.credentials += 1
+    }
+  }
+
+  for (const incomingStore of incoming.stores) {
+    rejectLabelClash(
+      stores.map(({ id, name }) => ({ id, label: name })),
+      incomingStore.id,
+      incomingStore.name,
+      `A different store already uses the name “${incomingStore.name.trim()}”.`,
+    )
+    const index = stores.findIndex(({ id }) => id === incomingStore.id)
+    if (index === -1) {
+      stores.push({ ...incomingStore })
+      added.stores += 1
+    } else {
+      stores[index] = { ...incomingStore }
+      updated.stores += 1
+    }
+  }
+
+  return { vault: { version: 1, credentials, stores }, added, updated }
 }
 
 export function serializeKey(keyBytes: Uint8Array): string {

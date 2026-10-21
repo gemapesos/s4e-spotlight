@@ -45,7 +45,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { AccountVault, CredentialRecord, StoreRecord } from "@/lib/accounts"
+import { SHARE_FILE_NAME, type AccountVault, type CredentialRecord, type SharedVaultFile, type StoreRecord, type VaultMergeCounts } from "@/lib/accounts"
 import { errorMessage } from "@/lib/log"
 import { cn } from "@/lib/utils"
 import { api } from "@/options/api"
@@ -55,6 +55,50 @@ type DeleteTarget = { kind: "store" | "credential"; id: string; name: string }
 type Notice = { message: string; error: boolean }
 
 const RESET_CONFIRMATION = "RESET"
+
+function formatCount(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`
+}
+
+function formatChange(credentials: number, stores: number): string | undefined {
+  const parts = [
+    credentials ? formatCount(credentials, "credential") : "",
+    stores ? formatCount(stores, "store") : "",
+  ].filter(Boolean)
+  return parts.length ? parts.join(" and ") : undefined
+}
+
+function importSummary(added: VaultMergeCounts, updated: VaultMergeCounts): string {
+  const addedText = formatChange(added.credentials, added.stores)
+  const updatedText = formatChange(updated.credentials, updated.stores)
+  const parts = [
+    addedText ? `Added ${addedText}` : "",
+    updatedText ? `Updated ${updatedText}` : "",
+  ].filter(Boolean)
+  return parts.length ? `${parts.join(". ")}.` : "Shared vault imported. No accounts changed."
+}
+
+function downloadShareFile(file: SharedVaultFile, targetDocument: Document = document): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }))
+  const anchor = targetDocument.createElement("a")
+  anchor.href = url
+  anchor.download = SHARE_FILE_NAME
+  targetDocument.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1_000)
+}
+
+async function readShareFile(file: File): Promise<unknown> {
+  try {
+    const parsed = JSON.parse(await file.text()) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("This file is not a shared vault.")
+    return parsed
+  } catch (error) {
+    if (error instanceof Error && error.message === "This file is not a shared vault.") throw error
+    throw new Error("This file is not a shared vault.")
+  }
+}
 
 function EmptyState({ children }: { children: React.ReactNode }) {
   return (
@@ -101,6 +145,10 @@ export function OptionsApp() {
   const [storeOpen, setStoreOpen] = React.useState(false)
   const [editingStore, setEditingStore] = React.useState<StoreRecord | null>(null)
   const [passwordOpen, setPasswordOpen] = React.useState(false)
+  const [exportOpen, setExportOpen] = React.useState(false)
+  const [importOpen, setImportOpen] = React.useState(false)
+  const [exportFormKey, setExportFormKey] = React.useState(0)
+  const [importFormKey, setImportFormKey] = React.useState(0)
   const [deleteTarget, setDeleteTarget] = React.useState<DeleteTarget | null>(null)
   const [resetOpen, setResetOpen] = React.useState(false)
   const [resetConfirmation, setResetConfirmation] = React.useState("")
@@ -118,14 +166,13 @@ export function OptionsApp() {
    * Runs one vault action at a time (key derivation is slow enough to invite double submits)
    * and resolves whether it succeeded.
    */
-  const runBusy = React.useCallback(async (action: () => Promise<unknown>, failure: string): Promise<boolean> => {
+  const runBusy = React.useCallback(async <T,>(action: () => Promise<T>, failure: string): Promise<T | undefined> => {
     setBusy(true)
     try {
-      await action()
-      return true
+      return await action()
     } catch (error) {
       showNotice(errorMessage(error, failure), true)
-      return false
+      return undefined
     } finally {
       setBusy(false)
     }
@@ -226,6 +273,7 @@ export function OptionsApp() {
       await api({ type: "ACCOUNTS_RESET" })
       setResetOpen(false)
       setResetConfirmation("")
+      return true
     }, "Could not reset the vault.")
     if (reset) await load()
   }
@@ -281,6 +329,93 @@ export function OptionsApp() {
     }, "Could not change the master password.")
   }
 
+  function closeExport(open: boolean) {
+    setExportOpen(open)
+    if (!open) setExportFormKey((key) => key + 1)
+  }
+
+  function closeImport(open: boolean) {
+    setImportOpen(open)
+    if (!open) setImportFormKey((key) => key + 1)
+  }
+
+  function selectedShareFile(form: HTMLFormElement): File | undefined {
+    const field = form.elements.namedItem("file")
+    const selected = field instanceof HTMLInputElement ? field.files?.[0] : undefined
+    return selected?.name ? selected : undefined
+  }
+
+  async function onExportShare(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    const form = new FormData(event.currentTarget)
+    const password = String(form.get("sharePassword") ?? "")
+    if (password !== String(form.get("confirm") ?? "")) return showNotice("Share passwords do not match.", true)
+    const response = await runBusy(
+      () => api<{ ok: true; file: SharedVaultFile }>({ type: "ACCOUNTS_EXPORT_SHARE", sharePassword: password }),
+      "Could not export the vault.",
+    )
+    if (!response) return
+    downloadShareFile(response.file)
+    closeExport(false)
+    showNotice("Vault share file downloaded. Give the share password to the other person separately from the file.")
+  }
+
+  async function onImportShare(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    const selected = selectedShareFile(event.currentTarget)
+    if (!selected) return showNotice("Choose a share file.", true)
+    const password = String(new FormData(event.currentTarget).get("sharePassword") ?? "")
+    let file: unknown
+    try {
+      file = await readShareFile(selected)
+    } catch (error) {
+      showNotice(errorMessage(error, "This file is not a shared vault."), true)
+      return
+    }
+    const response = await runBusy(
+      () => api<{ ok: true; vault: AccountVault; added: VaultMergeCounts; updated: VaultMergeCounts }>({
+        type: "ACCOUNTS_IMPORT_SHARE",
+        file,
+        sharePassword: password,
+      }),
+      "Could not import the shared vault.",
+    )
+    if (!response) return
+    setVault(response.vault)
+    setPage("editor")
+    closeImport(false)
+    showNotice(importSummary(response.added, response.updated))
+  }
+
+  async function onCreateFromShare(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    const form = new FormData(event.currentTarget)
+    const selected = selectedShareFile(event.currentTarget)
+    if (!selected) return showNotice("Choose a share file.", true)
+    const masterPassword = String(form.get("password") ?? "")
+    if (masterPassword !== String(form.get("confirm") ?? "")) return showNotice("Master passwords do not match.", true)
+    let file: unknown
+    try {
+      file = await readShareFile(selected)
+    } catch (error) {
+      showNotice(errorMessage(error, "This file is not a shared vault."), true)
+      return
+    }
+    const created = await runBusy(
+      () => api({
+        type: "ACCOUNTS_CREATE_FROM_SHARE",
+        file,
+        sharePassword: String(form.get("sharePassword") ?? ""),
+        masterPassword,
+      }),
+      "Could not import the shared vault.",
+    )
+    if (created) await load()
+  }
+
   async function onConfirmDelete() {
     if (!vault || !deleteTarget) return
     const next = deleteTarget.kind === "store"
@@ -324,27 +459,58 @@ export function OptionsApp() {
         ) : null}
 
         {page === "create" ? (
-          <Card className="max-w-xl">
-            <CardHeader>
-              <CardTitle>Create encrypted vault</CardTitle>
-              <CardDescription>Your master password encrypts every account locally. It cannot be recovered.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="grid gap-4" onSubmit={(event) => void onCreate(event)}>
-                <div className="grid gap-2">
-                  <Label htmlFor="create-password">Master password</Label>
-                  <Input autoComplete="new-password" id="create-password" minLength={10} name="password" required type="password" />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="create-confirm">Confirm master password</Label>
-                  <Input autoComplete="new-password" id="create-confirm" minLength={10} name="confirm" required type="password" />
-                </div>
-                <div>
-                  <Button disabled={busy} type="submit">{busy ? "Creating…" : "Create vault"}</Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
+          <div className="grid max-w-xl gap-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Create encrypted vault</CardTitle>
+                <CardDescription>Your master password encrypts every account locally. It cannot be recovered.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form className="grid gap-4" onSubmit={(event) => void onCreate(event)}>
+                  <div className="grid gap-2">
+                    <Label htmlFor="create-password">Master password</Label>
+                    <Input autoComplete="new-password" id="create-password" minLength={10} name="password" required type="password" />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="create-confirm">Confirm master password</Label>
+                    <Input autoComplete="new-password" id="create-confirm" minLength={10} name="confirm" required type="password" />
+                  </div>
+                  <div>
+                    <Button disabled={busy} type="submit">{busy ? "Creating…" : "Create vault"}</Button>
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Import a shared vault</CardTitle>
+                <CardDescription>Use a share file from someone else. The share password decrypts the file. Your new master password protects it on this device.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form className="grid gap-4" onSubmit={(event) => void onCreateFromShare(event)}>
+                  <div className="grid gap-2">
+                    <Label htmlFor="create-share-file">Share file</Label>
+                    <Input accept=".json,application/json" id="create-share-file" name="file" type="file" />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="create-share-password">Share password</Label>
+                    <Input autoComplete="off" id="create-share-password" minLength={10} name="sharePassword" required type="password" />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="create-share-master">New master password</Label>
+                    <Input autoComplete="new-password" id="create-share-master" minLength={10} name="password" required type="password" />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="create-share-master-confirm">Confirm master password</Label>
+                    <Input autoComplete="new-password" id="create-share-master-confirm" minLength={10} name="confirm" required type="password" />
+                  </div>
+                  <div>
+                    <Button disabled={busy} type="submit">{busy ? "Importing…" : "Import vault"}</Button>
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
+          </div>
         ) : null}
 
         {page === "locked" ? (
@@ -386,7 +552,22 @@ export function OptionsApp() {
         ) : null}
 
         {page === "editor" && vault ? (
-          <div className="grid gap-6 lg:grid-cols-2">
+          <div className="grid gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Share vault</CardTitle>
+                <CardDescription>
+                  Export an encrypted copy. The other person needs this extension, the file, and the share password. The share password is separate from your master password and is not saved.
+                </CardDescription>
+                <CardAction>
+                  <div className="flex gap-2">
+                    <Button disabled={busy} onClick={() => setExportOpen(true)} type="button" variant="outline">Export</Button>
+                    <Button disabled={busy} onClick={() => setImportOpen(true)} type="button">Import</Button>
+                  </div>
+                </CardAction>
+              </CardHeader>
+            </Card>
+            <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
                 <CardTitle>Credentials</CardTitle>
@@ -463,6 +644,7 @@ export function OptionsApp() {
                 })}
               </CardContent>
             </Card>
+            </div>
           </div>
         ) : null}
       </main>
@@ -547,6 +729,54 @@ export function OptionsApp() {
             <DialogFooter>
               <Button onClick={() => setStoreOpen(false)} type="button" variant="outline">Cancel</Button>
               <Button disabled={busy} type="submit">Save store</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog onOpenChange={closeExport} open={exportOpen}>
+        <DialogContent>
+          <form className="grid gap-4" key={exportFormKey} onSubmit={(event) => void onExportShare(event)}>
+            <DialogHeader>
+              <DialogTitle>Export vault</DialogTitle>
+              <DialogDescription>
+                Choose a share password of at least 10 characters. Give it to the other person separately from the file. It is not saved and cannot be recovered.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <Label htmlFor="export-share-password">Share password</Label>
+              <Input autoComplete="off" id="export-share-password" minLength={10} name="sharePassword" required type="password" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="export-share-confirm">Confirm share password</Label>
+              <Input autoComplete="off" id="export-share-confirm" minLength={10} name="confirm" required type="password" />
+            </div>
+            <DialogFooter>
+              <Button onClick={() => closeExport(false)} type="button" variant="outline">Cancel</Button>
+              <Button disabled={busy} type="submit">{busy ? "Exporting…" : "Export"}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog onOpenChange={closeImport} open={importOpen}>
+        <DialogContent>
+          <form className="grid gap-4" key={importFormKey} onSubmit={(event) => void onImportShare(event)}>
+            <DialogHeader>
+              <DialogTitle>Import vault</DialogTitle>
+              <DialogDescription>Accounts already on this device stay. Matching shared accounts are updated.</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <Label htmlFor="import-share-file">Share file</Label>
+              <Input accept=".json,application/json" id="import-share-file" name="file" type="file" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="import-share-password">Share password</Label>
+              <Input autoComplete="off" id="import-share-password" minLength={10} name="sharePassword" required type="password" />
+            </div>
+            <DialogFooter>
+              <Button onClick={() => closeImport(false)} type="button" variant="outline">Cancel</Button>
+              <Button disabled={busy} type="submit">{busy ? "Importing…" : "Import"}</Button>
             </DialogFooter>
           </form>
         </DialogContent>
