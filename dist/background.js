@@ -1,4 +1,4 @@
-import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, SESSION_KEY_STORAGE_KEY, STORE_INDEX_KEY, VAULT_STORAGE_KEY, decryptVault, decryptVaultWithKey, deserializeKey, emptyVault, encryptVault, encryptVaultWithKey, generateTotp, parseOtpAuthUri, publicStoreIndex, serializeKey, validateStoreUrl } from "./lib/accounts.js";
+import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, SESSION_KEY_STORAGE_KEY, STORE_INDEX_KEY, VAULT_STORAGE_KEY, decryptSharedVault, decryptVault, decryptVaultWithKey, deserializeKey, emptyVault, encryptSharedVault, encryptVault, encryptVaultWithKey, mergeVaults, generateTotp, parseOtpAuthUri, publicStoreIndex, serializeKey, validateStoreUrl } from "./lib/accounts.js";
 import { createLogger, createLogRunId, createLogStore, describeError, errorMessage, LOG_ENTRIES_MESSAGE, LOGS_CLEAR_MESSAGE, LOGS_GET_MESSAGE, sanitizeLogEntries, setLogSink } from "./lib/log.js";
 import { DEFAULT_TIME_OUT_FORM_VALUES, loadSettings, TIME_OUT_FORM_BASE_URL, TIME_OUT_FORM_ENTRY_IDS } from "./lib/settings.js";
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=";
@@ -715,6 +715,10 @@ function requireMasterPassword(value) {
 	if (typeof value !== "string" || value.length < 10) throw new Error("Use a master password of at least 10 characters.");
 	return value;
 }
+function requireSharePassword(value) {
+	if (typeof value !== "string" || value.length < 10) throw new Error("Use a share password of at least 10 characters.");
+	return value;
+}
 /** Starts a switch to a store on another credential: sign out in a Seller Central tab, then sign in. */
 async function startSignInSwitch(store, sender) {
 	const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN });
@@ -833,6 +837,60 @@ export async function handleAccountsMessage(message, sender) {
 			const vault = message.vault;
 			await saveVault(vault, current.envelope, current.key);
 			log.info("vault.save", {
+				stores: vault.stores.length,
+				credentials: vault.credentials.length
+			});
+			return { ok: true };
+		}
+		case "ACCOUNTS_EXPORT_SHARE": {
+			const { vault } = await getUnlockedVault();
+			const sharePassword = requireSharePassword(message.sharePassword);
+			const file = await encryptSharedVault(vault, sharePassword);
+			log.info("vault.share.export", {
+				stores: vault.stores.length,
+				credentials: vault.credentials.length
+			});
+			return {
+				ok: true,
+				file
+			};
+		}
+		case "ACCOUNTS_IMPORT_SHARE": {
+			const current = await getUnlockedVault();
+			const sharePassword = requireSharePassword(message.sharePassword);
+			const incoming = await decryptSharedVault(message.file, sharePassword);
+			validateVault(incoming);
+			const merged = mergeVaults(current.vault, incoming);
+			validateVault(merged.vault);
+			await saveVault(merged.vault, current.envelope, current.key);
+			log.info("vault.share.import", {
+				addedCredentials: merged.added.credentials,
+				addedStores: merged.added.stores,
+				updatedCredentials: merged.updated.credentials,
+				updatedStores: merged.updated.stores
+			});
+			return {
+				ok: true,
+				vault: merged.vault,
+				added: merged.added,
+				updated: merged.updated
+			};
+		}
+		case "ACCOUNTS_CREATE_FROM_SHARE": {
+			if (await getEnvelope()) throw new Error("The account vault already exists.");
+			const sharePassword = requireSharePassword(message.sharePassword);
+			const masterPassword = requireMasterPassword(message.masterPassword);
+			const vault = await decryptSharedVault(message.file, sharePassword);
+			validateVault(vault);
+			const done = log.time("vault.share.create");
+			const { envelope, keyBytes } = await encryptVault(vault, masterPassword);
+			await chrome.storage.local.set({
+				[VAULT_STORAGE_KEY]: envelope,
+				[STORE_INDEX_KEY]: publicStoreIndex(vault)
+			});
+			await chrome.storage.local.remove(CURRENT_STORE_KEY);
+			await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) });
+			done({
 				stores: vault.stores.length,
 				credentials: vault.credentials.length
 			});
