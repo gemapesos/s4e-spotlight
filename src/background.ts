@@ -1092,9 +1092,20 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
   }
 }
 
-async function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
-  await setJobStage(job, "signin")
-  await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
+const logoutExits = new Map<string, Promise<void>>()
+
+/** The tab listener and the content script both leave logout; share one navigation so neither cancels the other ("Navigation rejected"). */
+function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
+  let exit = logoutExits.get(job.id)
+  if (!exit) {
+    exit = (async () => {
+      await setJobStage(job, "signin")
+      await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
+    })()
+    exit.catch(() => logoutExits.delete(job.id))
+    logoutExits.set(job.id, exit)
+  }
+  return exit
 }
 
 export async function handleAccountTabUpdated(

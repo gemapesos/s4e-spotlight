@@ -8,7 +8,7 @@ function storageArea(values: Record<string, unknown>) {
   return {
     get: vi.fn(async (keys: string | string[]) => {
       const names = Array.isArray(keys) ? keys : [keys]
-      return Object.fromEntries(names.filter((key) => key in values).map((key) => [key, values[key]]))
+      return Object.fromEntries(names.filter((key) => key in values).map((key) => [key, structuredClone(values[key])]))
     }),
     set: vi.fn(async (next: Record<string, unknown>) => Object.assign(values, next)),
     remove: vi.fn(async (keys: string | string[]) => { for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key] }),
@@ -283,6 +283,20 @@ describe("Accounts background workflow", () => {
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)).resolves.toEqual({ ok: true })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin" })
     expect(update).toHaveBeenCalledWith(91, { url: SIGN_IN_URL })
+  })
+
+  it("navigates to sign-in once when the tab listener and content script leave logout together", async () => {
+    const job = await createActiveJob()
+    update.mockClear()
+    const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2Fsign-out" }
+
+    await Promise.all([
+      handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: sender.url } as chrome.tabs.Tab),
+      expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)).resolves.toEqual({ ok: true }),
+    ])
+
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin" })
+    expect(update).toHaveBeenCalledTimes(1)
   })
 
   async function createActiveJob(): Promise<{ id: string }> {
