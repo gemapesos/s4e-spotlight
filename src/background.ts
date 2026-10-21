@@ -4,12 +4,15 @@ import {
   SESSION_KEY_STORAGE_KEY,
   STORE_INDEX_KEY,
   VAULT_STORAGE_KEY,
+  decryptSharedVault,
   decryptVault,
   decryptVaultWithKey,
   deserializeKey,
   emptyVault,
+  encryptSharedVault,
   encryptVault,
   encryptVaultWithKey,
+  mergeVaults,
   generateTotp,
   parseOtpAuthUri,
   publicStoreIndex,
@@ -809,6 +812,11 @@ function requireMasterPassword(value: unknown): string {
   return value
 }
 
+function requireSharePassword(value: unknown): string {
+  if (typeof value !== "string" || value.length < 10) throw new Error("Use a share password of at least 10 characters.")
+  return value
+}
+
 /** Starts a switch to a store on another credential: sign out in a Seller Central tab, then sign in. */
 async function startSignInSwitch(store: StoreRecord, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
   const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
@@ -910,6 +918,43 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       const vault = message.vault as AccountVault
       await saveVault(vault, current.envelope, current.key)
       log.info("vault.save", { stores: vault.stores.length, credentials: vault.credentials.length })
+      return { ok: true }
+    }
+    case "ACCOUNTS_EXPORT_SHARE": {
+      const { vault } = await getUnlockedVault()
+      const sharePassword = requireSharePassword(message.sharePassword)
+      const file = await encryptSharedVault(vault, sharePassword)
+      log.info("vault.share.export", { stores: vault.stores.length, credentials: vault.credentials.length })
+      return { ok: true, file }
+    }
+    case "ACCOUNTS_IMPORT_SHARE": {
+      const current = await getUnlockedVault()
+      const sharePassword = requireSharePassword(message.sharePassword)
+      const incoming = await decryptSharedVault(message.file, sharePassword)
+      validateVault(incoming)
+      const merged = mergeVaults(current.vault, incoming)
+      validateVault(merged.vault)
+      await saveVault(merged.vault, current.envelope, current.key)
+      log.info("vault.share.import", {
+        addedCredentials: merged.added.credentials,
+        addedStores: merged.added.stores,
+        updatedCredentials: merged.updated.credentials,
+        updatedStores: merged.updated.stores,
+      })
+      return { ok: true, vault: merged.vault, added: merged.added, updated: merged.updated }
+    }
+    case "ACCOUNTS_CREATE_FROM_SHARE": {
+      if (await getEnvelope()) throw new Error("The account vault already exists.")
+      const sharePassword = requireSharePassword(message.sharePassword)
+      const masterPassword = requireMasterPassword(message.masterPassword)
+      const vault = await decryptSharedVault(message.file, sharePassword)
+      validateVault(vault)
+      const done = log.time("vault.share.create")
+      const { envelope, keyBytes } = await encryptVault(vault, masterPassword)
+      await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope, [STORE_INDEX_KEY]: publicStoreIndex(vault) })
+      await chrome.storage.local.remove(CURRENT_STORE_KEY)
+      await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
+      done({ stores: vault.stores.length, credentials: vault.credentials.length })
       return { ok: true }
     }
     case "ACCOUNTS_CHANGE_MASTER_PASSWORD": {

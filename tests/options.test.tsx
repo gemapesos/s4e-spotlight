@@ -89,4 +89,100 @@ describe("accounts options page", () => {
 
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_RESET" }))
   })
+
+  it("sends the share password only after the export dialog confirms it", async () => {
+    const shareFile = { kind: "s4e-spotlight-vault-share", version: 1, iterations: 1_000, salt: "salt", iv: "iv", ciphertext: "ciphertext" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: true }
+      if (message.type === "ACCOUNTS_GET_VAULT") return { ok: true, vault }
+      if (message.type === "ACCOUNTS_EXPORT_SHARE") return { ok: true, file: shareFile }
+      return { ok: true }
+    })
+    const createObjectURL = vi.fn().mockReturnValue("blob:share")
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      expect(this.download).toBe("s4e-spotlight-vault-share.json")
+    })
+    await renderOptions(sendMessage)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole("button", { name: "Export" }))
+    const dialog = screen.getByRole("dialog", { name: "Export vault" })
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNTS_EXPORT_SHARE" }))
+    await user.type(within(dialog).getByLabelText("Share password"), "share-password")
+    await user.type(within(dialog).getByLabelText("Confirm share password"), "other-password")
+    await user.click(within(dialog).getByRole("button", { name: "Export" }))
+    expect(screen.getByRole("alert", { hidden: true })).toHaveTextContent("Share passwords do not match.")
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNTS_EXPORT_SHARE" }))
+
+    await user.clear(within(dialog).getByLabelText("Confirm share password"))
+    await user.type(within(dialog).getByLabelText("Confirm share password"), "share-password")
+    await user.click(within(dialog).getByRole("button", { name: "Export" }))
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_EXPORT_SHARE", sharePassword: "share-password" }))
+    expect(createObjectURL).toHaveBeenCalledOnce()
+    expect(click).toHaveBeenCalledOnce()
+    const blob = createObjectURL.mock.calls[0][0] as Blob
+    await expect(blob.text()).resolves.toContain("s4e-spotlight-vault-share")
+  })
+
+  it("sends the selected share file and share password on import", async () => {
+    const share = { kind: "s4e-spotlight-vault-share", version: 1, iterations: 1_000, salt: "salt", iv: "iv", ciphertext: "ciphertext" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: true }
+      if (message.type === "ACCOUNTS_GET_VAULT") return { ok: true, vault }
+      if (message.type === "ACCOUNTS_IMPORT_SHARE") {
+        return { ok: true, vault, added: { credentials: 1, stores: 0 }, updated: { credentials: 0, stores: 1 } }
+      }
+      return { ok: true }
+    })
+    await renderOptions(sendMessage)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole("button", { name: "Import" }))
+    const dialog = screen.getByRole("dialog", { name: "Import vault" })
+    const file = new File([JSON.stringify(share)], "s4e-spotlight-vault-share.json", { type: "application/json" })
+    await user.upload(within(dialog).getByLabelText("Share file"), file)
+    await user.type(within(dialog).getByLabelText("Share password"), "share-password")
+    await user.click(within(dialog).getByRole("button", { name: "Import" }))
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+      type: "ACCOUNTS_IMPORT_SHARE",
+      file: share,
+      sharePassword: "share-password",
+    }))
+    expect(await screen.findByRole("status")).toHaveTextContent("Added 1 credential. Updated 1 store.")
+  })
+
+  it("creates a vault from a share file before a master password exists", async () => {
+    const share = { kind: "s4e-spotlight-vault-share", version: 1, iterations: 1_000, salt: "salt", iv: "iv", ciphertext: "ciphertext" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: false }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    render(<OptionsApp />)
+    const user = userEvent.setup()
+    const form = (await screen.findByRole("button", { name: "Import vault" })).closest("form")
+    if (!form) throw new Error("Import form was not rendered.")
+
+    await user.upload(within(form).getByLabelText("Share file"), new File([JSON.stringify(share)], "share.json", { type: "application/json" }))
+    await user.type(within(form).getByLabelText("Share password"), "share-password")
+    await user.type(within(form).getByLabelText("New master password"), "a strong master password")
+    await user.type(within(form).getByLabelText("Confirm master password"), "different master password")
+    await user.click(within(form).getByRole("button", { name: "Import vault" }))
+    expect(screen.getByRole("alert")).toHaveTextContent("Master passwords do not match.")
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNTS_CREATE_FROM_SHARE" }))
+
+    await user.clear(within(form).getByLabelText("Confirm master password"))
+    await user.type(within(form).getByLabelText("Confirm master password"), "a strong master password")
+    await user.click(within(form).getByRole("button", { name: "Import vault" }))
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+      type: "ACCOUNTS_CREATE_FROM_SHARE",
+      file: share,
+      sharePassword: "share-password",
+      masterPassword: "a strong master password",
+    }))
+  })
 })

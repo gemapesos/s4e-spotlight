@@ -2,7 +2,7 @@ import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
-import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, STORE_INDEX_KEY, type AccountVault } from "../src/lib/accounts"
+import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, decryptSharedVault, decryptVault, encryptSharedVault, SHARE_FILE_KIND, STORE_INDEX_KEY, VAULT_STORAGE_KEY, type AccountVault } from "../src/lib/accounts"
 
 function storageArea(values: Record<string, unknown>) {
   return {
@@ -77,6 +77,79 @@ describe("Accounts background workflow", () => {
     await expect(handleAccountsMessage({ type: "ACCOUNTS_UNLOCK", masterPassword: "wrong master password" }, {})).rejects.toThrow(/incorrect/i)
     await handleAccountsMessage({ type: "ACCOUNTS_UNLOCK", masterPassword: "a strong master password" }, {})
     expect((await handleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, {}) as any).vault).toEqual(vault)
+  })
+
+  it("exports a share file only while the vault is unlocked", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const vault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [{ id: "store", name: "Example Outdoors", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=test" }],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
+    await handleAccountsMessage({ type: "ACCOUNTS_LOCK" }, {})
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_EXPORT_SHARE", sharePassword: "share-password" }, {})).rejects.toThrow(/locked/i)
+
+    await handleAccountsMessage({ type: "ACCOUNTS_UNLOCK", masterPassword: "a strong master password" }, {})
+    const exported = await handleAccountsMessage({ type: "ACCOUNTS_EXPORT_SHARE", sharePassword: "share-password" }, {}) as any
+    expect(exported.file.kind).toBe(SHARE_FILE_KIND)
+    expect(JSON.stringify(exported.file)).not.toContain("private-password")
+    expect(await decryptSharedVault(exported.file, "share-password")).toEqual(vault)
+    await expect(decryptSharedVault(exported.file, "a strong master password")).rejects.toThrow(/share password or damaged/i)
+  })
+
+  it("imports a share into the recipient vault under the master password", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const localVault: AccountVault = {
+      version: 1,
+      credentials: [{ id: "local-credential", domain: "local@example.test", password: "local-password", otpAuthUri: "otpauth://totp/Local?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [{ id: "local-store", name: "Local Store", credentialId: "local-credential", storeUrl: "https://sellercentral.amazon.com/home?store=local" }],
+    }
+    await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault: localVault }, {})
+    const incoming: AccountVault = {
+      version: 1,
+      credentials: [{ id: "shared-credential", domain: "shared@example.test", password: "shared-password", otpAuthUri: "otpauth://totp/Shared?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [{ id: "shared-store", name: "Shared Store", credentialId: "shared-credential", storeUrl: "https://sellercentral.amazon.com/home?store=shared" }],
+    }
+    const file = await encryptSharedVault(incoming, "share-password", 1_000)
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_IMPORT_SHARE", file, sharePassword: "wrong-password" }, {})).rejects.toThrow(/share password or damaged/i)
+    expect((await handleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, {}) as any).vault).toEqual(localVault)
+
+    const imported = await handleAccountsMessage({ type: "ACCOUNTS_IMPORT_SHARE", file, sharePassword: "share-password" }, {}) as any
+    expect(imported.added).toEqual({ credentials: 1, stores: 1 })
+    const merged = (await handleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, {}) as any).vault as AccountVault
+    expect(merged.credentials.map(({ id }) => id)).toEqual(["local-credential", "shared-credential"])
+    expect(merged.stores.map(({ id }) => id)).toEqual(["local-store", "shared-store"])
+    expect(JSON.stringify(local[VAULT_STORAGE_KEY])).not.toContain("shared-password")
+    await expect(decryptVault(local[VAULT_STORAGE_KEY] as never, "share-password")).rejects.toThrow()
+    expect((await decryptVault(local[VAULT_STORAGE_KEY] as never, "a strong master password")).vault).toEqual(merged)
+  })
+
+  it("refuses to create a vault from a share when one already exists", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+    const file = await encryptSharedVault({
+      version: 1,
+      credentials: [{ id: "shared-credential", domain: "shared@example.test", password: "shared-password", otpAuthUri: "otpauth://totp/Shared?secret=JBSWY3DPEHPK3PXP" }],
+      stores: [],
+    }, "share-password", 1_000)
+    await expect(handleAccountsMessage({
+      type: "ACCOUNTS_CREATE_FROM_SHARE",
+      file,
+      sharePassword: "share-password",
+      masterPassword: "another master password",
+    }, {})).rejects.toThrow(/already exists/i)
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_UNLOCK", masterPassword: "another master password" }, {})).rejects.toThrow(/incorrect/i)
+
+    await handleAccountsMessage({ type: "ACCOUNTS_RESET" }, {})
+    await handleAccountsMessage({
+      type: "ACCOUNTS_CREATE_FROM_SHARE",
+      file,
+      sharePassword: "share-password",
+      masterPassword: "another master password",
+    }, {})
+    const created = (await handleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, {}) as any).vault as AccountVault
+    expect(created.credentials.map(({ domain }) => domain)).toEqual(["shared@example.test"])
+    await expect(decryptVault(local[VAULT_STORAGE_KEY] as never, "share-password")).rejects.toThrow()
   })
 
   it("enforces one authorized switch and releases only the requested field", async () => {
