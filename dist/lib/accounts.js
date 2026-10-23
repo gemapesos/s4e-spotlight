@@ -105,7 +105,7 @@ function parseSharedVaultFile(file) {
 	const record = file;
 	if (record.kind !== SHARE_FILE_KIND || record.version !== 1) throw new Error("This file is not a shared vault.");
 	const { iterations, salt, iv, ciphertext } = record;
-	if (typeof iterations !== "number" || !Number.isInteger(iterations) || iterations < 1 || iterations > PBKDF2_ITERATIONS || typeof salt !== "string" || typeof iv !== "string" || typeof ciphertext !== "string" || !salt || !iv || !ciphertext) {
+	if (typeof iterations !== "number" || !Number.isInteger(iterations) || iterations < PBKDF2_ITERATIONS || iterations > PBKDF2_ITERATIONS || typeof salt !== "string" || typeof iv !== "string" || typeof ciphertext !== "string" || !salt || !iv || !ciphertext) {
 		throw new Error(SHARE_DECRYPT_ERROR);
 	}
 	return {
@@ -262,7 +262,7 @@ export function publicStoreIndex(vault) {
 export function validateStoreUrl(value) {
 	try {
 		const url = new URL(value);
-		return url.protocol === "https:" && url.hostname === "sellercentral.amazon.com";
+		return url.origin === "https://sellercentral.amazon.com" && !url.username && !url.password;
 	} catch {
 		return false;
 	}

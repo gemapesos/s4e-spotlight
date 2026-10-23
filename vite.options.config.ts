@@ -24,6 +24,7 @@ export default defineConfig({
         options: resolve(root, "options.html"),
         popup: resolve(root, "popup.html"),
         timeout: resolve(root, "timeout.html"),
+        results: resolve(root, "results.html"),
       },
       output: {
         entryFileNames: "[name].js",

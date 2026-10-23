@@ -74,7 +74,23 @@ export function logNow(): number {
 }
 
 function clipLogText(value: string, limit = LOG_TEXT_LIMIT): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value
+  const safe = value.replace(/otpauth:\/\/[^\s"'<>]+/giu, "[REDACTED]")
+  return safe.length > limit ? `${safe.slice(0, limit - 1)}…` : safe
+}
+
+/** Scrub before console output as well as before forwarding or storing an entry. */
+function redactLogData(value: unknown, seen = new WeakSet<object>(), depth = 0): unknown {
+  if (typeof value === "string") return value.replace(/otpauth:\/\/[^\s"'<>]+/giu, "[REDACTED]")
+  if (!value || typeof value !== "object") return value
+  if (seen.has(value) || depth >= 8) return "[OMITTED]"
+  seen.add(value)
+  if (Array.isArray(value)) return value.map((item) => redactLogData(item, seen, depth + 1))
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    /password|passphrase|secret|otpauth|authorization|cookie|accesstoken|refreshtoken|apikey|privatekey|^(otp|otpcode)$/iu.test(key.replace(/[^a-z]/giu, ""))
+      ? "[REDACTED]"
+      : redactLogData(item, seen, depth + 1),
+  ]))
 }
 
 export function errorMessage(error: unknown, fallback = "Unknown error."): string {
@@ -92,6 +108,9 @@ export function describeError(error: unknown): LogData {
 }
 
 function writeLogEntry(entry: LogEntry): void {
+  const safe = sanitizeLogEntry(entry)
+  if (!safe) return
+  entry = safe
   if (logToConsole) {
     const write = entry.level === "error" ? console.error : entry.level === "warn" ? console.warn : console.info
     const timing = entry.ms === undefined ? "" : ` ${entry.ms}ms`
@@ -170,16 +189,17 @@ export function sanitizeLogEntry(value: unknown): LogEntry | undefined {
     event: clipLogText(record.event, 120),
   }
   if (typeof record.run === "string") entry.run = clipLogText(record.run, 60)
+  if (typeof record.tab === "number" && Number.isInteger(record.tab) && record.tab >= 0) entry.tab = record.tab
   if (typeof record.ms === "number" && Number.isFinite(record.ms)) entry.ms = record.ms
   if (record.data && typeof record.data === "object") {
     let serialized = ""
     try {
-      serialized = JSON.stringify(record.data)
+      serialized = JSON.stringify(redactLogData(record.data))
     } catch {
       serialized = ""
     }
     entry.data = serialized.length <= LOG_DATA_LIMIT
-      ? record.data as LogData
+      ? JSON.parse(serialized || "{}") as LogData
       : { truncated: true, preview: clipLogText(serialized, LOG_TEXT_LIMIT) }
   }
   return entry
@@ -215,7 +235,8 @@ export function createLogStore(storage: LogStorageArea, maxEntries = MAX_STORED_
 
   const readStored = async (): Promise<LogEntry[]> => {
     const stored = (await storage.get(LOGS_STORAGE_KEY))[LOGS_STORAGE_KEY]
-    return Array.isArray(stored) ? stored as LogEntry[] : []
+    // Apply the current policy to entries saved by older extension versions as well.
+    return Array.isArray(stored) ? stored.map(sanitizeLogEntry).filter((entry): entry is LogEntry => entry !== undefined) : []
   }
   const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
     const next = chain.then(task, task)
@@ -237,7 +258,7 @@ export function createLogStore(storage: LogStorageArea, maxEntries = MAX_STORED_
   return {
     append: (entries) => {
       if (entries.length === 0) return
-      pending.push(...entries)
+      pending.push(...entries.map(sanitizeLogEntry).filter((entry): entry is LogEntry => entry !== undefined))
       timer ??= setTimeout(() => void flush().catch(() => undefined), LOG_STORE_FLUSH_MS)
     },
     read: async () => {

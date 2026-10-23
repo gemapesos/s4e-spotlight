@@ -1,43 +1,43 @@
 import * as React from "react"
-import { CircleAlert, CircleCheck } from "lucide-react"
+import type { LucideIcon } from "lucide-react"
+import { AlertDialog as AlertDialogPrimitive } from "radix-ui"
+import {
+  Building2,
+  ChevronRight,
+  Download,
+  KeyRound,
+  Lock,
+  Pencil,
+  Plus,
+  Trash2,
+  Upload,
+} from "lucide-react"
 
 import {
   AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  ActionRow,
+  CancelButton,
+  Field,
+  HeaderButton,
+  Notice,
+  PageShell,
+  PanelDialogContent,
+  PanelFooter,
+  PrimaryButton,
+  StatusDot,
+  Surface,
+  SurfaceHeader,
+  SurfaceList,
+  surfaceRowClassName,
+} from "@/components/panel"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { PageShell } from "@/components/PageShell"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog, DialogDescription } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-  InputGroupInput,
-} from "@/components/ui/input-group"
-import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -45,7 +45,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { SHARE_FILE_NAME, type AccountVault, type CredentialRecord, type SharedVaultFile, type StoreRecord, type VaultMergeCounts } from "@/lib/accounts"
+import { SESSION_KEY_STORAGE_KEY, VAULT_STORAGE_KEY, SHARE_FILE_NAME, type AccountVault, type CredentialRecord, type SharedVaultFile, type StoreRecord, type VaultMergeCounts } from "@/lib/accounts"
 import { errorMessage } from "@/lib/log"
 import { cn } from "@/lib/utils"
 import { api } from "@/options/api"
@@ -100,15 +100,13 @@ async function readShareFile(file: File): Promise<unknown> {
   }
 }
 
-function EmptyState({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex min-h-32 items-center justify-center rounded-xl px-4 text-center text-sm text-muted-foreground ring-1 ring-foreground/10">
-      {children}
-    </div>
-  )
+const FIELD_INPUT = "h-9 rounded-[0.5rem]"
+
+function EmptyRow({ children }: { children: React.ReactNode }) {
+  return <p className="m-0 px-2 py-6 text-center text-sm text-muted-foreground">{children}</p>
 }
 
-function SecretField({ label, value }: { label: string; value: string }) {
+function SecretField({ label, name, value }: { label: string; name: string; value: string }) {
   const [revealed, setRevealed] = React.useState(false)
 
   React.useEffect(() => {
@@ -118,24 +116,97 @@ function SecretField({ label, value }: { label: string; value: string }) {
   }, [revealed])
 
   return (
-    <InputGroup>
-      <InputGroupInput
+    <span className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[0.375rem] border bg-background pr-1 pl-2.5 dark:bg-input/30">
+      <span className="shrink-0 text-xs leading-4 font-medium text-muted-foreground">{name}</span>
+      <input
         aria-label={label}
+        className="min-w-0 flex-1 border-0 bg-transparent font-mono text-xs leading-4 text-foreground/80 outline-none"
         onBlur={() => setRevealed(false)}
         readOnly
         type={revealed ? "text" : "password"}
         value={value}
       />
-      <InputGroupAddon align="inline-end">
-        <InputGroupButton onClick={() => setRevealed((open) => !open)}>
-          {revealed ? "Hide" : "Reveal"}
-        </InputGroupButton>
-      </InputGroupAddon>
-    </InputGroup>
+      <button
+        className="h-5 shrink-0 rounded-[0.25rem] bg-muted px-1.5 text-[0.6875rem] leading-4 font-medium text-foreground/70 transition-colors hover:text-foreground"
+        onClick={() => setRevealed((open) => !open)}
+        type="button"
+      >
+        {revealed ? "Hide" : "Reveal"}
+      </button>
+    </span>
   )
 }
 
+/** Edit and delete for a row; they show when the row is hovered or focused. */
+function RowActions({ name, onDelete, onEdit }: { name: string; onDelete: () => void; onEdit: () => void }) {
+  const buttonClass = "size-7 rounded-[0.375rem] text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
+  return (
+    <span className="flex shrink-0 items-center opacity-0 transition-opacity duration-150 group-focus-within/row:opacity-100 group-hover/row:opacity-100">
+      <Button aria-label={`Edit ${name}`} className={buttonClass} onClick={onEdit} size="icon" type="button" variant="ghost">
+        <Pencil aria-hidden="true" className="size-3.5" />
+      </Button>
+      <Button aria-label={`Delete ${name}`} className={buttonClass} onClick={onDelete} size="icon" type="button" variant="ghost">
+        <Trash2 aria-hidden="true" className="size-3.5" />
+      </Button>
+    </span>
+  )
+}
+
+/** The icon tile, title and description at the top of a vault-setup surface. */
+function SetupHeading({ description, icon: Icon, title }: { description: string; icon: LucideIcon; title: string }) {
+  return (
+    <div className="flex gap-3 px-4 pt-5 pb-4">
+      <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-[0.5rem] bg-muted text-foreground/80">
+        <Icon className="size-4" />
+      </span>
+      <div className="flex flex-col gap-1">
+        <h2 className="m-0 text-base leading-6 font-medium">{title}</h2>
+        <p className="m-0 text-muted-foreground">{description}</p>
+      </div>
+    </div>
+  )
+}
+
+/** A confirmation in the panel anatomy, for deleting and resetting. */
+function ConfirmDialogContent({
+  children,
+  confirm,
+  description,
+  title,
+}: {
+  children?: React.ReactNode
+  confirm: React.ReactNode
+  description: React.ReactNode
+  title: string
+}) {
+  return (
+    <AlertDialogContent className="gap-0 overflow-hidden p-0 shadow-[0_1.5rem_3rem_-1rem_rgb(0_0_0/0.22)] data-[size=default]:sm:max-w-[26rem]">
+      <div className="flex h-11 items-center px-4">
+        <AlertDialogTitle className="text-sm leading-5 font-medium">{title}</AlertDialogTitle>
+      </div>
+      <div aria-hidden="true" className="h-px bg-border" />
+      <div className="flex flex-col gap-4 p-4">
+        <AlertDialogDescription className="text-left">{description}</AlertDialogDescription>
+        {children}
+      </div>
+      <PanelFooter action end={<>
+        <AlertDialogPrimitive.Cancel asChild>
+          <CancelButton type="button" />
+        </AlertDialogPrimitive.Cancel>
+        {confirm}
+      </>} />
+    </AlertDialogContent>
+  )
+}
+
+/** A destructive confirm: tinted, never a solid red block. */
+function DestructiveButton({ className, ...props }: React.ComponentProps<typeof Button>) {
+  return <Button className={cn("rounded-[0.5rem] px-3", className)} variant="destructive" {...props} />
+}
+
 export function OptionsApp() {
+  const stateVersion = React.useRef(0)
+  const resumeStarted = React.useRef(false)
   const [page, setPage] = React.useState<Page>("loading")
   const [busy, setBusy] = React.useState(false)
   const [vault, setVault] = React.useState<AccountVault | null>(null)
@@ -167,9 +238,11 @@ export function OptionsApp() {
    * and resolves whether it succeeded.
    */
   const runBusy = React.useCallback(async <T,>(action: () => Promise<T>, failure: string): Promise<T | undefined> => {
+    const version = stateVersion.current
     setBusy(true)
     try {
-      return await action()
+      const result = await action()
+      return version === stateVersion.current ? result : undefined
     } catch (error) {
       showNotice(errorMessage(error, failure), true)
       return undefined
@@ -185,10 +258,12 @@ export function OptionsApp() {
   }, [notice])
 
   const load = React.useCallback(async () => {
+    const version = ++stateVersion.current
     showNotice()
     setBusy(true)
     try {
       const status = await api<{ ok: true; initialized?: boolean; unlocked?: boolean }>({ type: "ACCOUNTS_STATUS" })
+      if (version !== stateVersion.current) return
       if (!status.initialized) {
         setVault(null)
         setPage("create")
@@ -197,24 +272,59 @@ export function OptionsApp() {
         setPage("locked")
       } else {
         const response = await api<{ ok: true; vault: AccountVault }>({ type: "ACCOUNTS_GET_VAULT" })
+        if (version !== stateVersion.current) return
         setVault(response.vault)
         setPage("editor")
+        const resumeId = new URLSearchParams(window.location.search).get("resume")
+        if (resumeId && !resumeStarted.current) {
+          resumeStarted.current = true
+          try {
+            await api({ type: "ACCOUNTS_RESUME_SWITCH", resumeId })
+            showNotice("Continuing your store switch…")
+          } catch (error) {
+            showNotice(errorMessage(error, "Select the store again from the palette."), true)
+          }
+        }
       }
     } catch (error) {
-      showNotice(errorMessage(error, "Could not load accounts."), true)
+      if (version === stateVersion.current) showNotice(errorMessage(error, "Could not load accounts."), true)
     } finally {
-      setBusy(false)
+      if (version === stateVersion.current) setBusy(false)
     }
   }, [showNotice])
 
   React.useEffect(() => {
     void load()
+    const invalidate = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+      if (!(area === "session" && SESSION_KEY_STORAGE_KEY in changes) && !(area === "local" && VAULT_STORAGE_KEY in changes)) return
+      stateVersion.current += 1
+      setVault(null)
+      setEditingCredential(null)
+      setEditingStore(null)
+      setCredentialOpen(false)
+      setStoreOpen(false)
+      setPasswordOpen(false)
+      setExportOpen(false)
+      setImportOpen(false)
+      setDeleteTarget(null)
+      setExportFormKey((key) => key + 1)
+      setImportFormKey((key) => key + 1)
+      setPage("loading")
+      void load()
+    }
+    chrome.storage?.onChanged?.addListener(invalidate)
+    return () => {
+      stateVersion.current += 1
+      chrome.storage?.onChanged?.removeListener(invalidate)
+    }
   }, [load])
 
   const save = React.useCallback(async (next: AccountVault, success: string) => {
+    const version = stateVersion.current
     setBusy(true)
     try {
       await api({ type: "ACCOUNTS_SAVE_VAULT", vault: next })
+      if (version !== stateVersion.current) return
       setVault(next)
       setPage("editor")
       setCredentialOpen(false)
@@ -424,428 +534,370 @@ export function OptionsApp() {
     await save(next, deleteTarget.kind === "store" ? "Store deleted." : "Credential deleted.")
   }
 
+  const storeCount = (credentialId: string) => vault?.stores.filter((store) => store.credentialId === credentialId).length ?? 0
+  const pendingLabel = (idle: string, pending: string) => busy ? pending : idle
+
   return (
     <PageShell
-      actions={
-        page === "editor" ? (
-          <div className="flex flex-wrap gap-2">
-            <Button disabled={busy} onClick={() => setPasswordOpen(true)} type="button" variant="outline">
-              Change master password
-            </Button>
-            <Button disabled={busy} onClick={() => void onLock()} type="button" variant="outline">Lock</Button>
-          </div>
-        ) : undefined
-      }
-      description="Manage encrypted Seller Central stores and shared credentials."
+      description={page === "editor" ? "Encrypted Seller Central stores and the credentials they sign in with." : undefined}
+      heading={page === "editor" || page === "loading"}
+      status={page === "editor" ? <StatusDot active>Unlocked</StatusDot> : page === "locked" ? <StatusDot active={false}>Locked</StatusDot> : undefined}
       title="Accounts"
     >
-      <main aria-busy={busy || page === "loading"} className={cn("grid gap-6 transition-opacity", busy && "opacity-60")}>
-        {notice ? (
-          <Alert
-            role={notice.error ? "alert" : "status"}
-            variant={notice.error ? "destructive" : "default"}
-          >
-            {notice.error ? <CircleAlert /> : <CircleCheck />}
-            <AlertTitle>{notice.error ? "Something went wrong" : "Success"}</AlertTitle>
-            <AlertDescription>{notice.message}</AlertDescription>
-            <AlertAction>
-              <Button aria-label="Close notification" onClick={() => showNotice()} size="xs" type="button" variant="outline">Dismiss</Button>
-            </AlertAction>
-          </Alert>
-        ) : null}
+      <div aria-busy={busy || page === "loading"} className={cn("flex flex-col gap-4 transition-opacity", busy && "opacity-60")}>
+        {notice ? <Notice error={notice.error} message={notice.message} onDismiss={() => showNotice()} /> : null}
 
-        {page === "loading" ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : null}
+        {page === "loading" ? <p className="m-0 px-1 text-muted-foreground">Loading…</p> : null}
 
         {page === "create" ? (
-          <div className="grid max-w-xl gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Create encrypted vault</CardTitle>
-                <CardDescription>Your master password encrypts every account locally. It cannot be recovered.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form className="grid gap-4" onSubmit={(event) => void onCreate(event)}>
-                  <div className="grid gap-2">
-                    <Label htmlFor="create-password">Master password</Label>
-                    <Input autoComplete="new-password" id="create-password" minLength={10} name="password" required type="password" />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="create-confirm">Confirm master password</Label>
-                    <Input autoComplete="new-password" id="create-confirm" minLength={10} name="confirm" required type="password" />
-                  </div>
-                  <div>
-                    <Button disabled={busy} type="submit">{busy ? "Creating…" : "Create vault"}</Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Import a shared vault</CardTitle>
-                <CardDescription>Use a share file from someone else. The share password decrypts the file. Your new master password protects it on this device.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form className="grid gap-4" onSubmit={(event) => void onCreateFromShare(event)}>
-                  <div className="grid gap-2">
-                    <Label htmlFor="create-share-file">Share file</Label>
-                    <Input accept=".json,application/json" id="create-share-file" name="file" type="file" />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="create-share-password">Share password</Label>
-                    <Input autoComplete="off" id="create-share-password" minLength={10} name="sharePassword" required type="password" />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="create-share-master">New master password</Label>
-                    <Input autoComplete="new-password" id="create-share-master" minLength={10} name="password" required type="password" />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="create-share-master-confirm">Confirm master password</Label>
-                    <Input autoComplete="new-password" id="create-share-master-confirm" minLength={10} name="confirm" required type="password" />
-                  </div>
-                  <div>
-                    <Button disabled={busy} type="submit">{busy ? "Importing…" : "Import vault"}</Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
+          <div className="mx-auto flex w-full max-w-[25rem] flex-col gap-4 pt-16">
+            <Surface>
+              <form onSubmit={(event) => void onCreate(event)}>
+                <SetupHeading
+                  description="Your master password encrypts every account on this device. It can’t be recovered."
+                  icon={Lock}
+                  title="Create encrypted vault"
+                />
+                <div className="flex flex-col gap-4 px-4 pb-4">
+                  <Field htmlFor="create-password" label="Master password">
+                    <Input autoComplete="new-password" className={FIELD_INPUT} id="create-password" minLength={10} name="password" required type="password" />
+                  </Field>
+                  <Field htmlFor="create-confirm" label="Confirm master password">
+                    <Input autoComplete="new-password" className={FIELD_INPUT} id="create-confirm" minLength={10} name="confirm" required type="password" />
+                  </Field>
+                </div>
+                <PanelFooter action end={<PrimaryButton disabled={busy} type="submit">{pendingLabel("Create vault", "Creating…")}</PrimaryButton>}>
+                  At least 10 characters
+                </PanelFooter>
+              </form>
+            </Surface>
+            <Surface>
+              <form onSubmit={(event) => void onCreateFromShare(event)}>
+                <SetupHeading
+                  description="Use a share file from someone else. The share password opens it; your new master password protects it here."
+                  icon={Upload}
+                  title="Import a shared vault"
+                />
+                <div className="flex flex-col gap-4 px-4 pb-4">
+                  <Field htmlFor="create-share-file" label="Share file">
+                    <Input accept=".json,application/json" className={FIELD_INPUT} id="create-share-file" name="file" type="file" />
+                  </Field>
+                  <Field htmlFor="create-share-password" label="Share password">
+                    <Input autoComplete="off" className={FIELD_INPUT} id="create-share-password" minLength={10} name="sharePassword" required type="password" />
+                  </Field>
+                  <Field htmlFor="create-share-master" label="New master password">
+                    <Input autoComplete="new-password" className={FIELD_INPUT} id="create-share-master" minLength={10} name="password" required type="password" />
+                  </Field>
+                  <Field htmlFor="create-share-master-confirm" label="Confirm master password">
+                    <Input autoComplete="new-password" className={FIELD_INPUT} id="create-share-master-confirm" minLength={10} name="confirm" required type="password" />
+                  </Field>
+                </div>
+                <PanelFooter action end={<PrimaryButton disabled={busy} type="submit">{pendingLabel("Import vault", "Importing…")}</PrimaryButton>} />
+              </form>
+            </Surface>
           </div>
         ) : null}
 
         {page === "locked" ? (
-          <div className="grid max-w-xl gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Unlock accounts</CardTitle>
-                <CardDescription>Enter the master password to edit stores and credentials.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form className="grid gap-4" onSubmit={(event) => void onUnlock(event)}>
-                  <div className="grid gap-2">
-                    <Label htmlFor="unlock-password">Master password</Label>
-                    <Input autoComplete="current-password" autoFocus id="unlock-password" name="password" required type="password" />
-                  </div>
-                  <div>
-                    <Button disabled={busy} type="submit">{busy ? "Unlocking…" : "Unlock"}</Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-destructive">Forgotten master password</CardTitle>
-                <CardDescription>Resetting permanently deletes the encrypted account vault. This action cannot be undone.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button
-                  disabled={busy}
-                  onClick={() => { setResetConfirmation(""); setResetOpen(true) }}
-                  type="button"
-                  variant="destructive"
-                >
-                  Reset vault
-                </Button>
-              </CardContent>
-            </Card>
+          <div className="mx-auto w-full max-w-[25rem] pt-16">
+            <Surface>
+              <form onSubmit={(event) => void onUnlock(event)}>
+                <SetupHeading
+                  description="Enter the master password to edit stores and credentials."
+                  icon={Lock}
+                  title="Unlock accounts"
+                />
+                <div className="px-4 pb-4">
+                  <Field htmlFor="unlock-password" label="Master password">
+                    <Input autoComplete="current-password" autoFocus className="h-10 rounded-[0.625rem] px-3" id="unlock-password" name="password" required type="password" />
+                  </Field>
+                </div>
+                <PanelFooter action end={<PrimaryButton disabled={busy} type="submit">{pendingLabel("Unlock", "Unlocking…")}</PrimaryButton>}>
+                  <span className="inline-flex items-center gap-1">
+                    Forgot it?
+                    <Button
+                      className="h-7 rounded-[0.375rem] px-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      disabled={busy}
+                      onClick={() => { setResetConfirmation(""); setResetOpen(true) }}
+                      type="button"
+                      variant="ghost"
+                    >
+                      Reset vault
+                    </Button>
+                  </span>
+                </PanelFooter>
+              </form>
+            </Surface>
           </div>
         ) : null}
 
         {page === "editor" && vault ? (
-          <div className="grid gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Share vault</CardTitle>
-                <CardDescription>
-                  Export an encrypted copy. The other person needs this extension, the file, and the share password. The share password is separate from your master password and is not saved.
-                </CardDescription>
-                <CardAction>
-                  <div className="flex gap-2">
-                    <Button disabled={busy} onClick={() => setExportOpen(true)} type="button" variant="outline">Export</Button>
-                    <Button disabled={busy} onClick={() => setImportOpen(true)} type="button">Import</Button>
-                  </div>
-                </CardAction>
-              </CardHeader>
-            </Card>
-            <div className="grid gap-6 lg:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Credentials</CardTitle>
-                <CardDescription>Domains, passwords, and TOTP secrets.</CardDescription>
-                <CardAction>
-                  <Button onClick={() => openCredential()} type="button">Add credential</Button>
-                </CardAction>
-              </CardHeader>
-              <CardContent className="grid gap-3">
-                {vault.credentials.length === 0 ? (
-                  <EmptyState>No credentials yet.</EmptyState>
-                ) : vault.credentials.map((item) => (
-                  <article className="grid gap-3 rounded-xl p-4 ring-1 ring-foreground/10" key={item.id}>
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div>
-                        <h3 className="text-sm font-medium">{item.domain}</h3>
-                        <p className="text-sm text-muted-foreground">Shared credential</p>
-                      </div>
-                      <div className="flex gap-2">
-                        <Button onClick={() => openCredential(item)} size="sm" type="button" variant="outline">Edit</Button>
-                        <Button
-                          onClick={() => requestDelete("credential", item.id, item.domain)}
-                          size="sm"
-                          type="button"
-                          variant="destructive"
-                        >
-                          Delete
-                        </Button>
-                      </div>
-                    </div>
-                    <SecretField label={`Password for ${item.domain}`} value={item.password} />
-                    <SecretField label={`OTP URI for ${item.domain}`} value={item.otpAuthUri} />
+          <>
+            <Surface aria-labelledby="stores-heading">
+              <SurfaceHeader
+                action={
+                  <HeaderButton disabled={vault.credentials.length === 0} onClick={() => openStore()} type="button">
+                    <Plus aria-hidden="true" />
+                    Add store
+                  </HeaderButton>
+                }
+                count={vault.stores.length}
+                id="stores-heading"
+                title="Stores"
+              />
+              <SurfaceList>
+                {vault.stores.length === 0 ? (
+                  <EmptyRow>{vault.credentials.length === 0 ? "Add a credential, then add your first store." : "No stores yet."}</EmptyRow>
+                ) : vault.stores.map((item) => (
+                  <article className={surfaceRowClassName} key={item.id}>
+                    <Building2 aria-hidden="true" />
+                    <h3 className="m-0 min-w-0 flex-1 truncate text-sm font-normal sm:w-52 sm:flex-none" title={item.storeUrl}>{item.name}</h3>
+                    <span className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground">
+                      {credentialsById.get(item.credentialId)?.domain ?? "Missing credential"}
+                    </span>
+                    <RowActions
+                      name={item.name}
+                      onDelete={() => requestDelete("store", item.id, item.name)}
+                      onEdit={() => openStore(item)}
+                    />
                   </article>
                 ))}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Stores</CardTitle>
-                <CardDescription>Seller Central destinations.</CardDescription>
-                <CardAction>
-                  <Button disabled={vault.credentials.length === 0} onClick={() => openStore()} type="button">Add store</Button>
-                </CardAction>
-              </CardHeader>
-              <CardContent className="grid gap-3">
-                {vault.stores.length === 0 ? (
-                  <EmptyState>
-                    {vault.credentials.length === 0 ? "Add a credential, then add your first store." : "No stores yet."}
-                  </EmptyState>
-                ) : vault.stores.map((item) => {
-                  const domain = credentialsById.get(item.credentialId)?.domain ?? "Missing credential"
+              </SurfaceList>
+            </Surface>
+
+            <Surface aria-labelledby="credentials-heading">
+              <SurfaceHeader
+                action={
+                  <HeaderButton onClick={() => openCredential()} type="button">
+                    <Plus aria-hidden="true" />
+                    Add credential
+                  </HeaderButton>
+                }
+                count={vault.credentials.length}
+                id="credentials-heading"
+                title="Credentials"
+              />
+              <SurfaceList className="gap-0.5">
+                {vault.credentials.length === 0 ? (
+                  <EmptyRow>No credentials yet.</EmptyRow>
+                ) : vault.credentials.map((item) => {
+                  const used = storeCount(item.id)
                   return (
-                    <article className="grid gap-3 rounded-xl p-4 ring-1 ring-foreground/10" key={item.id}>
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <h3 className="text-sm font-medium">{item.name}</h3>
-                          <p className="text-sm text-muted-foreground">{domain}</p>
-                        </div>
-                        <div className="flex gap-2">
-                          <Button onClick={() => openStore(item)} size="sm" type="button" variant="outline">Edit</Button>
-                          <Button
-                            onClick={() => requestDelete("store", item.id, item.name)}
-                            size="sm"
-                            type="button"
-                            variant="destructive"
-                          >
-                            Delete
-                          </Button>
-                        </div>
+                    <article className={cn(surfaceRowClassName, "flex-wrap gap-y-1.5 pt-1.5 pb-2")} key={item.id}>
+                      <KeyRound aria-hidden="true" />
+                      <h3 className="m-0 min-w-0 flex-1 truncate text-sm font-normal sm:w-52 sm:flex-none">{item.domain}</h3>
+                      <span className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground">
+                        {used ? `Used by ${used} ${used === 1 ? "store" : "stores"}` : "Not used by a store"}
+                      </span>
+                      <RowActions
+                        name={item.domain}
+                        onDelete={() => requestDelete("credential", item.id, item.domain)}
+                        onEdit={() => openCredential(item)}
+                      />
+                      <div className="flex basis-full gap-2 pl-6">
+                        <SecretField label={`Password for ${item.domain}`} name="Password" value={item.password} />
+                        <SecretField label={`OTP URI for ${item.domain}`} name="TOTP" value={item.otpAuthUri} />
                       </div>
-                      <p className="text-sm break-all text-muted-foreground">{item.storeUrl}</p>
                     </article>
                   )
                 })}
-              </CardContent>
-            </Card>
-            </div>
-          </div>
+              </SurfaceList>
+            </Surface>
+
+            <Surface aria-labelledby="vault-heading">
+              <SurfaceHeader id="vault-heading" title="Vault" />
+              <SurfaceList>
+                <ActionRow
+                  description="An encrypted file that opens with a separate share password"
+                  disabled={busy}
+                  icon={Download}
+                  label="Export vault"
+                  onClick={() => setExportOpen(true)}
+                  trailing={<ChevronRight aria-hidden="true" className="mr-1.5 size-3.5 shrink-0 text-ring" />}
+                />
+                <ActionRow
+                  description="Adds and updates accounts; nothing here is removed"
+                  disabled={busy}
+                  icon={Upload}
+                  label="Import shared vault"
+                  onClick={() => setImportOpen(true)}
+                  trailing={<ChevronRight aria-hidden="true" className="mr-1.5 size-3.5 shrink-0 text-ring" />}
+                />
+                <ActionRow
+                  disabled={busy}
+                  icon={KeyRound}
+                  label="Change master password"
+                  onClick={() => setPasswordOpen(true)}
+                  trailing={<ChevronRight aria-hidden="true" className="mr-1.5 size-3.5 shrink-0 text-ring" />}
+                />
+                <ActionRow
+                  description="Asks for the master password again"
+                  disabled={busy}
+                  icon={Lock}
+                  label="Lock"
+                  onClick={() => void onLock()}
+                />
+              </SurfaceList>
+            </Surface>
+          </>
         ) : null}
-      </main>
+      </div>
 
       <Dialog onOpenChange={setCredentialOpen} open={credentialOpen}>
-        <DialogContent>
-          <form className="grid gap-4" onSubmit={(event) => void onSaveCredential(event)}>
-            <DialogHeader>
-              <DialogTitle>{editingCredential ? "Edit credential" : "Add credential"}</DialogTitle>
+        <PanelDialogContent title={editingCredential ? "Edit credential" : "Add credential"}>
+          <form onSubmit={(event) => void onSaveCredential(event)}>
+            <div className="flex flex-col gap-4 p-4">
               <DialogDescription>The sign-in details shared by one or more stores.</DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-2">
-              <Label htmlFor="credential-domain">Domain / email</Label>
-              <Input defaultValue={editingCredential?.domain} id="credential-domain" name="domain" required type="email" />
+              <Field htmlFor="credential-domain" label="Domain / email">
+                <Input className={FIELD_INPUT} defaultValue={editingCredential?.domain} id="credential-domain" name="domain" required type="email" />
+              </Field>
+              <Field htmlFor="credential-password" label="Password">
+                <Input autoComplete="off" className={FIELD_INPUT} defaultValue={editingCredential?.password} id="credential-password" name="password" required type="password" />
+              </Field>
+              <Field htmlFor="credential-otp" label="TOTP URI">
+                <Input autoComplete="off" className={FIELD_INPUT} defaultValue={editingCredential?.otpAuthUri} id="credential-otp" name="otpAuthUri" placeholder="otpauth://totp/…" required type="password" />
+              </Field>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="credential-password">Password</Label>
-              <Input
-                autoComplete="off"
-                defaultValue={editingCredential?.password}
-                id="credential-password"
-                name="password"
-                required
-                type="password"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="credential-otp">TOTP URI</Label>
-              <Input
-                autoComplete="off"
-                defaultValue={editingCredential?.otpAuthUri}
-                id="credential-otp"
-                name="otpAuthUri"
-                placeholder="otpauth://totp/…"
-                required
-                type="password"
-              />
-            </div>
-            <DialogFooter>
-              <Button onClick={() => setCredentialOpen(false)} type="button" variant="outline">Cancel</Button>
-              <Button disabled={busy} type="submit">Save credential</Button>
-            </DialogFooter>
+            <PanelFooter action end={<>
+              <CancelButton onClick={() => setCredentialOpen(false)} type="button" />
+              <PrimaryButton disabled={busy} type="submit">Save credential</PrimaryButton>
+            </>} />
           </form>
-        </DialogContent>
+        </PanelDialogContent>
       </Dialog>
 
       <Dialog onOpenChange={setStoreOpen} open={storeOpen}>
-        <DialogContent>
-          <form className="grid gap-4" onSubmit={(event) => void onSaveStore(event)}>
-            <DialogHeader>
-              <DialogTitle>{editingStore ? "Edit store" : "Add store"}</DialogTitle>
-              <DialogDescription>Connect a Seller Central destination to a saved credential.</DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-2">
-              <Label htmlFor="store-name">Store name</Label>
-              <Input defaultValue={editingStore?.name} id="store-name" name="name" placeholder="JMG Outdoors" required />
+        <PanelDialogContent title={editingStore ? "Edit store" : "Add store"}>
+          <form onSubmit={(event) => void onSaveStore(event)}>
+            <div className="flex flex-col gap-4 p-4">
+              <DialogDescription>Connect a Seller Central store to a saved credential.</DialogDescription>
+              <Field htmlFor="store-name" label="Store name">
+                <Input className={FIELD_INPUT} defaultValue={editingStore?.name} id="store-name" name="name" placeholder="JMG Outdoors" required />
+              </Field>
+              <Field htmlFor="store-credential" label="Credential">
+                <Select onValueChange={setStoreCredentialId} required value={storeCredentialId}>
+                  <SelectTrigger className="h-9! w-full rounded-[0.5rem]" id="store-credential">
+                    <SelectValue placeholder="Choose a credential" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(vault?.credentials ?? []).map((item) => (
+                      <SelectItem key={item.id} value={item.id}>{item.domain}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field htmlFor="store-url" label="Seller Central store URL">
+                <Input className={FIELD_INPUT} defaultValue={editingStore?.storeUrl} id="store-url" name="storeUrl" placeholder="https://sellercentral.amazon.com/home?…" required type="url" />
+              </Field>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="store-credential">Credential</Label>
-              <Select onValueChange={setStoreCredentialId} required value={storeCredentialId}>
-                <SelectTrigger className="w-full" id="store-credential">
-                  <SelectValue placeholder="Choose a credential" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(vault?.credentials ?? []).map((item) => (
-                    <SelectItem key={item.id} value={item.id}>{item.domain}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="store-url">Seller Central store URL</Label>
-              <Input
-                defaultValue={editingStore?.storeUrl}
-                id="store-url"
-                name="storeUrl"
-                placeholder="https://sellercentral.amazon.com/home?…"
-                required
-                type="url"
-              />
-            </div>
-            <DialogFooter>
-              <Button onClick={() => setStoreOpen(false)} type="button" variant="outline">Cancel</Button>
-              <Button disabled={busy} type="submit">Save store</Button>
-            </DialogFooter>
+            <PanelFooter action end={<>
+              <CancelButton onClick={() => setStoreOpen(false)} type="button" />
+              <PrimaryButton disabled={busy} type="submit">Save store</PrimaryButton>
+            </>} />
           </form>
-        </DialogContent>
+        </PanelDialogContent>
       </Dialog>
 
       <Dialog onOpenChange={closeExport} open={exportOpen}>
-        <DialogContent>
-          <form className="grid gap-4" key={exportFormKey} onSubmit={(event) => void onExportShare(event)}>
-            <DialogHeader>
-              <DialogTitle>Export vault</DialogTitle>
+        <PanelDialogContent title="Export vault">
+          <form key={exportFormKey} onSubmit={(event) => void onExportShare(event)}>
+            <div className="flex flex-col gap-4 p-4">
               <DialogDescription>
-                Choose a share password of at least 10 characters. Give it to the other person separately from the file. It is not saved and cannot be recovered.
+                Choose a share password of at least 10 characters and give it to the other person separately from the file. It isn’t saved and can’t be recovered.
               </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-2">
-              <Label htmlFor="export-share-password">Share password</Label>
-              <Input autoComplete="off" id="export-share-password" minLength={10} name="sharePassword" required type="password" />
+              <Field htmlFor="export-share-password" label="Share password">
+                <Input autoComplete="off" className={FIELD_INPUT} id="export-share-password" minLength={10} name="sharePassword" required type="password" />
+              </Field>
+              <Field htmlFor="export-share-confirm" label="Confirm share password">
+                <Input autoComplete="off" className={FIELD_INPUT} id="export-share-confirm" minLength={10} name="confirm" required type="password" />
+              </Field>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="export-share-confirm">Confirm share password</Label>
-              <Input autoComplete="off" id="export-share-confirm" minLength={10} name="confirm" required type="password" />
-            </div>
-            <DialogFooter>
-              <Button onClick={() => closeExport(false)} type="button" variant="outline">Cancel</Button>
-              <Button disabled={busy} type="submit">{busy ? "Exporting…" : "Export"}</Button>
-            </DialogFooter>
+            <PanelFooter action end={<>
+              <CancelButton onClick={() => closeExport(false)} type="button" />
+              <PrimaryButton disabled={busy} type="submit">{pendingLabel("Export", "Exporting…")}</PrimaryButton>
+            </>} />
           </form>
-        </DialogContent>
+        </PanelDialogContent>
       </Dialog>
 
       <Dialog onOpenChange={closeImport} open={importOpen}>
-        <DialogContent>
-          <form className="grid gap-4" key={importFormKey} onSubmit={(event) => void onImportShare(event)}>
-            <DialogHeader>
-              <DialogTitle>Import vault</DialogTitle>
+        <PanelDialogContent title="Import vault">
+          <form key={importFormKey} onSubmit={(event) => void onImportShare(event)}>
+            <div className="flex flex-col gap-4 p-4">
               <DialogDescription>Accounts already on this device stay. Matching shared accounts are updated.</DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-2">
-              <Label htmlFor="import-share-file">Share file</Label>
-              <Input accept=".json,application/json" id="import-share-file" name="file" type="file" />
+              <Field htmlFor="import-share-file" label="Share file">
+                <Input accept=".json,application/json" className={FIELD_INPUT} id="import-share-file" name="file" type="file" />
+              </Field>
+              <Field htmlFor="import-share-password" label="Share password">
+                <Input autoComplete="off" className={FIELD_INPUT} id="import-share-password" minLength={10} name="sharePassword" required type="password" />
+              </Field>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="import-share-password">Share password</Label>
-              <Input autoComplete="off" id="import-share-password" minLength={10} name="sharePassword" required type="password" />
-            </div>
-            <DialogFooter>
-              <Button onClick={() => closeImport(false)} type="button" variant="outline">Cancel</Button>
-              <Button disabled={busy} type="submit">{busy ? "Importing…" : "Import"}</Button>
-            </DialogFooter>
+            <PanelFooter action end={<>
+              <CancelButton onClick={() => closeImport(false)} type="button" />
+              <PrimaryButton disabled={busy} type="submit">{pendingLabel("Import", "Importing…")}</PrimaryButton>
+            </>} />
           </form>
-        </DialogContent>
+        </PanelDialogContent>
       </Dialog>
 
       <Dialog onOpenChange={setPasswordOpen} open={passwordOpen}>
-        <DialogContent>
-          <form className="grid gap-4" onSubmit={(event) => void onChangePassword(event)}>
-            <DialogHeader>
-              <DialogTitle>Change master password</DialogTitle>
+        <PanelDialogContent title="Change master password">
+          <form onSubmit={(event) => void onChangePassword(event)}>
+            <div className="flex flex-col gap-4 p-4">
               <DialogDescription>Choose a new password with at least 10 characters.</DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-2">
-              <Label htmlFor="new-password">New master password</Label>
-              <Input autoComplete="new-password" id="new-password" minLength={10} name="password" required type="password" />
+              <Field htmlFor="new-password" label="New master password">
+                <Input autoComplete="new-password" className={FIELD_INPUT} id="new-password" minLength={10} name="password" required type="password" />
+              </Field>
+              <Field htmlFor="new-confirm" label="Confirm password">
+                <Input autoComplete="new-password" className={FIELD_INPUT} id="new-confirm" minLength={10} name="confirm" required type="password" />
+              </Field>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="new-confirm">Confirm password</Label>
-              <Input autoComplete="new-password" id="new-confirm" minLength={10} name="confirm" required type="password" />
-            </div>
-            <DialogFooter>
-              <Button onClick={() => setPasswordOpen(false)} type="button" variant="outline">Cancel</Button>
-              <Button disabled={busy} type="submit">{busy ? "Changing…" : "Change password"}</Button>
-            </DialogFooter>
+            <PanelFooter action end={<>
+              <CancelButton onClick={() => setPasswordOpen(false)} type="button" />
+              <PrimaryButton disabled={busy} type="submit">{pendingLabel("Change password", "Changing…")}</PrimaryButton>
+            </>} />
           </form>
-        </DialogContent>
+        </PanelDialogContent>
       </Dialog>
 
       <AlertDialog onOpenChange={(open) => { if (!open) setDeleteTarget(null) }} open={Boolean(deleteTarget)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteTarget?.kind}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              “{deleteTarget?.name}” will be permanently removed from this vault.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void onConfirmDelete()} variant="destructive">Delete</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
+        <ConfirmDialogContent
+          confirm={
+            <AlertDialogPrimitive.Action asChild>
+              <DestructiveButton onClick={() => void onConfirmDelete()} type="button">Delete</DestructiveButton>
+            </AlertDialogPrimitive.Action>
+          }
+          description={<>“{deleteTarget?.name}” will be permanently removed from this vault.</>}
+          title={`Delete ${deleteTarget?.kind ?? "item"}?`}
+        />
       </AlertDialog>
 
       <AlertDialog onOpenChange={(open) => { setResetOpen(open); if (!open) setResetConfirmation("") }} open={resetOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Reset vault?</AlertDialogTitle>
-            <AlertDialogDescription>Type RESET to permanently delete the encrypted account vault. This cannot be undone.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="grid gap-2">
-            <Label htmlFor="reset-confirmation">Type RESET</Label>
+        <ConfirmDialogContent
+          confirm={
+            <AlertDialogPrimitive.Action asChild>
+              <DestructiveButton
+                disabled={busy || resetConfirmation !== RESET_CONFIRMATION}
+                onClick={() => void onReset()}
+                type="button"
+              >
+                Reset vault
+              </DestructiveButton>
+            </AlertDialogPrimitive.Action>
+          }
+          description="Type RESET to permanently delete the encrypted account vault. This can’t be undone."
+          title="Reset vault?"
+        >
+          <Field htmlFor="reset-confirmation" label="Type RESET">
             <Input
               autoComplete="off"
+              className={FIELD_INPUT}
               id="reset-confirmation"
               onChange={(event) => setResetConfirmation(event.target.value)}
               value={resetConfirmation}
             />
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={busy || resetConfirmation !== RESET_CONFIRMATION}
-              onClick={() => void onReset()}
-              variant="destructive"
-            >
-              Reset vault
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
+          </Field>
+        </ConfirmDialogContent>
       </AlertDialog>
     </PageShell>
   )

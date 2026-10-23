@@ -1,8 +1,20 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
+import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage as rawHandleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, decryptSharedVault, decryptVault, encryptSharedVault, SHARE_FILE_KIND, STORE_INDEX_KEY, VAULT_STORAGE_KEY, type AccountVault } from "../src/lib/accounts"
+
+
+const accountsSender: chrome.runtime.MessageSender = { id: "test-extension", url: "chrome-extension://test-extension/options.html", frameId: 0, documentId: "accounts-document" }
+// Happy-path fixtures use real context metadata. Authorization regression tests call the raw handler.
+function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender) {
+  const automation = String(message.type).startsWith("ACCOUNT_AUTOMATION_")
+  return rawHandleAccountsMessage(message, {
+    ...accountsSender,
+    ...(automation ? { url: "https://sellercentral.amazon.com/ap/signin", documentId: "login-document" } : {}),
+    ...sender,
+  })
+}
 
 function storageArea(values: Record<string, unknown>) {
   return {
@@ -40,9 +52,9 @@ describe("Accounts background workflow", () => {
     vi.stubGlobal("crypto", webcrypto)
     vi.stubGlobal("chrome", {
       storage: { local: storageArea(local), session: storageArea(session) },
-      tabs: { create, update, remove, query },
+      tabs: { create, update, remove, query, get: vi.fn(async () => ({ id: 91, url: SIGN_IN_URL, status: "complete" })), sendMessage: vi.fn(async () => ({ ok: true })) },
       windows: { update: focusWindow },
-      runtime: { openOptionsPage: vi.fn(async () => undefined) },
+      runtime: { id: "test-extension", getURL: (path: string) => `chrome-extension://test-extension/${path}`, openOptionsPage: vi.fn(async () => undefined) },
       debugger: { attach: debuggerAttach, sendCommand: debuggerSendCommand, detach: debuggerDetach },
     })
   })
@@ -111,7 +123,7 @@ describe("Accounts background workflow", () => {
       credentials: [{ id: "shared-credential", domain: "shared@example.test", password: "shared-password", otpAuthUri: "otpauth://totp/Shared?secret=JBSWY3DPEHPK3PXP" }],
       stores: [{ id: "shared-store", name: "Shared Store", credentialId: "shared-credential", storeUrl: "https://sellercentral.amazon.com/home?store=shared" }],
     }
-    const file = await encryptSharedVault(incoming, "share-password", 1_000)
+    const file = await encryptSharedVault(incoming, "share-password", 600_000)
     await expect(handleAccountsMessage({ type: "ACCOUNTS_IMPORT_SHARE", file, sharePassword: "wrong-password" }, {})).rejects.toThrow(/share password or damaged/i)
     expect((await handleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, {}) as any).vault).toEqual(localVault)
 
@@ -131,7 +143,7 @@ describe("Accounts background workflow", () => {
       version: 1,
       credentials: [{ id: "shared-credential", domain: "shared@example.test", password: "shared-password", otpAuthUri: "otpauth://totp/Shared?secret=JBSWY3DPEHPK3PXP" }],
       stores: [],
-    }, "share-password", 1_000)
+    }, "share-password", 600_000)
     await expect(handleAccountsMessage({
       type: "ACCOUNTS_CREATE_FROM_SHARE",
       file,
@@ -166,6 +178,7 @@ describe("Accounts background workflow", () => {
     await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})).rejects.toThrow(/already running/i)
     const job = session[ACTIVE_JOB_STORAGE_KEY] as { id: string }
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "password" }, { tab: { id: 12 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" })).rejects.toThrow(/authorized/i)
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: SIGN_IN_URL })
     const email = await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "email" }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" })
     expect(email).toEqual({ ok: true, value: "operator@example.test" })
     expect(JSON.stringify(email)).not.toContain("private-password")
@@ -314,6 +327,8 @@ describe("Accounts background workflow", () => {
   it("dispatches trusted mouse clicks in order and always detaches", async () => {
     const job = await createActiveJob()
     const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" }
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "email" }, sender)
 
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "continue", x: 120.5, y: 240.25 }, sender)).resolves.toEqual({ ok: true })
 
@@ -326,6 +341,7 @@ describe("Accounts background workflow", () => {
     expect(debuggerDetach).toHaveBeenCalledWith({ tabId: 91 })
 
     debuggerSendCommand.mockRejectedValueOnce(new Error("dispatch failed"))
+    ;(session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }).stage = "otp"
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "otp-submit", x: 1, y: 2 }, sender)).rejects.toThrow("dispatch failed")
     expect(debuggerDetach).toHaveBeenCalledTimes(2)
   })

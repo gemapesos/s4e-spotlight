@@ -105,14 +105,24 @@ async function activate(
   if (!finite || rect.width <= 0 || rect.height <= 0) {
     throw new Error(`${missingMessage} The control has invalid click coordinates.`)
   }
-  const response = await send({
+  const click = () => send({
     type: "ACCOUNT_AUTOMATION_CLICK",
     jobId,
     action,
     x: rect.left + rect.width / 2,
     y: rect.top + rect.height / 2,
   })
+  const response = await click()
+  // Other extensions own their UI. Leave it intact when Chrome refuses the attachment.
+  if (!response.ok && isDebuggerBlocked(response.error)) {
+    automationLog.warn("account.switch.debuggerBlocked", { action })
+    throw new Error("Another Chrome extension is preventing automated sign-in. Its interface was left open. Complete sign-in manually, or resolve the conflict and retry the switch.")
+  }
   if (!response.ok) throw new Error(response.error ?? "Chrome could not activate Amazon’s login control.")
+}
+
+function isDebuggerBlocked(error: string | undefined): boolean {
+  return Boolean(error?.includes("chrome-extension:// URL of different extension"))
 }
 
 function prepareStage(stage: string, failureMessage: string): boolean {
