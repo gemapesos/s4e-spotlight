@@ -38,7 +38,7 @@ describe("accounts options page", () => {
     await renderOptions(sendMessage)
     const user = userEvent.setup()
 
-    await user.click(screen.getAllByRole("button", { name: "Delete" })[1])
+    await user.click(screen.getByRole("button", { name: "Delete Example Outdoors" }))
     const dialog = screen.getByRole("alertdialog", { name: "Delete store?" })
     expect(dialog).toHaveTextContent("Example Outdoors")
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNTS_SAVE_VAULT" }))
@@ -63,7 +63,7 @@ describe("accounts options page", () => {
     fireEvent.blur(password)
     expect(password.type).toBe("password")
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[1])
+    fireEvent.click(screen.getByRole("button", { name: "Delete Example Outdoors" }))
     fireEvent.click(within(screen.getByRole("alertdialog", { name: "Delete store?" })).getByRole("button", { name: "Delete" }))
     await vi.waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Save unavailable"))
     await vi.advanceTimersByTimeAsync(10_000)
@@ -106,8 +106,8 @@ describe("accounts options page", () => {
     await renderOptions(sendMessage)
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole("button", { name: "Export" }))
-    const dialog = screen.getByRole("dialog", { name: "Export vault" })
+    await user.click(screen.getByRole("button", { name: /^Export vault/ }))
+    const dialog = screen.getByRole("dialog", { name: /^Export vault/ })
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNTS_EXPORT_SHARE" }))
     await user.type(within(dialog).getByLabelText("Share password"), "share-password")
     await user.type(within(dialog).getByLabelText("Confirm share password"), "other-password")
@@ -139,7 +139,7 @@ describe("accounts options page", () => {
     await renderOptions(sendMessage)
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole("button", { name: "Import" }))
+    await user.click(screen.getByRole("button", { name: /^Import shared vault/ }))
     const dialog = screen.getByRole("dialog", { name: "Import vault" })
     const file = new File([JSON.stringify(share)], "s4e-spotlight-vault-share.json", { type: "application/json" })
     await user.upload(within(dialog).getByLabelText("Share file"), file)

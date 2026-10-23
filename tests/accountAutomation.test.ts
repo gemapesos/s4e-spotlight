@@ -62,6 +62,47 @@ describe("Seller Central account automation", () => {
     })
   })
 
+  async function loadWithBlockedDebugger(extraHtml: string, clickResults: Array<{ ok: boolean; error?: string }>) {
+    document.body.innerHTML = `<form><input id="ap_email" type="email"><input id="continue" type="submit" value="Continue"></form>${extraHtml}`
+    makeVisible()
+    vi.spyOn(window, "setTimeout").mockImplementation(() => undefined as never)
+    const click = vi.spyOn(HTMLElement.prototype, "click").mockImplementation(() => undefined)
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_SECRET") return { ok: true, value: "operator@example.test" }
+      if (message.type === "ACCOUNT_AUTOMATION_CLICK") return clickResults.shift() ?? { ok: true }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage, id: "ownextension" } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    return { click, sendMessage }
+  }
+
+  const blocked = { ok: false, error: "Cannot access a chrome-extension:// URL of different extension" }
+
+  it("leaves another extension's frame intact and explains a debugger conflict", async () => {
+    const { click, sendMessage } = await loadWithBlockedDebugger(
+      '<iframe id="foreign" src="chrome-extension://otherextension/autofill.html"></iframe><iframe id="own" src="chrome-extension://ownextension/x.html"></iframe>', [blocked],
+    )
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_ERROR", error: expect.stringContaining("Its interface was left open") })))
+    expect(sendMessage.mock.calls.filter(([m]) => m.type === "ACCOUNT_AUTOMATION_CLICK")).toHaveLength(1)
+    expect(document.querySelector("#foreign")).not.toBeNull()
+    expect(document.querySelector("#own")).not.toBeNull()
+    expect(click).not.toHaveBeenCalled()
+  })
+
+  it("fails with a clear message when the blocking extension frame cannot be found", async () => {
+    const { click, sendMessage } = await loadWithBlockedDebugger("", [blocked])
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "ACCOUNT_AUTOMATION_ERROR",
+      error: expect.stringContaining("Another Chrome extension is preventing"),
+    })))
+    expect(sendMessage.mock.calls.filter(([m]) => m.type === "ACCOUNT_AUTOMATION_CLICK")).toHaveLength(1)
+    expect(click).not.toHaveBeenCalled()
+  })
+
   it("waits during logout even when Amazon shows a re-auth email form", async () => {
     document.body.innerHTML = '<form><input id="ap_email" type="email"><input id="continue" type="submit" value="Continue"></form>'
     makeVisible()

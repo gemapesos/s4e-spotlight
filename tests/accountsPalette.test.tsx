@@ -63,12 +63,12 @@ describe("Accounts palette", () => {
 
     await user.type(screen.getByRole("combobox", { name: "Search commands" }), "JMG")
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
-    await user.type(await screen.findByLabelText("Master password"), "master password")
-    await user.keyboard("{Enter}")
+    expect(screen.queryByLabelText("Master password")).not.toBeInTheDocument()
+    await user.click(await screen.findByRole("button", { name: "Unlock accounts" }))
 
     await vi.waitFor(() => {
-      expect(props.onUnlockAccounts).toHaveBeenCalledWith("master password")
-      expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
+      expect(props.onUnlockAccounts).toHaveBeenCalledWith("store-1")
+      expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
       expect(props.onOpenChange).toHaveBeenCalledWith(false)
     })
   })
@@ -133,33 +133,27 @@ describe("Accounts palette", () => {
     const props = renderAccounts({ onGetAccountsStatus: getStatus })
     await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
-    await user.type(await screen.findByLabelText("Master password"), "master password")
-    await user.keyboard("{Enter}")
+    expect(screen.queryByLabelText("Master password")).not.toBeInTheDocument()
+    await user.click(await screen.findByRole("button", { name: "Unlock accounts" }))
     await vi.waitFor(() => {
-      expect(props.onUnlockAccounts).toHaveBeenCalledWith("master password")
-      expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
+      expect(props.onUnlockAccounts).toHaveBeenCalledWith("store-1")
+      expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
       expect(props.onOpenChange).toHaveBeenCalledWith(false)
     })
   })
 
-  it("uses Escape to clear the password before backing through Accounts", async () => {
+  it("backs out of the unlock notice without collecting a password", async () => {
     const user = userEvent.setup()
-    const getStatus = vi.fn().mockResolvedValue({ initialized: true, unlocked: false, stores: [{ id: "store-1", name: "JMG Outdoors" }] })
-    const props = renderAccounts({ onGetAccountsStatus: getStatus })
-
+    const props = renderAccounts({ onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: true, unlocked: false, stores: [{ id: "store-1", name: "JMG Outdoors" }] }) })
     await user.type(screen.getByRole("combobox", { name: "Search commands" }), "accounts")
     await user.keyboard("{Enter}")
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
-    const password = await screen.findByLabelText("Master password")
-    await user.type(password, "wrong")
-
+    expect(screen.queryByLabelText("Master password")).not.toBeInTheDocument()
     await user.keyboard("{Escape}")
-    expect(password).toHaveValue("")
-    await user.keyboard("{Escape}")
-    expect(screen.getByRole("button", { name: "Back" })).toBeVisible()
+    expect(await screen.findByRole("combobox", { name: "Search accounts" })).toBeVisible()
     await user.keyboard("{Escape}")
     expect(screen.getByRole("combobox", { name: "Search commands" })).toHaveValue("accounts")
-    expect(props.onOpenChange).not.toHaveBeenCalled()
+    expect(props.onUnlockAccounts).not.toHaveBeenCalled()
   })
 
   it("ignores Escape while accounts are loading", async () => {
@@ -179,35 +173,21 @@ describe("Accounts palette", () => {
     expect(await screen.findByText("No stores configured.")).toBeVisible()
   })
 
-  it("ignores Escape while unlocking and switching accounts", async () => {
+  it("ignores Escape while opening the secure Accounts page", async () => {
     const user = userEvent.setup()
     let finishUnlock: (() => void) | undefined
-    let finishSwitch: (() => void) | undefined
-    const getStatus = vi.fn().mockResolvedValue({ initialized: true, unlocked: false, stores: [{ id: "store-1", name: "JMG Outdoors" }] })
     const props = renderAccounts({
-      onGetAccountsStatus: getStatus,
+      onGetAccountsStatus: vi.fn().mockResolvedValue({ initialized: true, unlocked: false, stores: [{ id: "store-1", name: "JMG Outdoors" }] }),
       onUnlockAccounts: vi.fn(() => new Promise<void>((resolve) => { finishUnlock = resolve })),
-      onStartAccountSwitch: vi.fn(() => new Promise<void>((resolve) => { finishSwitch = resolve })),
     })
-
     await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
-    const password = await screen.findByLabelText("Master password")
-    await user.type(password, "master password")
-    await user.keyboard("{Enter}")
-
+    await user.click(await screen.findByRole("button", { name: "Unlock accounts" }))
     await user.keyboard("{Escape}")
-    expect(password).toHaveValue("master password")
     expect(props.onOpenChange).not.toHaveBeenCalled()
-
     await act(async () => { finishUnlock?.() })
-    await vi.waitFor(() => expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1"))
-    await user.keyboard("{Escape}")
-    expect(password).toHaveValue("master password")
-    expect(props.onOpenChange).not.toHaveBeenCalled()
-
-    await act(async () => { finishSwitch?.() })
     await vi.waitFor(() => expect(props.onOpenChange).toHaveBeenCalledWith(false))
+    expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
   })
 
   it("opens Manage Accounts from an empty vault", async () => {

@@ -26,7 +26,17 @@ function logNow() {
 	return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
 function clipLogText(value, limit = LOG_TEXT_LIMIT) {
-	return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+	const safe = value.replace(/otpauth:\/\/[^\s"'<>]+/giu, "[REDACTED]");
+	return safe.length > limit ? `${safe.slice(0, limit - 1)}…` : safe;
+}
+/** Scrub before console output as well as before forwarding or storing an entry. */
+function redactLogData(value, seen = new WeakSet(), depth = 0) {
+	if (typeof value === "string") return value.replace(/otpauth:\/\/[^\s"'<>]+/giu, "[REDACTED]");
+	if (!value || typeof value !== "object") return value;
+	if (seen.has(value) || depth >= 8) return "[OMITTED]";
+	seen.add(value);
+	if (Array.isArray(value)) return value.map((item) => redactLogData(item, seen, depth + 1));
+	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /password|passphrase|secret|otpauth|authorization|cookie|accesstoken|refreshtoken|apikey|privatekey|^(otp|otpcode)$/iu.test(key.replace(/[^a-z]/giu, "")) ? "[REDACTED]" : redactLogData(item, seen, depth + 1)]));
 }
 function errorMessage(error, fallback = "Unknown error.") {
 	if (error instanceof Error && error.message) return error.message;
@@ -44,6 +54,9 @@ function describeError(error) {
 	return described;
 }
 function writeLogEntry(entry) {
+	const safe = sanitizeLogEntry(entry);
+	if (!safe) return;
+	entry = safe;
 	if (logToConsole) {
 		const write = entry.level === "error" ? console.error : entry.level === "warn" ? console.warn : console.info;
 		const timing = entry.ms === undefined ? "" : ` ${entry.ms}ms`;
@@ -129,15 +142,16 @@ function sanitizeLogEntry(value) {
 		event: clipLogText(record.event, 120)
 	};
 	if (typeof record.run === "string") entry.run = clipLogText(record.run, 60);
+	if (typeof record.tab === "number" && Number.isInteger(record.tab) && record.tab >= 0) entry.tab = record.tab;
 	if (typeof record.ms === "number" && Number.isFinite(record.ms)) entry.ms = record.ms;
 	if (record.data && typeof record.data === "object") {
 		let serialized = "";
 		try {
-			serialized = JSON.stringify(record.data);
+			serialized = JSON.stringify(redactLogData(record.data));
 		} catch {
 			serialized = "";
 		}
-		entry.data = serialized.length <= LOG_DATA_LIMIT ? record.data : {
+		entry.data = serialized.length <= LOG_DATA_LIMIT ? JSON.parse(serialized || "{}") : {
 			truncated: true,
 			preview: clipLogText(serialized, LOG_TEXT_LIMIT)
 		};
@@ -155,7 +169,8 @@ function createLogStore(storage, maxEntries = MAX_STORED_LOG_ENTRIES) {
 	let chain = Promise.resolve();
 	const readStored = async () => {
 		const stored = (await storage.get(LOGS_STORAGE_KEY))[LOGS_STORAGE_KEY];
-		return Array.isArray(stored) ? stored : [];
+		// Apply the current policy to entries saved by older extension versions as well.
+		return Array.isArray(stored) ? stored.map(sanitizeLogEntry).filter((entry) => entry !== undefined) : [];
 	};
 	const enqueue = (task) => {
 		const next = chain.then(task, task);
@@ -176,7 +191,7 @@ function createLogStore(storage, maxEntries = MAX_STORED_LOG_ENTRIES) {
 	return {
 		append: (entries) => {
 			if (entries.length === 0) return;
-			pending.push(...entries);
+			pending.push(...entries.map(sanitizeLogEntry).filter((entry) => entry !== undefined));
 			timer ??= setTimeout(() => void flush().catch(() => undefined), LOG_STORE_FLUSH_MS);
 		},
 		read: async () => {
@@ -3991,6 +4006,270 @@ async function fetchShippingQueueShipments(options = {}) {
 	return withDetails;
 }
 
+/**
+* Reads a Seller Central case, including every reply page, from the signed-in tab.
+* Content scripts concatenate this file, so it must not import anything and its
+* top-level names must stay unique across the content-script bundle.
+*/
+const VIEW_CASE_PAGE_SIZE = 10;
+const VIEW_CASE_MAX_PAGES = 100;
+const VIEW_CASE_ENDPOINT = "https://sellercentral.amazon.com/hill/hillservice/mons-api/ViewCase";
+const VIEW_CASE_ORIGIN_REFERRER = "https://sellercentral.amazon.com/cu/case-dashboard/view-case";
+const VIEW_CASE_SIGN_IN_ERROR = "Sign in to Seller Central, then try again.";
+const CASE_PAGE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID=";
+const CASE_HTML_ENTITIES = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: "\"",
+	apos: "'",
+	nbsp: " "
+};
+function casePageUrl(caseId) {
+	return `${CASE_PAGE_URL}${caseId}`;
+}
+function viewCaseRequestUrl(caseId, timeZone, currentToken) {
+	const params = new URLSearchParams({
+		caseId,
+		timeZone,
+		pageSize: String(VIEW_CASE_PAGE_SIZE)
+	});
+	if (currentToken) params.set("currentToken", currentToken);
+	return `${VIEW_CASE_ENDPOINT}?${params.toString()}`;
+}
+function caseScrapeFileName(caseIds, date = new Date()) {
+	if (caseIds.length === 1) return `case-${caseIds[0]}.json`;
+	const day = [
+		date.getFullYear(),
+		date.getMonth() + 1,
+		date.getDate()
+	].map((part) => String(part).padStart(2, "0")).join("-");
+	return `cases-${caseIds.length}-${day}.json`;
+}
+/** A message for the palette when the file is incomplete. Undefined when every case loaded. */
+function caseScrapeFailure(file) {
+	const errors = file.errors ?? [];
+	if (file.cases.length > 0 && errors.length === 0) return undefined;
+	if (errors.length === 1) return `Couldn’t scrape ${errors[0].caseId}. ${errors[0].error}`;
+	if (errors.length > 1) return `Couldn’t scrape ${errors.map((item) => item.caseId).join(", ")}.`;
+	return "Couldn’t scrape cases. Please try again.";
+}
+function downloadCaseScrape(file, caseIds, targetDocument = document, date = new Date()) {
+	const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }));
+	const anchor = targetDocument.createElement("a");
+	anchor.href = url;
+	anchor.download = caseScrapeFileName(caseIds, date);
+	targetDocument.body.append(anchor);
+	anchor.click();
+	anchor.remove();
+	setTimeout(() => URL.revokeObjectURL(url), 1e3);
+}
+function decodeCaseHtml(value) {
+	return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity) => {
+		if (entity.startsWith("#x") || entity.startsWith("#X")) {
+			const code = Number.parseInt(entity.slice(2), 16);
+			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+		}
+		if (entity.startsWith("#")) {
+			const code = Number.parseInt(entity.slice(1), 10);
+			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+		}
+		return CASE_HTML_ENTITIES[entity] ?? match;
+	});
+}
+/** Epoch seconds as an ISO timestamp in `timeZone`, such as 2026-10-05T19:21:54.913+08:00. */
+function formatCaseTimestamp(seconds, timeZone) {
+	const date = new Date(Math.round(seconds * 1e3));
+	if (Number.isNaN(date.getTime())) throw new Error("Couldn’t load this case.");
+	const parts = caseTimestampParts(date, timeZone, true);
+	let hour = parts.hour;
+	if (hour === "24") hour = "00";
+	return `${parts.year}-${parts.month}-${parts.day}T${hour}:${parts.minute}:${parts.second}.${parts.fractionalSecond}${caseTimestampOffset(date, timeZone)}`;
+}
+function caseTimestampParts(date, timeZone, fractional) {
+	const formatter = new Intl.DateTimeFormat("en-US", {
+		timeZone,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hourCycle: "h23",
+		...fractional ? { fractionalSecondDigits: 3 } : {}
+	});
+	return Object.fromEntries(formatter.formatToParts(date).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+}
+function caseTimestampOffset(date, timeZone) {
+	const parts = caseTimestampParts(date, timeZone, false);
+	let hour = Number(parts.hour);
+	if (hour === 24) hour = 0;
+	const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), hour, Number(parts.minute), Number(parts.second));
+	const offsetMinutes = Math.round((asUtc - Math.floor(date.getTime() / 1e3) * 1e3) / 6e4);
+	const sign = offsetMinutes >= 0 ? "+" : "-";
+	const absolute = Math.abs(offsetMinutes);
+	return `${sign}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}`;
+}
+function viewCaseRecord(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value;
+}
+function decodeCaseMessage(value) {
+	if (typeof value === "string") return decodeCaseHtml(value);
+	const record = viewCaseRecord(value);
+	if (!record) return value;
+	const next = { ...record };
+	if (typeof next.message === "string") next.message = decodeCaseHtml(next.message);
+	if ("hmdMetaData" in next) next.hmdMetaData = decodeCaseMessage(next.hmdMetaData);
+	if (Array.isArray(next.messageList)) next.messageList = next.messageList.map((item) => decodeCaseMessage(item));
+	if (typeof next.beforeHMDContent === "string") next.beforeHMDContent = decodeCaseHtml(next.beforeHMDContent);
+	if (typeof next.afterHMDContent === "string") next.afterHMDContent = decodeCaseHtml(next.afterHMDContent);
+	return next;
+}
+function presentCaseContact(contact, timeZone) {
+	const next = decodeCaseMessage(contact);
+	if (typeof next.timestamp === "number" && Number.isFinite(next.timestamp)) {
+		next.timestampIso = formatCaseTimestamp(next.timestamp, timeZone);
+	}
+	return next;
+}
+function responseContentType(response) {
+	return response.headers?.get("content-type") ?? "";
+}
+function isViewCaseSessionResponse(response) {
+	if (response.status === 401 || response.status === 403) return true;
+	return /text\/html/i.test(responseContentType(response));
+}
+function parseViewCasePage(payload) {
+	const record = viewCaseRecord(payload);
+	const meta = record ? viewCaseRecord(record.viewCaseMetaData) : undefined;
+	if (!record || !meta || !Array.isArray(record.contactList)) throw new Error("Couldn’t load this case.");
+	const total = record.totalNumberOfContacts;
+	if (typeof total !== "number" || !Number.isFinite(total)) throw new Error("Couldn’t load this case.");
+	const contactList = [];
+	for (const item of record.contactList) {
+		const contact = viewCaseRecord(item);
+		if (!contact) throw new Error("Couldn’t load this case.");
+		contactList.push(contact);
+	}
+	const token = typeof record.currentToken === "string" && record.currentToken.length > 0 ? record.currentToken : null;
+	return {
+		appointmentMetadata: record.appointmentMetadata ?? null,
+		contactList,
+		currentToken: token,
+		liveConversation: record.liveConversation ?? null,
+		totalNumberOfContacts: total,
+		viewCaseMetaData: meta
+	};
+}
+async function fetchViewCasePage(fetchImpl, caseId, timeZone, currentToken) {
+	let response;
+	try {
+		response = await fetchImpl(viewCaseRequestUrl(caseId, timeZone, currentToken), {
+			method: "GET",
+			mode: "cors",
+			credentials: "include",
+			referrer: casePageUrl(caseId),
+			headers: {
+				accept: "application/json, text/plain, */*",
+				"accept-language": "en-US,en;q=0.9",
+				"anti-csrftoken-a2z-request": "true",
+				"client-id": "viewCase",
+				"origin-referrer": VIEW_CASE_ORIGIN_REFERRER
+			}
+		});
+	} catch {
+		throw new Error("Couldn’t load this case.");
+	}
+	if (isViewCaseSessionResponse(response)) throw new Error(VIEW_CASE_SIGN_IN_ERROR);
+	if (!response.ok) throw new Error(`Couldn’t load this case (${response.status}).`);
+	try {
+		return parseViewCasePage(await response.json());
+	} catch (error) {
+		if (error instanceof Error && error.message === "Couldn’t load this case.") throw error;
+		throw new Error("Couldn’t load this case.");
+	}
+}
+function contactKey(contact) {
+	return typeof contact.contactId === "string" && contact.contactId.length > 0 ? contact.contactId : undefined;
+}
+async function fetchWholeCase(fetchImpl, caseId, timeZone) {
+	const collected = [];
+	const seenContactIds = new Set();
+	const seenTokens = new Set();
+	let token;
+	let total;
+	let viewCaseMetaData;
+	let appointmentMetadata;
+	let liveConversation;
+	for (let page = 0; page < VIEW_CASE_MAX_PAGES; page += 1) {
+		if (token) {
+			if (seenTokens.has(token)) break;
+			seenTokens.add(token);
+		}
+		const result = await fetchViewCasePage(fetchImpl, caseId, timeZone, token);
+		if (viewCaseMetaData === undefined) {
+			viewCaseMetaData = result.viewCaseMetaData;
+			appointmentMetadata = result.appointmentMetadata;
+			liveConversation = result.liveConversation;
+			total = result.totalNumberOfContacts;
+		}
+		for (const contact of result.contactList) {
+			const key = contactKey(contact);
+			if (key) {
+				if (seenContactIds.has(key)) continue;
+				seenContactIds.add(key);
+			}
+			collected.push(contact);
+		}
+		if (typeof total === "number" && collected.length >= total) break;
+		if (!result.currentToken) break;
+		token = result.currentToken;
+	}
+	if (!viewCaseMetaData || collected.length !== total) throw new Error("Couldn’t load the whole case.");
+	const meta = { ...viewCaseMetaData };
+	if (typeof meta.creationDate === "number" && Number.isFinite(meta.creationDate)) {
+		meta.creationDateIso = formatCaseTimestamp(meta.creationDate, timeZone);
+	}
+	const contacts = collected.map((contact) => presentCaseContact(contact, timeZone)).sort((left, right) => {
+		const leftTime = typeof left.timestamp === "number" ? left.timestamp : Number.POSITIVE_INFINITY;
+		const rightTime = typeof right.timestamp === "number" ? right.timestamp : Number.POSITIVE_INFINITY;
+		if (leftTime === rightTime) return 0;
+		return leftTime < rightTime ? -1 : 1;
+	});
+	return {
+		caseId,
+		caseUrl: casePageUrl(caseId),
+		viewCaseMetaData: meta,
+		totalNumberOfContacts: total,
+		appointmentMetadata: appointmentMetadata ?? null,
+		liveConversation: liveConversation ?? null,
+		contacts
+	};
+}
+async function scrapeCases(fetchImpl, caseIds, options = {}) {
+	const timeZone = options.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+	const now = options.now ?? new Date();
+	const cases = [];
+	const errors = [];
+	for (const caseId of caseIds) {
+		try {
+			cases.push(await fetchWholeCase(fetchImpl, caseId, timeZone));
+		} catch (error) {
+			errors.push({
+				caseId,
+				error: error instanceof Error && error.message ? error.message : "Couldn’t load this case."
+			});
+		}
+	}
+	return {
+		scrapedAt: now.toISOString(),
+		timeZone,
+		cases,
+		...errors.length > 0 ? { errors } : {}
+	};
+}
+
 const PALETTE_APP_FILE = "palette-app.js";
 const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated.";
 const PALETTE_UNSUPPORTED_PAGE = "The command palette can’t open on this page.";
@@ -4043,11 +4322,12 @@ function handleContentKeyDown(event, load = loadPalette) {
 		window.addEventListener("keydown", onKeyDown, true);
 	});
 }
-function emitReportProgress(event) {
+function emitReportProgress(event, runId) {
 	if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return;
 	void chrome.runtime.sendMessage({
 		type: "REPORTS_PROGRESS",
-		...event
+		...event,
+		...runId ? { runId } : {}
 	}).then(() => undefined, () => undefined);
 }
 /** Report sources this content script loads from the signed-in Seller Central tab, by message type. */
@@ -4111,14 +4391,65 @@ const REPORT_FETCHERS = {
 		}
 	}
 };
+const reportControllers = new Map();
+function reportFetchScope(runId) {
+	if (!runId) return {
+		fetch: globalThis.fetch,
+		release: () => undefined
+	};
+	const scope = reportControllers.get(runId) ?? {
+		controller: new AbortController(),
+		active: 0
+	};
+	scope.active += 1;
+	reportControllers.set(runId, scope);
+	return {
+		fetch: (input, init) => globalThis.fetch(input, {
+			...init,
+			signal: init?.signal ? AbortSignal.any([scope.controller.signal, init.signal]) : scope.controller.signal
+		}),
+		release: () => {
+			if (--scope.active === 0) reportControllers.delete(runId);
+		}
+	};
+}
+async function scrapeCasesFromPage(caseIds, runId) {
+	const scope = reportFetchScope(runId);
+	const monitor = createRequestMonitor(scope.fetch, contentLog);
+	const done = contentLog.time("case.scrape", { requested: caseIds.length });
+	try {
+		const file = await scrapeCases(monitor.fetch, caseIds);
+		done({
+			cases: file.cases.length,
+			errors: file.errors?.length ?? 0,
+			requests: monitor.summary()
+		});
+		return {
+			ok: true,
+			file
+		};
+	} catch (error) {
+		done({
+			error: describeError(error),
+			requests: monitor.summary()
+		}, "error");
+		return {
+			ok: false,
+			error: errorMessage(error, "Couldn’t scrape cases.")
+		};
+	} finally {
+		scope.release();
+	}
+}
 async function runReportFetcher(fetcher, runId) {
 	const log = contentLog.withRun(runId);
-	const monitor = createRequestMonitor(globalThis.fetch, log);
+	const scope = reportFetchScope(runId);
+	const monitor = createRequestMonitor(scope.fetch, log);
 	const done = log.time("report.fetch", { source: fetcher.source });
 	try {
 		const { response, count } = await fetcher.run({
 			fetch: monitor.fetch,
-			onProgress: emitReportProgress,
+			onProgress: (event) => emitReportProgress(event, runId),
 			log
 		});
 		done({
@@ -4138,17 +4469,40 @@ async function runReportFetcher(fetcher, runId) {
 			ok: false,
 			error: errorMessage(error, fetcher.fallbackError)
 		};
+	} finally {
+		scope.release();
 	}
 }
-function handleContentMessage(message, _sender, sendResponse, load = loadPalette) {
+function handleContentMessage(message, sender, sendResponse, load = loadPalette) {
 	if (!message || typeof message !== "object" || !("type" in message)) return undefined;
+	if (typeof chrome === "undefined" || !chrome.runtime?.id || sender.id !== chrome.runtime.id || sender.tab || sender.url && sender.url !== chrome.runtime.getURL("background.js")) {
+		sendResponse({
+			ok: false,
+			error: "Unauthorized extension message."
+		});
+		return undefined;
+	}
 	const record = message;
+	if (record.type === "ACCOUNTS_RESUME_CHECK") {
+		sendResponse({ ok: true });
+		return;
+	}
+	if (record.type === "REPORTS_ABORT") {
+		if (typeof record.runId === "string") reportControllers.get(record.runId)?.controller.abort();
+		sendResponse({ ok: true });
+		return;
+	}
 	if (record.type === "REPORTS_SESSION_STATUS") {
 		sendResponse({
 			ok: true,
 			...sellerCentralSessionStatus()
 		});
 		return;
+	}
+	if (record.type === "SCRAPE_CASES") {
+		const caseIds = Array.isArray(record.caseIds) ? record.caseIds.filter((id) => typeof id === "string") : [];
+		void scrapeCasesFromPage(caseIds, typeof record.runId === "string" ? record.runId : undefined).then(sendResponse);
+		return true;
 	}
 	if (record.type === "OPEN_PALETTE") {
 		const mode = record.mode === "report-login" ? "report-login" : undefined;

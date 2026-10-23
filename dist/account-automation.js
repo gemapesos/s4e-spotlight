@@ -26,7 +26,17 @@ function logNow() {
 	return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
 function clipLogText(value, limit = LOG_TEXT_LIMIT) {
-	return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+	const safe = value.replace(/otpauth:\/\/[^\s"'<>]+/giu, "[REDACTED]");
+	return safe.length > limit ? `${safe.slice(0, limit - 1)}…` : safe;
+}
+/** Scrub before console output as well as before forwarding or storing an entry. */
+function redactLogData(value, seen = new WeakSet(), depth = 0) {
+	if (typeof value === "string") return value.replace(/otpauth:\/\/[^\s"'<>]+/giu, "[REDACTED]");
+	if (!value || typeof value !== "object") return value;
+	if (seen.has(value) || depth >= 8) return "[OMITTED]";
+	seen.add(value);
+	if (Array.isArray(value)) return value.map((item) => redactLogData(item, seen, depth + 1));
+	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /password|passphrase|secret|otpauth|authorization|cookie|accesstoken|refreshtoken|apikey|privatekey|^(otp|otpcode)$/iu.test(key.replace(/[^a-z]/giu, "")) ? "[REDACTED]" : redactLogData(item, seen, depth + 1)]));
 }
 function errorMessage(error, fallback = "Unknown error.") {
 	if (error instanceof Error && error.message) return error.message;
@@ -44,6 +54,9 @@ function describeError(error) {
 	return described;
 }
 function writeLogEntry(entry) {
+	const safe = sanitizeLogEntry(entry);
+	if (!safe) return;
+	entry = safe;
 	if (logToConsole) {
 		const write = entry.level === "error" ? console.error : entry.level === "warn" ? console.warn : console.info;
 		const timing = entry.ms === undefined ? "" : ` ${entry.ms}ms`;
@@ -129,15 +142,16 @@ function sanitizeLogEntry(value) {
 		event: clipLogText(record.event, 120)
 	};
 	if (typeof record.run === "string") entry.run = clipLogText(record.run, 60);
+	if (typeof record.tab === "number" && Number.isInteger(record.tab) && record.tab >= 0) entry.tab = record.tab;
 	if (typeof record.ms === "number" && Number.isFinite(record.ms)) entry.ms = record.ms;
 	if (record.data && typeof record.data === "object") {
 		let serialized = "";
 		try {
-			serialized = JSON.stringify(record.data);
+			serialized = JSON.stringify(redactLogData(record.data));
 		} catch {
 			serialized = "";
 		}
-		entry.data = serialized.length <= LOG_DATA_LIMIT ? record.data : {
+		entry.data = serialized.length <= LOG_DATA_LIMIT ? JSON.parse(serialized || "{}") : {
 			truncated: true,
 			preview: clipLogText(serialized, LOG_TEXT_LIMIT)
 		};
@@ -155,7 +169,8 @@ function createLogStore(storage, maxEntries = MAX_STORED_LOG_ENTRIES) {
 	let chain = Promise.resolve();
 	const readStored = async () => {
 		const stored = (await storage.get(LOGS_STORAGE_KEY))[LOGS_STORAGE_KEY];
-		return Array.isArray(stored) ? stored : [];
+		// Apply the current policy to entries saved by older extension versions as well.
+		return Array.isArray(stored) ? stored.map(sanitizeLogEntry).filter((entry) => entry !== undefined) : [];
 	};
 	const enqueue = (task) => {
 		const next = chain.then(task, task);
@@ -176,7 +191,7 @@ function createLogStore(storage, maxEntries = MAX_STORED_LOG_ENTRIES) {
 	return {
 		append: (entries) => {
 			if (entries.length === 0) return;
-			pending.push(...entries);
+			pending.push(...entries.map(sanitizeLogEntry).filter((entry) => entry !== undefined));
 			timer ??= setTimeout(() => void flush().catch(() => undefined), LOG_STORE_FLUSH_MS);
 		},
 		read: async () => {
@@ -497,14 +512,23 @@ async function activate(jobId, element, action, missingMessage) {
 	if (!finite || rect.width <= 0 || rect.height <= 0) {
 		throw new Error(`${missingMessage} The control has invalid click coordinates.`);
 	}
-	const response = await send({
+	const click = () => send({
 		type: "ACCOUNT_AUTOMATION_CLICK",
 		jobId,
 		action,
 		x: rect.left + rect.width / 2,
 		y: rect.top + rect.height / 2
 	});
+	const response = await click();
+	// Other extensions own their UI. Leave it intact when Chrome refuses the attachment.
+	if (!response.ok && isDebuggerBlocked(response.error)) {
+		automationLog.warn("account.switch.debuggerBlocked", { action });
+		throw new Error("Another Chrome extension is preventing automated sign-in. Its interface was left open. Complete sign-in manually, or resolve the conflict and retry the switch.");
+	}
 	if (!response.ok) throw new Error(response.error ?? "Chrome could not activate Amazon’s login control.");
+}
+function isDebuggerBlocked(error) {
+	return Boolean(error?.includes("chrome-extension:// URL of different extension"));
 }
 function prepareStage(stage, failureMessage) {
 	if (inFlight?.stage !== stage) {

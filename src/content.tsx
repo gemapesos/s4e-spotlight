@@ -15,6 +15,7 @@ import { fetchShippingQueueShipments } from "./lib/shippingQueue"
 import { fetchStrandedListings } from "./lib/stranded"
 import { fetchSuppressedListings } from "./lib/suppressed"
 import { fetchNextRemovalOrderId, fetchUnfulfillableListings } from "./lib/unfulfillable"
+import { scrapeCases } from "./lib/viewCase"
 
 const PALETTE_APP_FILE = "palette-app.js"
 const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated."
@@ -89,9 +90,9 @@ export function handleContentKeyDown(
     })
 }
 
-function emitReportProgress(event: ReportProgressEvent): void {
+function emitReportProgress(event: ReportProgressEvent, runId?: string): void {
   if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return
-  void chrome.runtime.sendMessage({ type: "REPORTS_PROGRESS", ...event }).then(
+  void chrome.runtime.sendMessage({ type: "REPORTS_PROGRESS", ...event, ...(runId ? { runId } : {}) }).then(
     () => undefined,
     () => undefined,
   )
@@ -156,31 +157,84 @@ const REPORT_FETCHERS: Record<string, ReportFetcher> = {
   },
 }
 
+const reportControllers = new Map<string, { controller: AbortController; active: number }>()
+
+function reportFetchScope(runId?: string): { fetch: typeof globalThis.fetch; release: () => void } {
+  if (!runId) return { fetch: globalThis.fetch, release: () => undefined }
+  const scope = reportControllers.get(runId) ?? { controller: new AbortController(), active: 0 }
+  scope.active += 1
+  reportControllers.set(runId, scope)
+  return {
+    fetch: (input, init) => globalThis.fetch(input, {
+      ...init,
+      signal: init?.signal ? AbortSignal.any([scope.controller.signal, init.signal]) : scope.controller.signal,
+    }),
+    release: () => { if (--scope.active === 0) reportControllers.delete(runId) },
+  }
+}
+
+async function scrapeCasesFromPage(caseIds: readonly string[], runId?: string): Promise<Record<string, unknown>> {
+  const scope = reportFetchScope(runId)
+  const monitor = createRequestMonitor(scope.fetch, contentLog)
+  const done = contentLog.time("case.scrape", { requested: caseIds.length })
+  try {
+    const file = await scrapeCases(monitor.fetch, caseIds)
+    done({
+      cases: file.cases.length,
+      errors: file.errors?.length ?? 0,
+      requests: monitor.summary(),
+    })
+    return { ok: true, file }
+  } catch (error) {
+    done({ error: describeError(error), requests: monitor.summary() }, "error")
+    return { ok: false, error: errorMessage(error, "Couldn’t scrape cases.") }
+  } finally { scope.release() }
+}
+
 async function runReportFetcher(fetcher: ReportFetcher, runId: string | undefined): Promise<Record<string, unknown>> {
   const log = contentLog.withRun(runId)
-  const monitor = createRequestMonitor(globalThis.fetch, log)
+  const scope = reportFetchScope(runId)
+  const monitor = createRequestMonitor(scope.fetch, log)
   const done = log.time("report.fetch", { source: fetcher.source })
   try {
-    const { response, count } = await fetcher.run({ fetch: monitor.fetch, onProgress: emitReportProgress, log })
+    const { response, count } = await fetcher.run({ fetch: monitor.fetch, onProgress: (event) => emitReportProgress(event, runId), log })
     done({ count, requests: monitor.summary() })
     return { ok: true, ...response }
   } catch (error) {
     done({ error: describeError(error), requests: monitor.summary() }, "error")
     return { ok: false, error: errorMessage(error, fetcher.fallbackError) }
-  }
+  } finally { scope.release() }
 }
 
 export function handleContentMessage(
   message: unknown,
-  _sender: chrome.runtime.MessageSender,
+  sender: chrome.runtime.MessageSender,
   sendResponse: (response: unknown) => void,
   load: () => Promise<MountedPalette> = loadPalette,
 ): boolean | undefined {
   if (!message || typeof message !== "object" || !("type" in message)) return undefined
-  const record = message as { type?: unknown; mode?: unknown; runId?: unknown }
+  if (typeof chrome === "undefined" || !chrome.runtime?.id || sender.id !== chrome.runtime.id || sender.tab
+    || (sender.url && sender.url !== chrome.runtime.getURL("background.js"))) {
+    sendResponse({ ok: false, error: "Unauthorized extension message." })
+    return undefined
+  }
+  const record = message as { type?: unknown; mode?: unknown; runId?: unknown; caseIds?: unknown }
+  if (record.type === "ACCOUNTS_RESUME_CHECK") { sendResponse({ ok: true }); return }
+  if (record.type === "REPORTS_ABORT") {
+    if (typeof record.runId === "string") reportControllers.get(record.runId)?.controller.abort()
+    sendResponse({ ok: true })
+    return
+  }
   if (record.type === "REPORTS_SESSION_STATUS") {
     sendResponse({ ok: true, ...sellerCentralSessionStatus() })
     return
+  }
+  if (record.type === "SCRAPE_CASES") {
+    const caseIds = Array.isArray(record.caseIds)
+      ? record.caseIds.filter((id): id is string => typeof id === "string")
+      : []
+    void scrapeCasesFromPage(caseIds, typeof record.runId === "string" ? record.runId : undefined).then(sendResponse)
+    return true
   }
   if (record.type === "OPEN_PALETTE") {
     const mode = record.mode === "report-login" ? "report-login" : undefined

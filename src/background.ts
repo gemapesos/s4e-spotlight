@@ -77,6 +77,8 @@ type SenderTab = chrome.tabs.Tab & { id: number; windowId: number }
 
 const MAX_BULK_IDS = 50
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
+const UNLOCK_ATTEMPTS_KEY = "accountsUnlockAttempts"
+const UNLOCK_RESUME_KEY = "accountsUnlockResume"
 const log = createLogger("background")
 const createChromeTab: CreateTab = (properties) => chrome.tabs.create(properties)
 const removeChromeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)
@@ -307,6 +309,103 @@ let reportProgressTabId: number | undefined
 
 type ApiResponse = { ok: true; [key: string]: unknown } | { ok: false; error: string }
 
+const VAULT_ADMIN_TYPES = new Set([
+  "ACCOUNTS_CREATE", "ACCOUNTS_UNLOCK", "ACCOUNTS_GET_VAULT", "ACCOUNTS_SAVE_VAULT",
+  "ACCOUNTS_EXPORT_SHARE", "ACCOUNTS_IMPORT_SHARE", "ACCOUNTS_CREATE_FROM_SHARE",
+  "ACCOUNTS_CHANGE_MASTER_PASSWORD", "ACCOUNTS_RESET", "ACCOUNTS_RESUME_SWITCH",
+])
+let vaultOperations: Promise<unknown> = Promise.resolve()
+let vaultGeneration = 0
+let operationGeneration = 0
+
+function assertVaultOperationCurrent(): void {
+  if (operationGeneration !== vaultGeneration) throw new Error("The vault changed while this operation was running. Please try again.")
+}
+
+function queueVaultOperation<T>(action: () => Promise<T>): Promise<T> {
+  const generation = vaultGeneration
+  const result = vaultOperations.catch(() => undefined).then(async () => {
+    operationGeneration = generation
+    assertVaultOperationCurrent()
+    const response = await action()
+    assertVaultOperationCurrent()
+    return response
+  })
+  vaultOperations = result.catch(() => undefined)
+  return result
+}
+
+function isOwnSender(sender: chrome.runtime.MessageSender): boolean {
+  return Boolean(chrome.runtime.id && sender.id === chrome.runtime.id)
+}
+
+function isPageSender(sender: chrome.runtime.MessageSender, page: string): boolean {
+  return isOwnSender(sender) && (sender.frameId === undefined || sender.frameId === 0)
+    && sender.url?.split(/[?#]/u)[0] === chrome.runtime.getURL(page)
+}
+
+interface UnlockResume {
+  id: string
+  storeId: string
+  sourceTabId: number
+  sourceDocumentId: string
+  accountsTabId: number
+  startedAt: number
+}
+
+async function requestAccountUnlock(storeId: unknown, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+  const source = requireSenderTab(sender.tab)
+  if (!sender.documentId || sender.frameId !== 0 || typeof storeId !== "string") throw new Error("Open unlock from the store picker.")
+  const stored = await chrome.storage.local.get(STORE_INDEX_KEY)
+  const stores = (stored[STORE_INDEX_KEY] ?? []) as StoreIndexRecord[]
+  if (!stores.some((store) => store.id === storeId)) throw new Error("The selected store no longer exists.")
+  const id = crypto.randomUUID()
+  const tab = await chrome.tabs.create({
+    active: true, windowId: source.windowId, openerTabId: source.id,
+    url: "about:blank",
+  })
+  if (tab.id === undefined) throw new Error("Chrome could not open Accounts.")
+  assertVaultOperationCurrent()
+  const pending: UnlockResume = { id, storeId, sourceTabId: source.id, sourceDocumentId: sender.documentId, accountsTabId: tab.id, startedAt: Date.now() }
+  await chrome.storage.session.set({ [UNLOCK_RESUME_KEY]: pending })
+  // Commit the handoff before Accounts can load and try to consume it.
+  assertVaultOperationCurrent()
+  await chrome.tabs.update(tab.id, { url: `${chrome.runtime.getURL("options.html")}?resume=${encodeURIComponent(id)}` })
+  return { ok: true }
+}
+
+async function resumeAccountSwitch(id: unknown, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+  const pending = (await chrome.storage.session.get(UNLOCK_RESUME_KEY))[UNLOCK_RESUME_KEY] as UnlockResume | undefined
+  if (!pending || pending.id !== id || pending.accountsTabId !== sender.tab?.id || Date.now() - pending.startedAt >= ACTIVE_JOB_TTL_MS) {
+    throw new Error("This store switch has expired. Select the store again from the palette.")
+  }
+  await chrome.storage.session.remove(UNLOCK_RESUME_KEY)
+  // Ask the original document, not a replacement page in the same tab, to confirm it still exists.
+  const source = await chrome.tabs.get(pending.sourceTabId)
+  const alive = await chrome.tabs.sendMessage(source.id!, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: pending.sourceDocumentId }) as { ok?: boolean } | undefined
+  if (!alive?.ok) throw new Error("The original page is no longer open. Select the store again.")
+  await chrome.tabs.update(source.id!, { active: true })
+  const result = await handleAccountsMessageNow({ type: "ACCOUNTS_START_SWITCH", storeId: pending.storeId }, { ...sender, tab: source })
+  return result.ok ? { ...result, resumed: true } : result
+}
+
+/** Serialize key/vault changes; Lock invalidates work immediately and completes after prior commits. */
+export async function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+  if (!isOwnSender(sender)) throw new Error("Unauthorized extension message.")
+  const type = String(message.type)
+  if (VAULT_ADMIN_TYPES.has(type) && !isPageSender(sender, "options.html")) {
+    throw new Error("This vault operation is only available on the Accounts page.")
+  }
+  if (type === "ACCOUNTS_LOCK" && !isPageSender(sender, "options.html") && !isPageSender(sender, "popup.html")) {
+    throw new Error("Lock accounts from an extension page.")
+  }
+  if (type === "ACCOUNTS_STATUS" || type === "ACCOUNT_AUTOMATION_GET_JOB" || type === "ACCOUNTS_OPEN_OPTIONS") {
+    return handleAccountsMessageNow(message, sender)
+  }
+  if (type === "ACCOUNTS_LOCK" || type === "ACCOUNTS_RESET" || type === "ACCOUNTS_CHANGE_MASTER_PASSWORD") vaultGeneration += 1
+  return queueVaultOperation(() => handleAccountsMessageNow(message, sender))
+}
+
 export function validateVault(vault: AccountVault): void {
   const names = new Set<string>()
   const domains = new Set<string>()
@@ -338,12 +437,15 @@ async function getUnlockedVault(): Promise<{ vault: AccountVault; envelope: Encr
   const [envelope, key] = await Promise.all([getEnvelope(), getSessionKey()])
   if (!envelope) throw new Error("Create the account vault first.")
   if (!key) throw new Error("The account vault is locked.")
-  return { vault: await decryptVaultWithKey(envelope, key), envelope, key }
+  const vault = await decryptVaultWithKey(envelope, key)
+  assertVaultOperationCurrent()
+  return { vault, envelope, key }
 }
 async function saveVault(vault: AccountVault, envelope: EncryptedVault, key: Uint8Array): Promise<void> {
   validateVault(vault)
   const salt = Uint8Array.from(atob(envelope.salt), (c) => c.charCodeAt(0))
   const nextEnvelope = await encryptVaultWithKey(vault, key, salt, envelope.iterations)
+  assertVaultOperationCurrent()
   await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: nextEnvelope, [STORE_INDEX_KEY]: publicStoreIndex(vault) })
   await pruneCurrentStore(vault.stores.map(({ id }) => id))
 }
@@ -474,6 +576,163 @@ interface ReportRun {
   sellerCentralTabId: number
 }
 
+const RESULTS_RUN_PREFIX = "resultsRun:"
+const RESULTS_LAUNCH_PREFIX = "resultsLaunch:"
+const RESULTS_RUN_TTL_MS = 30 * 60 * 1000
+interface ResultsRun {
+  id: string
+  ownerTabId: number
+  ownerDocumentId: string
+  sellerCentralTabId: number
+  sellerCentralUrl: string
+  startedAt: number
+  allowed: string[]
+  claimed: string[]
+  caseIds: string[]
+}
+let resultControls: Promise<unknown> = Promise.resolve()
+const resultsNavigationEpoch = new Map<number, number>()
+
+function observeResultsTab(tabId: number): number {
+  if (!resultsNavigationEpoch.has(tabId)) resultsNavigationEpoch.set(tabId, 0)
+  return resultsNavigationEpoch.get(tabId)!
+}
+
+function serializeResultControl<T>(action: () => Promise<T>): Promise<T> {
+  const result = resultControls.catch(() => undefined).then(action)
+  resultControls = result.catch(() => undefined)
+  return result
+}
+
+async function readResultsRun(id: unknown): Promise<ResultsRun | undefined> {
+  if (typeof id !== "string" || !/^[a-f\d-]{36}$/iu.test(id)) return undefined
+  const key = `${RESULTS_RUN_PREFIX}${id}`
+  const run = (await chrome.storage.session.get(key))[key] as ResultsRun | undefined
+  if (run && Date.now() - run.startedAt >= RESULTS_RUN_TTL_MS) {
+    await chrome.storage.session.remove(key)
+    return undefined
+  }
+  return run
+}
+
+async function assertResultsRun(id: unknown, sender: chrome.runtime.MessageSender): Promise<ResultsRun> {
+  if (!isPageSender(sender, "results.html") || !sender.documentId) throw new Error("Open this action from the Results page.")
+  const run = await readResultsRun(id)
+  if (!run || run.ownerTabId !== sender.tab?.id || run.ownerDocumentId !== sender.documentId) {
+    throw new Error("This report is no longer authorized. Start it again from Results.")
+  }
+  const tab = await chrome.tabs.get(run.sellerCentralTabId)
+  if (tab.url !== run.sellerCentralUrl || new URL(tab.url).origin !== "https://sellercentral.amazon.com" || await getActiveJob()) {
+    await chrome.storage.session.remove(`${RESULTS_RUN_PREFIX}${run.id}`)
+    throw new Error("The Seller Central session changed. Start the report again.")
+  }
+  return run
+}
+
+export async function revokeResultsForTab(tabId: number, closed = false): Promise<void> {
+  if (resultsNavigationEpoch.has(tabId)) {
+    if (closed) resultsNavigationEpoch.delete(tabId)
+    else resultsNavigationEpoch.set(tabId, resultsNavigationEpoch.get(tabId)! + 1)
+  }
+  return serializeResultControl(async () => {
+    const stored = await chrome.storage.session.get(null)
+    const runs: ResultsRun[] = []
+    const keys = Object.entries(stored).filter(([key, value]) => {
+      if (key.startsWith(RESULTS_RUN_PREFIX)) {
+        const run = value as ResultsRun
+        if (run.ownerTabId === tabId || run.sellerCentralTabId === tabId) { runs.push(run); return true }
+        return false
+      }
+      if (closed && key.startsWith(RESULTS_LAUNCH_PREFIX)) return (value as { tabId?: number }).tabId === tabId
+      return false
+    }).map(([key]) => key)
+    if (keys.length) await chrome.storage.session.remove(keys)
+    for (const run of runs) void chrome.tabs.sendMessage(run.sellerCentralTabId, { type: "REPORTS_ABORT", runId: run.id }, { frameId: 0 }).catch(() => undefined)
+  })
+}
+
+/** Raw results are only returned to a confirmed run in our own Results document. */
+export async function handleResultsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<Record<string, unknown>> {
+  if (!isOwnSender(sender)) throw new Error("Unauthorized extension message.")
+  const type = String(message.type)
+  if (type === "RESULTS_OPEN") {
+    const source = requireSenderTab(sender.tab)
+    const mode = message.mode === "cases" ? "cases" : "reports"
+    const caseIds = normalizeCaseIds(message.caseIds)
+    if (mode === "cases" && (caseIds.length === 0 || caseIds.length > MAX_BULK_IDS)) throw new Error("Choose between 1 and 50 case IDs.")
+    const launchId = crypto.randomUUID()
+    const tab = await chrome.tabs.create({ active: true, openerTabId: source.id, windowId: source.windowId, url: "about:blank" })
+    if (tab.id === undefined) throw new Error("Chrome could not open Results.")
+    await chrome.storage.session.set({ [`${RESULTS_LAUNCH_PREFIX}${launchId}`]: { tabId: tab.id, mode, caseIds, startedAt: Date.now() } })
+    // Initial navigation must not race RESULTS_INIT or revoke the launch handoff.
+    await chrome.tabs.update(tab.id, { url: `${chrome.runtime.getURL("results.html")}?launch=${launchId}` })
+    return { ok: true }
+  }
+  if (!isPageSender(sender, "results.html") || !sender.documentId || sender.tab?.id === undefined) {
+    throw new Error("Open this action from the Results page.")
+  }
+  if (type === "RESULTS_INIT") {
+    if (typeof message.launchId !== "string" || !/^[a-f\d-]{36}$/iu.test(message.launchId)) return { ok: true, mode: "reports", caseIds: [] }
+    const key = `${RESULTS_LAUNCH_PREFIX}${message.launchId}`
+    const launch = (await chrome.storage.session.get(key))[key] as { tabId: number; mode: string; caseIds: string[]; startedAt: number } | undefined
+    if (!launch || launch.tabId !== sender.tab.id || Date.now() - launch.startedAt >= RESULTS_RUN_TTL_MS) throw new Error("This Results page has expired. Open it again from the palette.")
+    return { ok: true, mode: launch.mode, caseIds: launch.caseIds }
+  }
+  if (type === "RESULTS_OPEN_SELLER") return focusOrOpenSellerCentralTab(sender.tab)
+  if (type === "REPORTS_PREPARE") {
+    const ownerEpoch = observeResultsTab(sender.tab.id)
+    if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
+    const { tabId } = await ensureSellerCentralTab(sender.tab, { focus: false })
+    await waitForTabComplete(tabId)
+    const sellerEpoch = observeResultsTab(tabId)
+    if (!await probeSellerCentralSession(tabId)) {
+      if (message.mode === "cases") throw new Error("Sign in to a store in Seller Central, then try again.")
+      return { ok: true, loggedInToStore: false }
+    }
+    const tab = await chrome.tabs.get(tabId)
+    if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com") throw new Error("The Seller Central tab has navigated away.")
+    const cases = message.mode === "cases"
+    const sections = Array.isArray(message.sections) ? message.sections : []
+    const allowed = cases ? ["SCRAPE_CASES"] : Object.entries(REPORT_REQUESTS).filter(([, request]) => sections.includes(request.source)).map(([name]) => name)
+    const caseIds = cases ? normalizeCaseIds(message.caseIds) : []
+    if (allowed.length === 0 || (cases && (caseIds.length === 0 || caseIds.length > MAX_BULK_IDS))) throw new Error("Choose what to include before starting.")
+    const run: ResultsRun = { id: crypto.randomUUID(), ownerTabId: sender.tab.id, ownerDocumentId: sender.documentId, sellerCentralTabId: tabId, sellerCentralUrl: tab.url, startedAt: Date.now(), allowed, claimed: [], caseIds }
+    await serializeResultControl(async () => {
+      const alive = await chrome.tabs.sendMessage(run.ownerTabId, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: run.ownerDocumentId }) as { ok?: boolean } | undefined
+      if (!alive?.ok || resultsNavigationEpoch.get(run.ownerTabId) !== ownerEpoch || resultsNavigationEpoch.get(tabId) !== sellerEpoch) {
+        throw new Error("A report tab changed while preparing. Start the report again.")
+      }
+      if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
+      await chrome.storage.session.set({ [`${RESULTS_RUN_PREFIX}${run.id}`]: run })
+    })
+    return { ok: true, runId: run.id }
+  }
+  if (type === "RESULTS_CANCEL" || type === "RESULTS_FINISH") {
+    return serializeResultControl(async () => {
+      const run = await readResultsRun(message.runId)
+      if (run && (run.ownerTabId !== sender.tab?.id || run.ownerDocumentId !== sender.documentId)) throw new Error("This report belongs to another Results page.")
+      if (run) {
+        await chrome.storage.session.remove(`${RESULTS_RUN_PREFIX}${run.id}`)
+        void chrome.tabs.sendMessage(run.sellerCentralTabId, { type: "REPORTS_ABORT", runId: run.id }, { frameId: 0 }).catch(() => undefined)
+      }
+      return { ok: true }
+    })
+  }
+  const run = await serializeResultControl(async () => {
+    const current = await assertResultsRun(message.runId, sender)
+    if (!current.allowed.includes(type) || current.claimed.includes(type)) throw new Error("This request was not selected or has already started.")
+    current.claimed.push(type)
+    await chrome.storage.session.set({ [`${RESULTS_RUN_PREFIX}${current.id}`]: current })
+    return current
+  })
+  await serializeResultControl(() => assertResultsRun(run.id, sender))
+  const result = type === "SCRAPE_CASES"
+    ? await scrapeSellerCentralCases(run.caseIds, sender.tab, run.sellerCentralTabId, run.id)
+    : await fetchReportSource(type as ReportFetchType, sender.tab, run.sellerCentralTabId, run.id)
+  await serializeResultControl(() => assertResultsRun(run.id, sender))
+  return result
+}
+
 /** The report run started by the latest successful prepare; used to tag logs from every context. */
 let activeReportRun: ReportRun | undefined
 
@@ -551,7 +810,7 @@ async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: str
   while (Date.now() < deadline) {
     attempts += 1
     try {
-      const response = await chrome.tabs.sendMessage(tabId, runId ? { type, runId } : { type }) as
+      const response = await chrome.tabs.sendMessage(tabId, runId ? { type, runId } : { type }, { frameId: 0 }) as
         Record<string, unknown> | undefined
       if (attempts > 1) {
         log.withRun(runId).info("report.contentScriptWait", { source: request.source, attempts, ms: Date.now() - startedAt })
@@ -568,13 +827,13 @@ async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: str
   throw new Error(lastError ?? request.fallbackError)
 }
 
-async function fetchReportSource(type: ReportFetchType, senderTab?: chrome.tabs.Tab): Promise<Record<string, unknown>> {
+async function fetchReportSource(type: ReportFetchType, senderTab?: chrome.tabs.Tab, authorizedTabId?: number, authorizedRunId?: string): Promise<Record<string, unknown>> {
   rememberReportProgressTab(senderTab?.id)
-  const runId = reportRunForPaletteTab(senderTab?.id)
+  const runId = authorizedRunId ?? reportRunForPaletteTab(senderTab?.id)
   const source = REPORT_REQUESTS[type].source
   const done = log.withRun(runId).time("report.source", { source })
   try {
-    const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
+    const { tabId } = authorizedTabId === undefined ? await ensureSellerCentralTab(senderTab, { focus: false }) : { tabId: authorizedTabId }
     await waitForTabComplete(tabId)
     const result = await sendReportFetch(tabId, type, runId)
     const items = Object.values(result).find(Array.isArray)
@@ -600,6 +859,16 @@ export async function relayReportProgress(message: unknown): Promise<{ ok: true 
   return { ok: true }
 }
 
+async function relayAuthorizedReportProgress(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<{ ok: true }> {
+  if (!isOwnSender(sender) || sender.frameId !== 0 || !sender.url || new URL(sender.url).origin !== "https://sellercentral.amazon.com") return { ok: true }
+  const run = await readResultsRun(message.runId)
+  if (!run || run.sellerCentralTabId !== sender.tab?.id) return { ok: true }
+  try {
+    await chrome.tabs.sendMessage(run.ownerTabId, message, { documentId: run.ownerDocumentId })
+  } catch { /* Results may have closed. */ }
+  return { ok: true }
+}
+
 type UnfulfillableReport = { ok: true; listings: unknown[]; nextRemovalOrderId: string | null }
 
 export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<UnfulfillableReport> {
@@ -618,12 +887,50 @@ export async function fetchShippingQueueReport(senderTab?: chrome.tabs.Tab): Pro
   return await fetchReportSource("REPORTS_FETCH_SHIPPING_QUEUE", senderTab) as { ok: true; shipments: unknown[] }
 }
 
+const CASE_SCRAPE_LIMIT = 50
+const CASE_SCRAPE_SIGN_IN_ERROR = "Sign in to Seller Central, then try again."
+
+export async function scrapeSellerCentralCases(
+  caseIds: unknown,
+  senderTab?: chrome.tabs.Tab,
+  authorizedTabId?: number,
+  runId?: string,
+): Promise<{ ok: true; file: unknown }> {
+  const ids = normalizeCaseIds(caseIds)
+  if (ids.length === 0) throw new Error("Enter at least one 11-digit Case ID.")
+  if (ids.length > CASE_SCRAPE_LIMIT) throw new Error(`Scrape no more than ${CASE_SCRAPE_LIMIT} cases at a time.`)
+  const done = log.time("case.scrape", { requested: ids.length })
+  try {
+    const { tabId } = authorizedTabId === undefined ? await ensureSellerCentralTab(senderTab, { focus: false }) : { tabId: authorizedTabId }
+    await waitForTabComplete(tabId)
+    const loggedIn = await probeSellerCentralSession(tabId)
+    if (!loggedIn) throw new Error(CASE_SCRAPE_SIGN_IN_ERROR)
+    const response = await chrome.tabs.sendMessage(tabId, { type: "SCRAPE_CASES", caseIds: ids, ...(runId ? { runId } : {}) }, { frameId: 0 }) as {
+      ok?: boolean
+      error?: string
+      file?: unknown
+    } | undefined
+    if (!response?.ok || !response.file || typeof response.file !== "object") {
+      throw new Error(typeof response?.error === "string" ? response.error : "Couldn’t scrape cases.")
+    }
+    const file = response.file as { cases?: unknown; errors?: unknown }
+    done({
+      cases: Array.isArray(file.cases) ? file.cases.length : 0,
+      errors: Array.isArray(file.errors) ? file.errors.length : 0,
+    })
+    return { ok: true, file: response.file }
+  } catch (error) {
+    done({ error: describeError(error) }, "error")
+    throw error
+  }
+}
+
 export async function probeSellerCentralSession(tabId: number): Promise<boolean> {
   const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS
   let last: { loggedInToStore: boolean; settled: boolean } | undefined
   while (Date.now() < deadline) {
     try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_SESSION_STATUS" }) as {
+      const response = await chrome.tabs.sendMessage(tabId, { type: "REPORTS_SESSION_STATUS" }, { frameId: 0 }) as {
         ok?: boolean
         loggedInToStore?: boolean
         settled?: boolean
@@ -757,6 +1064,7 @@ async function getActiveJob(): Promise<ActiveJob | undefined> {
   return job
 }
 async function setActiveJob(job?: ActiveJob): Promise<void> {
+  assertVaultOperationCurrent()
   if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job })
   else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
 }
@@ -778,8 +1086,14 @@ async function serializeSwitchStart<T>(action: () => Promise<T>): Promise<T> {
 async function assertWorkflowSender(sender: chrome.runtime.MessageSender, jobId: unknown): Promise<ActiveJob> {
   const job = await getActiveJob()
   if (!job || job.id !== jobId || sender.tab?.id !== job.tabId) throw new Error("This login workflow is no longer authorized.")
-  const hostname = sender.url ? new URL(sender.url).hostname : ""
-  if (hostname !== "sellercentral.amazon.com") throw new Error("Unexpected login origin.")
+  if (!isOwnSender(sender) || sender.frameId !== 0 || !sender.documentId || !sender.url || new URL(sender.url).origin !== SELLER_CENTRAL_HOME_URL.slice(0, -1)) {
+    throw new Error("Unexpected login origin or frame.")
+  }
+  const tab = await chrome.tabs.get(job.tabId)
+  if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com") throw new Error("The login tab has navigated away.")
+  if (sender.documentLifecycle && sender.documentLifecycle !== "active") throw new Error("The login document is no longer active.")
+  const alive = await chrome.tabs.sendMessage(job.tabId, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: sender.documentId }) as { ok?: boolean } | undefined
+  if (!alive?.ok) throw new Error("The login document has navigated away.")
   return job
 }
 async function getJobRecords(job: ActiveJob): Promise<{ store: StoreRecord; credential: CredentialRecord }> {
@@ -797,6 +1111,9 @@ async function withJobDebugger<T>(
   const target = { tabId: job.tabId }
   let attached = false
   try {
+    assertVaultOperationCurrent()
+    const tab = await chrome.tabs.get(job.tabId)
+    if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com" || !new URL(tab.url).pathname.startsWith("/ap/")) throw new Error("The login tab has navigated away.")
     await chrome.debugger.attach(target, "1.3")
     attached = true
     return await action(target)
@@ -857,8 +1174,10 @@ async function startSignInSwitch(store: StoreRecord, sender: chrome.runtime.Mess
   }
 }
 
-export async function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+async function handleAccountsMessageNow(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
   switch (message.type) {
+    case "ACCOUNTS_REQUEST_UNLOCK":
+      return requestAccountUnlock(message.storeId, sender)
     case "ACCOUNTS_STATUS": {
       const [envelope, key, stored] = await Promise.all([
         getEnvelope(),
@@ -885,6 +1204,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       const masterPassword = requireMasterPassword(message.masterPassword)
       const done = log.time("vault.create")
       const { envelope, keyBytes } = await encryptVault(emptyVault(), masterPassword)
+      assertVaultOperationCurrent()
       await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope, [STORE_INDEX_KEY]: [] })
       await chrome.storage.local.remove(CURRENT_STORE_KEY)
       await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
@@ -894,11 +1214,19 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
     case "ACCOUNTS_UNLOCK": {
       const envelope = await getEnvelope()
       if (!envelope || typeof message.masterPassword !== "string") throw new Error("The account vault is not initialized.")
+      const attempts = (await chrome.storage.session.get(UNLOCK_ATTEMPTS_KEY))[UNLOCK_ATTEMPTS_KEY] as { failures: number; nextAttemptAt: number } | undefined
+      if (attempts && attempts.nextAttemptAt > Date.now()) throw new Error(`Try unlocking again in ${Math.ceil((attempts.nextAttemptAt - Date.now()) / 1000)} seconds.`)
       const done = log.time("vault.unlock")
       try {
         const { keyBytes } = await decryptVault(envelope, message.masterPassword)
+        assertVaultOperationCurrent()
         await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
-      } catch {
+        await chrome.storage.session.remove(UNLOCK_ATTEMPTS_KEY)
+      } catch (error) {
+        assertVaultOperationCurrent()
+        const failures = Math.min(9, (attempts?.failures ?? 0) + 1)
+        const delay = failures < 3 ? 0 : Math.min(60_000, 1000 * 2 ** (failures - 3))
+        await chrome.storage.session.set({ [UNLOCK_ATTEMPTS_KEY]: { failures, nextAttemptAt: Date.now() + delay } })
         done({ ok: false }, "warn")
         throw new Error("Incorrect master password or damaged vault.")
       }
@@ -906,7 +1234,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       return { ok: true }
     }
     case "ACCOUNTS_LOCK":
-      await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY])
+      await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY, UNLOCK_RESUME_KEY])
       log.info("vault.lock")
       return { ok: true }
     case "ACCOUNTS_GET_VAULT": {
@@ -951,6 +1279,7 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       validateVault(vault)
       const done = log.time("vault.share.create")
       const { envelope, keyBytes } = await encryptVault(vault, masterPassword)
+      assertVaultOperationCurrent()
       await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope, [STORE_INDEX_KEY]: publicStoreIndex(vault) })
       await chrome.storage.local.remove(CURRENT_STORE_KEY)
       await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
@@ -961,19 +1290,23 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       const { vault } = await getUnlockedVault()
       const masterPassword = requireMasterPassword(message.masterPassword)
       const { envelope, keyBytes } = await encryptVault(vault, masterPassword)
+      assertVaultOperationCurrent()
       await chrome.storage.local.set({ [VAULT_STORAGE_KEY]: envelope })
       await chrome.storage.session.set({ [SESSION_KEY_STORAGE_KEY]: serializeKey(keyBytes) })
+      await chrome.storage.session.remove(UNLOCK_RESUME_KEY)
       log.info("vault.changePassword")
       return { ok: true }
     }
     case "ACCOUNTS_RESET":
       await chrome.storage.local.remove([VAULT_STORAGE_KEY, STORE_INDEX_KEY, CURRENT_STORE_KEY])
-      await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY])
+      await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY, UNLOCK_RESUME_KEY, UNLOCK_ATTEMPTS_KEY])
       log.warn("vault.reset")
       return { ok: true }
     case "ACCOUNTS_OPEN_OPTIONS":
       await chrome.runtime.openOptionsPage()
       return { ok: true }
+    case "ACCOUNTS_RESUME_SWITCH":
+      return resumeAccountSwitch(message.resumeId, sender)
     case "ACCOUNTS_START_SWITCH": {
       return serializeSwitchStart(async () => {
         if (await getActiveJob()) throw new Error("Another account switch is already running.")
@@ -1012,11 +1345,15 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
     }
     case "ACCOUNT_AUTOMATION_GET_JOB": {
       const job = await getActiveJob()
-      if (!job || sender.tab?.id !== job.tabId) return { ok: true, job: null }
+      if (!job || sender.tab?.id !== job.tabId || sender.frameId !== 0 || !sender.documentId || !sender.url || new URL(sender.url).origin !== "https://sellercentral.amazon.com") return { ok: true, job: null }
       return { ok: true, job: { id: job.id, stage: job.stage } }
     }
     case "ACCOUNT_AUTOMATION_SECRET": {
       const job = await assertWorkflowSender(sender, message.jobId)
+      if (!sender.url || !new URL(sender.url).pathname.startsWith("/ap/")) throw new Error("Credentials are only available on an Amazon sign-in page.")
+      if (job.stage === "logout" || job.stage === "authenticated" || new URL(sender.url).searchParams.get("openid.return_to")?.includes("/sign-out")) {
+        throw new Error("Credentials are not available during this login step.")
+      }
       const { credential } = await getJobRecords(job)
       if (message.kind === "email") {
         await setJobStage(job, "email")
@@ -1047,6 +1384,8 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
       if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
         throw new Error("Invalid login click coordinates.")
       }
+      const expectedStage = { continue: "email", "password-submit": "password", "otp-submit": "otp" }[message.action]
+      if (job.stage !== expectedStage) throw new Error("This click does not match the current login step.")
       await withJobDebugger(job, async (target) => {
         const send = (type: string, extra: Record<string, unknown> = {}) =>
           chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type, x, y, ...extra })
@@ -1108,7 +1447,7 @@ function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
   return exit
 }
 
-export async function handleAccountTabUpdated(
+async function handleAccountTabUpdatedNow(
   tabId: number,
   changeInfo: { status?: string; url?: string },
   tab: chrome.tabs.Tab,
@@ -1128,9 +1467,23 @@ export async function handleAccountTabUpdated(
   await advanceLogoutToSignIn(job)
 }
 
+export async function handleAccountTabUpdated(
+  tabId: number,
+  changeInfo: { status?: string; url?: string },
+  tab: chrome.tabs.Tab,
+): Promise<void> {
+  if (changeInfo.status !== "complete") return
+  const generation = vaultGeneration
+  try {
+    await queueVaultOperation(() => handleAccountTabUpdatedNow(tabId, changeInfo, tab))
+  } catch (error) {
+    if (generation === vaultGeneration) throw error
+  }
+}
+
 /** Only extension pages (popup, options) may read or clear the diagnostics log. */
 function isExtensionPage(sender: chrome.runtime.MessageSender): boolean {
-  return sender.id === chrome.runtime.id && Boolean(sender.url?.startsWith(chrome.runtime.getURL("")))
+  return ["options.html", "popup.html", "timeout.html", "results.html"].some((page) => isPageSender(sender, page))
 }
 
 export function handleLogMessage(
@@ -1144,7 +1497,7 @@ export function handleLogMessage(
     const tab = sender.tab?.id
     const entries = sanitizeLogEntries(message.entries).map((entry) => {
       const run = entry.run ?? reportRunForTab(tab)
-      return { ...entry, ...(tab === undefined ? {} : { tab }), ...(run ? { run } : {}) }
+      return { ...entry, tab, ...(run ? { run } : {}) }
     })
     store.append(entries)
     sendResponse({ ok: true })
@@ -1185,9 +1538,16 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     log.info("extension.installed", { reason, version: chrome.runtime.getManifest().version, previousVersion })
   })
 
-  void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
-  void chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
+  const storageReady = Promise.all([
+    chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }),
+    chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }),
+  ])
+  void storageReady.catch(() => log.error("storage.restrictionFailed"))
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+    if (!isOwnSender(sender)) {
+      sendResponse({ ok: false, error: "Unauthorized extension message." })
+      return undefined
+    }
     const handled = idsListener(message, sender, sendResponse)
     if (handled) return true
     if (!message || typeof message !== "object" || !("type" in message)) return undefined
@@ -1197,28 +1557,32 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       return handleLogMessage(type, record, sender, logStore, sendResponse)
     }
     if (type === "GET_SETTINGS") {
-      return respond(type, loadSettings().then((settings) => ({ ok: true, settings })), sendResponse, "Couldn’t load settings.")
+      return respond(type, storageReady.then(loadSettings).then((settings) => ({ ok: true, settings: isExtensionPage(sender) ? settings : { features: settings.features } })), sendResponse, "Couldn’t load settings.")
     }
-    if (type === "REPORTS_PREPARE") {
-      return respond(type, prepareReports(sender.tab), sendResponse, "Couldn’t open Seller Central.", true)
-    }
-    if (isReportFetchType(type)) {
-      const { fallbackError } = REPORT_REQUESTS[type]
-      return respond(type, fetchReportSource(type, sender.tab), sendResponse, fallbackError, true)
+    if (type.startsWith("RESULTS_") || type === "REPORTS_PREPARE" || type === "SCRAPE_CASES" || isReportFetchType(type)) {
+      return respond(type, storageReady.then(() => handleResultsMessage(record, sender)), sendResponse, "Couldn’t complete this Results action.")
     }
     if (type === "REPORTS_PROGRESS") {
-      void relayReportProgress(message).then(sendResponse, () => sendResponse({ ok: true }))
+      void storageReady.then(() => relayAuthorizedReportProgress(record, sender)).then(sendResponse, () => sendResponse({ ok: true }))
       return true
     }
     if (!type.startsWith("ACCOUNT")) return undefined
-    return respond(type, handleAccountsMessage(record, sender), sendResponse, "Account operation failed.")
+    return respond(type, storageReady.then(() => handleAccountsMessage(record, sender)), sendResponse, "Account operation failed.")
   })
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { void handleAccountTabUpdated(tabId, changeInfo, tab) })
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === "loading" || changeInfo.url) void revokeResultsForTab(tabId)
+    void handleAccountTabUpdated(tabId, changeInfo, tab).catch(() => log.warn("account.switch.navigationFailed"))
+  })
   chrome.tabs.onRemoved.addListener((tabId) => {
-    void getActiveJob().then(async (job) => {
+    void revokeResultsForTab(tabId, true)
+    void queueVaultOperation(async () => {
+      const stored = await chrome.storage.session.get(UNLOCK_RESUME_KEY)
+      const pending = stored[UNLOCK_RESUME_KEY] as UnlockResume | undefined
+      if (pending && (pending.sourceTabId === tabId || pending.accountsTabId === tabId)) await chrome.storage.session.remove(UNLOCK_RESUME_KEY)
+      const job = await getActiveJob()
       if (job?.tabId !== tabId) return
       jobLog(job).warn("account.switch.tabClosed", jobContext(job))
       await setActiveJob(undefined)
-    })
+    }).catch(() => undefined)
   })
 }

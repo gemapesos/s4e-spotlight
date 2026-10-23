@@ -1,9 +1,9 @@
 import * as React from "react"
 
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { PageShell } from "@/components/PageShell"
+import { CheckIcon } from "lucide-react"
+
+import { Notice, PageShell, Surface, SurfaceHeader } from "@/components/panel"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -32,8 +32,18 @@ import {
 
 const BLANK_SELECT_VALUE = "__blank__"
 const TEXT_SAVE_DEBOUNCE_MS = 350
-const PAGE_DESCRIPTION = "These values are prefilled when you run Time Out. Date is always set to today."
+const PAGE_DESCRIPTION = "Prefilled when you run Time Out. Date is always today, and changes save as you go."
 const timeoutLog = createLogger("timeout")
+
+/** A label on the left and its control on the right, like a settings row. */
+function FieldRow({ children, htmlFor, label }: { children: React.ReactNode; htmlFor: string; label: string }) {
+  return (
+    <div className="flex min-h-13 flex-col items-stretch justify-between gap-2 border-t border-border/60 px-4 py-2.5 first:border-t-0 sm:flex-row sm:items-center sm:gap-4 sm:py-2">
+      <label className="text-foreground/80" htmlFor={htmlFor}>{label}</label>
+      {children}
+    </div>
+  )
+}
 
 function FormSelect({
   allowBlank = false,
@@ -53,13 +63,16 @@ function FormSelect({
   const items = value ? optionsWithCurrent(options, value) : [...options]
   const selectValue = value === "" && allowBlank ? BLANK_SELECT_VALUE : value
   return (
-    <div className="grid gap-2">
-      <Label htmlFor={id}>{label}</Label>
+    <FieldRow htmlFor={id} label={label}>
       <Select
         onValueChange={(next) => onChange(next === BLANK_SELECT_VALUE ? "" : next)}
         value={selectValue}
       >
-        <SelectTrigger className="w-full" id={id}>
+        <SelectTrigger
+          className="h-8! w-full shrink-0 rounded-[0.5rem] data-[value=__blank__]:text-muted-foreground sm:w-64"
+          data-value={selectValue}
+          id={id}
+        >
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -71,13 +84,14 @@ function FormSelect({
           ))}
         </SelectContent>
       </Select>
-    </div>
+    </FieldRow>
   )
 }
 
 export function TimeoutApp() {
   const [settings, setSettings] = React.useState<ExtensionSettings | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const [saving, setSaving] = React.useState(false)
   const settingsRef = React.useRef(settings)
   const textSaveTimerRef = React.useRef(0)
 
@@ -95,13 +109,14 @@ export function TimeoutApp() {
   }, [])
 
   const save = React.useCallback((next: ExtensionSettings) => {
+    setSaving(true)
     void saveSettings(next).then(
       () => setError(null),
       (caught: unknown) => {
         timeoutLog.error("settings.saveFailed", { error: describeError(caught) })
         setError(errorMessage(caught, "Couldn’t save the form values."))
       },
-    )
+    ).finally(() => setSaving(Boolean(textSaveTimerRef.current)))
   }, [])
 
   React.useEffect(() => () => {
@@ -130,6 +145,7 @@ export function TimeoutApp() {
 
   const persistTextField = React.useCallback((patch: Partial<TimeOutFormValues>) => {
     if (!update(patch)) return
+    setSaving(true)
     window.clearTimeout(textSaveTimerRef.current)
     textSaveTimerRef.current = window.setTimeout(() => {
       textSaveTimerRef.current = 0
@@ -137,58 +153,50 @@ export function TimeoutApp() {
     }, TEXT_SAVE_DEBOUNCE_MS)
   }, [save, update])
 
-  const errorView = error ? <p className="text-sm text-destructive" role="alert">{error}</p> : null
+  const errorView = error ? <Notice error message={error} onDismiss={() => setError(null)} /> : null
+  const status = !settings || error ? undefined : saving ? "Saving…" : (
+    <>
+      <CheckIcon aria-hidden="true" className="size-3.5" />
+      Saved
+    </>
+  )
 
   if (!settings) {
     return (
       <PageShell description={PAGE_DESCRIPTION} title="Time Out form">
-        {errorView ?? <p className="text-sm text-muted-foreground">Loading…</p>}
+        {errorView ?? <p className="m-0 px-1 text-muted-foreground">Loading…</p>}
       </PageShell>
     )
   }
 
   const form = settings.timeOutForm
+  const textInput = "h-8 w-full shrink-0 rounded-[0.5rem] sm:w-64"
 
   return (
-    <PageShell description={PAGE_DESCRIPTION} title="Time Out form">
-      <Card className="max-w-xl">
-        <CardHeader>
-          <CardTitle>Prefill values</CardTitle>
-          <CardDescription>Changes save automatically.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4">
-          {errorView}
-          <FormSelect
-            id="staff-name"
-            label="Staff name"
-            onChange={(staffName) => persistForm({ staffName })}
-            options={TIME_OUT_STAFF_NAMES}
-            value={form.staffName}
-          />
-          <FormSelect
-            id="business"
-            label="Business"
-            onChange={(business) => persistForm({ business })}
-            options={TIME_OUT_BUSINESSES}
-            value={form.business}
-          />
-          <FormSelect
-            id="supervisor"
-            label="Supervisor"
-            onChange={(supervisor) => persistForm({ supervisor })}
-            options={TIME_OUT_SUPERVISORS}
-            value={form.supervisor}
-          />
-          <div className="grid gap-2">
-            <Label htmlFor="hours-worked">Total hours worked</Label>
+    <PageShell description={PAGE_DESCRIPTION} status={<span aria-live="polite" className="inline-flex items-center gap-1.5">{status}</span>} title="Time Out form">
+      {errorView}
+      <Surface aria-labelledby="you-heading">
+        <SurfaceHeader id="you-heading" title="You" />
+        <div>
+          <FormSelect id="staff-name" label="Staff name" onChange={(staffName) => persistForm({ staffName })} options={TIME_OUT_STAFF_NAMES} value={form.staffName} />
+          <FormSelect id="business" label="Business" onChange={(business) => persistForm({ business })} options={TIME_OUT_BUSINESSES} value={form.business} />
+          <FormSelect id="supervisor" label="Supervisor" onChange={(supervisor) => persistForm({ supervisor })} options={TIME_OUT_SUPERVISORS} value={form.supervisor} />
+        </div>
+      </Surface>
+
+      <Surface aria-labelledby="today-heading">
+        <SurfaceHeader id="today-heading" title="Today" />
+        <div>
+          <FieldRow htmlFor="hours-worked" label="Total hours worked">
             <Input
+              className="h-8 w-24 shrink-0 rounded-[0.5rem] text-right"
               id="hours-worked"
               inputMode="decimal"
               onChange={(event) => persistTextField({ hoursWorked: event.target.value })}
               type="text"
               value={form.hoursWorked}
             />
-          </div>
+          </FieldRow>
           <FormSelect
             id="scheduled-accounts"
             label="Scheduled accounts completed today?"
@@ -196,76 +204,40 @@ export function TimeoutApp() {
             options={TIME_OUT_SCHEDULED_OPTIONS}
             value={form.scheduledAccountsCompleted}
           />
-          <div className="grid gap-2">
-            <Label htmlFor="short-daily-update">Short Daily Update</Label>
+          <div className="flex flex-col gap-2 border-t border-border/60 px-4 pt-3.5 pb-4">
+            <label className="text-foreground/80" htmlFor="short-daily-update">Short Daily Update</label>
             <Textarea
+              className="min-h-22 rounded-[0.5rem]"
               id="short-daily-update"
               onChange={(event) => persistTextField({ shortDailyUpdate: event.target.value })}
               value={form.shortDailyUpdate}
             />
           </div>
-          <FormSelect
-            id="blockers"
-            label="Any blockers or red flags today?"
-            onChange={(blockersOrRedFlags) => persistForm({ blockersOrRedFlags })}
-            options={TIME_OUT_BLOCKERS_OPTIONS}
-            value={form.blockersOrRedFlags}
-          />
-          <div className="grid gap-2">
-            <Label htmlFor="client-account-name">Client/account name</Label>
+        </div>
+      </Surface>
+
+      <Surface aria-labelledby="blockers-heading">
+        <SurfaceHeader id="blockers-heading" title="Blockers and follow-up" />
+        <div>
+          <FormSelect id="blockers" label="Any blockers or red flags today?" onChange={(blockersOrRedFlags) => persistForm({ blockersOrRedFlags })} options={TIME_OUT_BLOCKERS_OPTIONS} value={form.blockersOrRedFlags} />
+          <FieldRow htmlFor="client-account-name" label="Client/account name">
             <Input
+              className={textInput}
               id="client-account-name"
               onChange={(event) => persistTextField({ clientAccountName: event.target.value })}
+              placeholder="Leave blank if none"
               type="text"
               value={form.clientAccountName}
             />
-          </div>
-          <FormSelect
-            allowBlank
-            id="issue-type"
-            label="Issue type"
-            onChange={(issueType) => persistForm({ issueType })}
-            options={TIME_OUT_ISSUE_TYPES}
-            value={form.issueType}
-          />
-          <FormSelect
-            allowBlank
-            id="waiting-on-whom"
-            label="Waiting on whom?"
-            onChange={(waitingOnWhom) => persistForm({ waitingOnWhom })}
-            options={TIME_OUT_WAITING_ON_OPTIONS}
-            value={form.waitingOnWhom}
-          />
-          <FormSelect
-            id="follow-up-needed"
-            label="Follow-up needed?"
-            onChange={(followUpNeeded) => persistForm({ followUpNeeded })}
-            options={TIME_OUT_YES_NO_OPTIONS}
-            value={form.followUpNeeded}
-          />
-          <FormSelect
-            id="escalated-to-supervisor"
-            label="Blockers or red flags escalated/advised to supervisor?"
-            onChange={(escalatedToSupervisor) => persistForm({ escalatedToSupervisor })}
-            options={TIME_OUT_YES_NO_OPTIONS}
-            value={form.escalatedToSupervisor}
-          />
-          <FormSelect
-            id="supervisor-review-needed"
-            label="Supervisor review needed?"
-            onChange={(supervisorReviewNeeded) => persistForm({ supervisorReviewNeeded })}
-            options={TIME_OUT_YES_NO_OPTIONS}
-            value={form.supervisorReviewNeeded}
-          />
-          <FormSelect
-            id="karen-review-needed"
-            label="Karen review/approval needed?"
-            onChange={(karenReviewNeeded) => persistForm({ karenReviewNeeded })}
-            options={TIME_OUT_YES_NO_OPTIONS}
-            value={form.karenReviewNeeded}
-          />
-        </CardContent>
-      </Card>
+          </FieldRow>
+          <FormSelect allowBlank id="issue-type" label="Issue type" onChange={(issueType) => persistForm({ issueType })} options={TIME_OUT_ISSUE_TYPES} value={form.issueType} />
+          <FormSelect allowBlank id="waiting-on-whom" label="Waiting on whom?" onChange={(waitingOnWhom) => persistForm({ waitingOnWhom })} options={TIME_OUT_WAITING_ON_OPTIONS} value={form.waitingOnWhom} />
+          <FormSelect id="follow-up-needed" label="Follow-up needed?" onChange={(followUpNeeded) => persistForm({ followUpNeeded })} options={TIME_OUT_YES_NO_OPTIONS} value={form.followUpNeeded} />
+          <FormSelect id="escalated-to-supervisor" label="Blockers or red flags escalated/advised to supervisor?" onChange={(escalatedToSupervisor) => persistForm({ escalatedToSupervisor })} options={TIME_OUT_YES_NO_OPTIONS} value={form.escalatedToSupervisor} />
+          <FormSelect id="supervisor-review-needed" label="Supervisor review needed?" onChange={(supervisorReviewNeeded) => persistForm({ supervisorReviewNeeded })} options={TIME_OUT_YES_NO_OPTIONS} value={form.supervisorReviewNeeded} />
+          <FormSelect id="karen-review-needed" label="Karen review/approval needed?" onChange={(karenReviewNeeded) => persistForm({ karenReviewNeeded })} options={TIME_OUT_YES_NO_OPTIONS} value={form.karenReviewNeeded} />
+        </div>
+      </Surface>
     </PageShell>
   )
 }

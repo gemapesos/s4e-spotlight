@@ -50,6 +50,9 @@ describe("account vault cryptography", () => {
 })
 
 describe("shared vault file", () => {
+  it.each([1, 1000, 599_999])("rejects a share file with %i KDF iterations", async (iterations) => {
+    await expect(decryptSharedVault({ kind: SHARE_FILE_KIND, version: 1, iterations, salt: "fixture", iv: "fixture", ciphertext: "fixture" }, "fixture-share-password")).rejects.toThrow(SHARE_DECRYPT_ERROR)
+  })
   const sharePassword = "share-password"
   const vault: AccountVault = {
     version: 1,
@@ -58,7 +61,7 @@ describe("shared vault file", () => {
   }
 
   it("encrypts with the share password and keeps secrets out of the file", async () => {
-    const file = await encryptSharedVault(vault, sharePassword, 1_000)
+    const file = await encryptSharedVault(vault, sharePassword, 600_000)
 
     expect(file.kind).toBe(SHARE_FILE_KIND)
     expect(JSON.stringify(file)).not.toContain("example-password")
@@ -70,7 +73,7 @@ describe("shared vault file", () => {
   })
 
   it("rejects a damaged share file and drops fields outside the vault schema", async () => {
-    const file = await encryptSharedVault(vault, sharePassword, 1_000)
+    const file = await encryptSharedVault(vault, sharePassword, 600_000)
     const damaged = file.ciphertext.at(-1) === "A" ? "B" : "A"
     await expect(decryptSharedVault({ ...file, ciphertext: file.ciphertext.slice(0, -1) + damaged }, sharePassword)).rejects.toThrow(SHARE_DECRYPT_ERROR)
     await expect(decryptSharedVault({ ...file, iterations: 600_001 }, sharePassword)).rejects.toThrow(SHARE_DECRYPT_ERROR)
@@ -80,7 +83,7 @@ describe("shared vault file", () => {
       credentials: [{ ...vault.credentials[0], note: "secret-note" }],
       stores: [{ ...vault.stores[0], owner: "secret-owner" }],
     }
-    const { envelope } = await encryptVault(dirty, sharePassword, 1_000)
+    const { envelope } = await encryptVault(dirty, sharePassword, 600_000)
     const shared = await decryptSharedVault({ ...envelope, kind: SHARE_FILE_KIND }, sharePassword)
     expect(shared).toEqual(vault)
     expect(JSON.stringify(shared)).not.toContain("secret-note")

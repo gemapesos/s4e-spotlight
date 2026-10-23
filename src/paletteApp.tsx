@@ -23,6 +23,7 @@ import {
   type ExtensionSettings,
 } from "./lib/settings"
 import type { SellerFeedback } from "./lib/feedback"
+import { caseScrapeFailure, downloadCaseScrape, type ScrapeCasesFile } from "./lib/viewCase"
 import { isPaletteShortcut } from "./lib/shortcut"
 import {
   isReportProgressMessage,
@@ -100,6 +101,11 @@ type PasteGuardWindow = Window &
 
 export interface OpenCaseIdsMessage {
   type: "OPEN_CASE_IDS"
+  caseIds: string[]
+}
+
+export interface ScrapeCasesMessage {
+  type: "SCRAPE_CASES"
   caseIds: string[]
 }
 
@@ -248,6 +254,26 @@ async function requestBackground<T extends object = Record<string, unknown>>(
 export async function openCaseIds(caseIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_CASE_IDS", caseIds } satisfies OpenCaseIdsMessage)
 }
+
+export async function scrapeCaseIds(caseIds: string[], targetDocument: Document = document): Promise<void> {
+  void targetDocument
+  await requestBackground({ type: "RESULTS_OPEN", mode: "cases", caseIds })
+}
+
+/** Runs only in the extension Results document; the background verifies its sender and run. */
+export async function scrapeProtectedCaseIds(caseIds: string[], runId: string, targetDocument: Document = document): Promise<void> {
+  const response = await requestBackground<{ file: ScrapeCasesFile }>({
+    type: "SCRAPE_CASES",
+    caseIds,
+    runId,
+  })
+  const file = response.file
+  if (!file || !Array.isArray(file.cases)) throw new Error("Couldn’t scrape cases. Please try again.")
+  const failure = caseScrapeFailure(file)
+  if (file.cases.length === 0) throw new Error(failure ?? "Couldn’t scrape cases. Please try again.")
+  downloadCaseScrape(file, caseIds, targetDocument)
+  if (failure) throw new Error(failure)
+}
 export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SHIPMENT_IDS", shipmentIds } satisfies OpenShipmentIdsMessage)
 }
@@ -271,8 +297,11 @@ export async function getAccountsStatus(): Promise<AccountsStatus> {
     currentStore: response.currentStore ?? null,
   }
 }
-export async function unlockAccounts(masterPassword: string): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_UNLOCK", masterPassword })
+export async function unlockAccounts(storeId: string): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId })
+}
+export async function openReports(): Promise<void> {
+  await requestBackground({ type: "RESULTS_OPEN", mode: "reports" })
 }
 export async function startAccountSwitch(storeId: string): Promise<void> {
   await requestBackground({ type: "ACCOUNTS_START_SWITCH", storeId })
@@ -302,26 +331,28 @@ export async function getSettings(): Promise<ExtensionSettings> {
   }
 }
 
-export async function prepareReports(): Promise<ReportsPrepareResult> {
-  const response = await requestBackground<ReportsPrepareResult>({ type: "REPORTS_PREPARE" })
+export async function prepareReports(sections: readonly ReportSource[] = REPORT_SOURCES): Promise<ReportsPrepareResult> {
+  const response = await requestBackground<ReportsPrepareResult>({ type: "REPORTS_PREPARE", sections })
   return {
-    loggedInToStore: Boolean(response.loggedInToStore),
+    loggedInToStore: response.loggedInToStore !== false,
+    runId: response.runId,
     openedPromptOnSellerCentral: response.openedPromptOnSellerCentral,
   }
 }
 
-async function fetchReportItems<T>(type: string, key: string): Promise<T[]> {
-  const response = await requestBackground<Record<string, unknown>>({ type })
+async function fetchReportItems<T>(type: string, key: string, runId?: string): Promise<T[]> {
+  const response = await requestBackground<Record<string, unknown>>({ type, ...(runId ? { runId } : {}) })
   const items = response[key]
   return Array.isArray(items) ? items as T[] : []
 }
 
-async function fetchUnfulfillableFromBackground(): Promise<{
+async function fetchUnfulfillableFromBackground(runId?: string): Promise<{
   listings: UnfulfillableListing[]
   nextRemovalOrderId: string | null
 }> {
   const response = await requestBackground<{ listings?: unknown; nextRemovalOrderId?: unknown }>({
     type: "REPORTS_FETCH_UNFULFILLABLE",
+    ...(runId ? { runId } : {}),
   })
   const nextRemovalOrderId = response.nextRemovalOrderId
   return {
@@ -337,7 +368,7 @@ export function subscribeReportProgress(listener: (event: ReportProgressEvent) =
   return () => { reportProgressListeners.delete(listener) }
 }
 
-function dispatchReportProgress(event: ReportProgressEvent): void {
+export function dispatchReportProgress(event: ReportProgressEvent): void {
   for (const listener of reportProgressListeners) listener(event)
 }
 
@@ -346,6 +377,7 @@ export async function generateReports(
   currentStoreName?: string,
   onProgress?: (event: ReportProgressEvent) => void,
   sections: readonly ReportSource[] = REPORT_SOURCES,
+  runId?: string,
 ): Promise<GeneratedReport> {
   const unsubscribe = onProgress ? subscribeReportProgress(onProgress) : () => undefined
   const done = paletteLog.time("report.run")
@@ -384,16 +416,16 @@ export async function generateReports(
     const [unfulfillable, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
       track(
         "unfulfillable",
-        fetchUnfulfillableFromBackground,
+        () => fetchUnfulfillableFromBackground(runId),
         { listings: [], nextRemovalOrderId: null },
         (value) => value.listings.length,
       ),
-      track("feedback", () => fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks"), [], length),
-      track("stranded", () => fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings"), [], length),
-      track("suppressed", () => fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings"), [], length),
+      track("feedback", () => fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks", runId), [], length),
+      track("stranded", () => fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings", runId), [], length),
+      track("suppressed", () => fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings", runId), [], length),
       track(
         "shippingQueue",
-        () => fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments"),
+        () => fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments", runId),
         [],
         length,
       ),
@@ -532,6 +564,8 @@ export function mountCommandPalette({
           initialMode={openMode}
           open={isOpen}
           onOpenCaseIds={openCaseIds}
+          onOpenReports={openReports}
+          onScrapeCases={(ids) => scrapeCaseIds(ids, targetDocument)}
           onOpenShipmentIds={openShipmentIds}
           onOpenRemovalOrderIds={openRemovalOrderIds}
           onOpenSkuIds={openSkuIds}
@@ -542,9 +576,6 @@ export function mountCommandPalette({
           onFocusAccountSwitch={focusAccountSwitch}
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
-          onPrepareReports={prepareReports}
-          onGenerateReports={(storeName, onProgress, sections) => generateReports(new Date(), storeName, onProgress, sections)}
-          onDownloadReport={(report, format) => downloadReport(report, format, targetDocument)}
           onOpenTimeOut={openTimeOut}
           onOpenChange={setOpen}
         />

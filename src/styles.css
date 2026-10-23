@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
+@import "./vendor/shadcn.css";
 
 /* Inside the palette's Shadow DOM the .dark class sits on the host, which ancestor selectors can't see. */
 @custom-variant dark {
