@@ -191,7 +191,7 @@ function parseSharedVaultFile(file: unknown): SharedVaultFile {
   if (
     typeof iterations !== "number" ||
     !Number.isInteger(iterations) ||
-    iterations < 1 ||
+    iterations < PBKDF2_ITERATIONS ||
     iterations > PBKDF2_ITERATIONS ||
     typeof salt !== "string" ||
     typeof iv !== "string" ||
@@ -340,7 +340,7 @@ export function publicStoreIndex(vault: AccountVault): StoreIndexRecord[] {
 export function validateStoreUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    return url.protocol === "https:" && url.hostname === "sellercentral.amazon.com"
+    return url.origin === "https://sellercentral.amazon.com" && !url.username && !url.password
   } catch {
     return false
   }

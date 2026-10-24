@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { SearchIcon, CheckIcon, ChevronLeftIcon, ExternalLinkIcon } from "lucide-react"
+import { Kbd as CommandKbd, KeyHint as CommandHint, PanelFooter as CommandFooter } from "@/components/panel"
 
 const SURFACE_HEIGHT_DURATION_MS = 200
 const SURFACE_HEIGHT_EASING = "cubic-bezier(0.16, 1, 0.3, 1)"
@@ -512,44 +513,6 @@ function CommandCheckbox({ className, ...props }: React.ComponentProps<"span">) 
   )
 }
 
-function CommandKbd({
-  className,
-  inverted = false,
-  muted = false,
-  ...props
-}: React.ComponentProps<"kbd"> & {
-  /** On a primary button. */
-  inverted?: boolean
-  /** On an outline button. */
-  muted?: boolean
-}) {
-  return (
-    <kbd
-      data-slot="command-kbd"
-      className={cn(
-        "inline-flex h-[1.125rem] min-w-[1.125rem] shrink-0 items-center justify-center rounded-[0.25rem] px-1 font-sans text-[0.6875rem] leading-[1.125rem] font-medium",
-        inverted
-          ? "bg-primary-foreground/15 text-primary-foreground"
-          : muted
-            ? "bg-muted text-foreground/70"
-            : "bg-background text-foreground/70 shadow-[0_0_0_0.0625rem] shadow-foreground/12",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-/** One or more keys and what they do, for the footer. */
-function CommandHint({ keys, children }: { keys: readonly string[]; children: React.ReactNode }) {
-  return (
-    <span className="inline-flex shrink-0 items-center gap-1">
-      {keys.map((key) => <CommandKbd key={key}>{key}</CommandKbd>)}
-      {children ? <span className="ml-0.5">{children}</span> : null}
-    </span>
-  )
-}
-
 /**
  * The top of every screen below Commands: a back button and where you are, or a control in place
  * of the breadcrumb. Back acts on pointer press so the screen swap feels immediate.
@@ -605,35 +568,6 @@ function CommandHeader({
       </div>
       {divider === true ? <div aria-hidden="true" className="h-px shrink-0 bg-border" /> : divider || null}
     </>
-  )
-}
-
-/**
- * The bottom band of every screen: status or hints on the left, hints or the main action on the
- * right. With an action it grows to 48px so the 32px button has room.
- */
-function CommandFooter({
-  action = false,
-  children,
-  end,
-}: {
-  /** The right side holds buttons, so the band grows to 48px to give them room. */
-  action?: boolean
-  children?: React.ReactNode
-  end?: React.ReactNode
-}) {
-  return (
-    <div
-      data-slot="command-footer"
-      className={cn(
-        "flex shrink-0 items-center gap-3 border-t bg-muted/50 text-xs leading-4 text-muted-foreground",
-        action ? "h-12 pr-2 pl-3" : "h-10 px-3",
-        children ? "justify-between" : "justify-end",
-      )}
-    >
-      {children ? <div className="flex min-w-0 items-center gap-3">{children}</div> : null}
-      {end ? <div className={cn("flex shrink-0 items-center", action ? "gap-1" : "gap-3")}>{end}</div> : null}
-    </div>
   )
 }
 

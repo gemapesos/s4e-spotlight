@@ -1,14 +1,20 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { canHostPalette, handleContentKeyDown, handleContentMessage, loadPalette } from "../src/content"
+import { canHostPalette, handleContentKeyDown, handleContentMessage, loadPalette, showSwitchNotice } from "../src/content"
+import { VIEW_CASE_SIGN_IN_ERROR } from "../src/lib/viewCase"
 import { setLogSink, type LogEntry } from "../src/lib/log"
 
+const backgroundSender = { id: "test-extension", url: "chrome-extension://test-extension/background.js" }
+beforeEach(() => {
+  vi.stubGlobal("chrome", { runtime: { id: "test-extension", getURL: (path: string) => `chrome-extension://test-extension/${path}`, sendMessage: vi.fn(async () => ({ ok: true })) } })
+})
 function makeVisible() {
   vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockReturnValue(document.body)
 }
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   document.body.replaceChildren()
 })
 
@@ -18,18 +24,18 @@ describe("content script report messages", () => {
     makeVisible()
     const sendResponse = vi.fn()
 
-    expect(handleContentMessage({ type: "REPORTS_SESSION_STATUS" }, {} as chrome.runtime.MessageSender, sendResponse)).toBeUndefined()
+    expect(handleContentMessage({ type: "REPORTS_SESSION_STATUS" }, backgroundSender, sendResponse)).toBeUndefined()
     expect(sendResponse).toHaveBeenCalledWith({ ok: true, loggedInToStore: true, settled: true })
   })
 
   it("opens the palette on the report sign-in screen", async () => {
     const setOpen = vi.fn()
     const sendResponse = vi.fn()
-    const load = vi.fn(async () => ({ setOpen }))
+    const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     expect(handleContentMessage(
       { type: "OPEN_PALETTE", mode: "report-login" },
-      {} as chrome.runtime.MessageSender,
+      backgroundSender,
       sendResponse,
       load,
     )).toBe(true)
@@ -38,9 +44,40 @@ describe("content script report messages", () => {
     expect(setOpen).toHaveBeenCalledWith(true, "report-login")
   })
 
+  it("shows the finished store switch on a page that was already loaded", async () => {
+    const showSwitchDone = vi.fn()
+    const sendResponse = vi.fn()
+    const load = vi.fn(async () => ({ setOpen: vi.fn(), showSwitchDone }))
+
+    handleContentMessage({ type: "ACCOUNTS_SWITCH_DONE", storeName: "JMG Outdoors" }, backgroundSender, sendResponse, load)
+
+    expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+    await vi.waitFor(() => expect(showSwitchDone).toHaveBeenCalledWith("JMG Outdoors"))
+  })
+
+  it("asks for a finished-switch notice only on Seller Central pages", async () => {
+    const showSwitchDone = vi.fn()
+    const load = vi.fn(async () => ({ setOpen: vi.fn(), showSwitchDone }))
+    const sendMessage = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>
+    sendMessage.mockResolvedValue({ ok: true, storeName: "JMG Outdoors" })
+
+    await showSwitchNotice(load)
+    expect(sendMessage).not.toHaveBeenCalled()
+
+    vi.stubGlobal("location", { ...window.location, origin: "https://sellercentral.amazon.com" })
+    await showSwitchNotice(load)
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_SWITCH_NOTICE" })
+    expect(showSwitchDone).toHaveBeenCalledWith("JMG Outdoors")
+
+    sendMessage.mockResolvedValue({ ok: true })
+    showSwitchDone.mockClear()
+    await showSwitchNotice(load)
+    expect(showSwitchDone).not.toHaveBeenCalled()
+  })
+
   it("warms the palette on a modifier key without opening", () => {
     const setOpen = vi.fn()
-    const load = vi.fn(async () => ({ setOpen }))
+    const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     handleContentKeyDown(
       new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),
@@ -64,7 +101,7 @@ describe("content script report messages", () => {
 
   it("opens the palette on the shortcut after warming", async () => {
     const setOpen = vi.fn()
-    const load = vi.fn(async () => ({ setOpen }))
+    const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     handleContentKeyDown(
       new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),
@@ -126,7 +163,7 @@ describe("content script report messages", () => {
     try {
       expect(handleContentMessage(
         { type: "REPORTS_FETCH_UNFULFILLABLE" },
-        {} as chrome.runtime.MessageSender,
+        backgroundSender,
         sendResponse,
       )).toBe(true)
 
@@ -166,7 +203,7 @@ describe("content script report messages", () => {
     try {
       expect(handleContentMessage(
         { type: "REPORTS_FETCH_FEEDBACK" },
-        {} as chrome.runtime.MessageSender,
+        backgroundSender,
         sendResponse,
       )).toBe(true)
 
@@ -202,7 +239,7 @@ describe("content script report messages", () => {
     try {
       expect(handleContentMessage(
         { type: "REPORTS_FETCH_STRANDED" },
-        {} as chrome.runtime.MessageSender,
+        backgroundSender,
         sendResponse,
       )).toBe(true)
 
@@ -262,7 +299,7 @@ describe("content script report messages", () => {
     try {
       expect(handleContentMessage(
         { type: "REPORTS_FETCH_SUPPRESSED" },
-        {} as chrome.runtime.MessageSender,
+        backgroundSender,
         sendResponse,
       )).toBe(true)
 
@@ -302,7 +339,7 @@ describe("content script report messages", () => {
     try {
       expect(handleContentMessage(
         { type: "REPORTS_FETCH_SHIPPING_QUEUE" },
-        {} as chrome.runtime.MessageSender,
+        backgroundSender,
         sendResponse,
       )).toBe(true)
 
@@ -325,6 +362,84 @@ describe("content script report messages", () => {
   })
 })
 
+describe("content script case scrape", () => {
+  afterEach(() => {
+    setLogSink(null)
+    vi.unstubAllGlobals()
+  })
+
+  it("returns the case file and leaves the reply out of the log", async () => {
+    const entries: LogEntry[] = []
+    setLogSink((entry) => entries.push(entry))
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      appointmentMetadata: null,
+      contactList: [{
+        attachments: null,
+        channelType: "EMAIL",
+        contactId: "contact-1",
+        message: "SECRET_REPLY",
+        messageTruncated: false,
+        outbound: false,
+        sender: "seller@example.com",
+        timestamp: 1791199314.925,
+      }],
+      currentToken: null,
+      liveConversation: null,
+      totalNumberOfContacts: 1,
+      viewCaseMetaData: {
+        caseStatus: "Resolved",
+        caseTitle: "Inventory discrepancy",
+        creationDate: 1791199314.913,
+        primaryEmail: "seller@example.com",
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } }))
+    vi.stubGlobal("fetch", fetchImpl)
+    const sendResponse = vi.fn()
+
+    expect(handleContentMessage(
+      { type: "SCRAPE_CASES", caseIds: ["22420938051"] },
+      backgroundSender,
+      sendResponse,
+    )).toBe(true)
+
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled())
+    const response = sendResponse.mock.calls[0][0] as {
+      ok: boolean
+      file: { cases: Array<{ contacts: Array<{ message: string }> }> }
+    }
+    expect(response.ok).toBe(true)
+    expect(response.file.cases[0].contacts[0].message).toBe("SECRET_REPLY")
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining("/hill/hillservice/mons-api/ViewCase"),
+      expect.objectContaining({ credentials: "include" }),
+    )
+    expect(JSON.stringify(entries)).not.toContain("SECRET_REPLY")
+    expect(entries.some((entry) => entry.event === "case.scrape" && entry.data?.cases === 1)).toBe(true)
+  })
+
+  it("keeps a sign-in failure on the case instead of failing the whole scrape", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html></html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    })))
+    const sendResponse = vi.fn()
+
+    handleContentMessage(
+      { type: "SCRAPE_CASES", caseIds: ["22420938051"] },
+      backgroundSender,
+      sendResponse,
+    )
+
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+      ok: true,
+      file: expect.objectContaining({
+        cases: [],
+        errors: [{ caseId: "22420938051", error: VIEW_CASE_SIGN_IN_ERROR }],
+      }),
+    }))
+  })
+})
+
 describe("content script report logging", () => {
   afterEach(() => {
     setLogSink(null)
@@ -337,7 +452,7 @@ describe("content script report logging", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, text: async () => "" })))
     const sendResponse = vi.fn()
 
-    handleContentMessage({ type: "REPORTS_FETCH_STRANDED", runId: "report-7" }, {} as chrome.runtime.MessageSender, sendResponse)
+    handleContentMessage({ type: "REPORTS_FETCH_STRANDED", runId: "report-7" }, backgroundSender, sendResponse)
 
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
       ok: false,

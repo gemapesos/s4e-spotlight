@@ -1,8 +1,20 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
+import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage as rawHandleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, decryptSharedVault, decryptVault, encryptSharedVault, SHARE_FILE_KIND, STORE_INDEX_KEY, VAULT_STORAGE_KEY, type AccountVault } from "../src/lib/accounts"
+
+
+const accountsSender: chrome.runtime.MessageSender = { id: "test-extension", url: "chrome-extension://test-extension/options.html", frameId: 0, documentId: "accounts-document" }
+// Happy-path fixtures use real context metadata. Authorization regression tests call the raw handler.
+function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender) {
+  const automation = String(message.type).startsWith("ACCOUNT_AUTOMATION_")
+  return rawHandleAccountsMessage(message, {
+    ...accountsSender,
+    ...(automation ? { url: "https://sellercentral.amazon.com/ap/signin", documentId: "login-document" } : {}),
+    ...sender,
+  })
+}
 
 function storageArea(values: Record<string, unknown>) {
   return {
@@ -20,10 +32,16 @@ describe("Accounts background workflow", () => {
   const local: Record<string, unknown> = {}
   const session: Record<string, unknown> = {}
   const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
-  const update = vi.fn(async () => ({}))
+  const update = vi.fn(async (_id: number, _properties: chrome.tabs.UpdateProperties) => ({}))
   const remove = vi.fn(async () => undefined)
   const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
   const focusWindow = vi.fn(async () => ({}))
+  const createWindow = vi.fn()
+  const move = vi.fn()
+  const tabUrls = new Map<number, string>()
+  const tabWindows = new Map<number, number>()
+  const tabIndexes = new Map<number, number>()
+  const get = vi.fn(async (id: number) => ({ id, windowId: tabWindows.get(id) ?? 4, index: tabIndexes.get(id) ?? 0, status: "complete", url: tabUrls.get(id) ?? "https://sellercentral.amazon.com/home" }))
   const debuggerAttach = vi.fn(async () => undefined)
   const debuggerSendCommand = vi.fn(async () => undefined)
   const debuggerDetach = vi.fn(async () => undefined)
@@ -32,6 +50,15 @@ describe("Accounts background workflow", () => {
     for (const key of Object.keys(local)) delete local[key]
     for (const key of Object.keys(session)) delete session[key]
     create.mockReset(); create.mockResolvedValue({ id: 91, windowId: 4 }); update.mockClear(); remove.mockClear()
+    tabUrls.clear(); tabWindows.clear(); tabIndexes.clear()
+    tabWindows.set(91, 40)
+    get.mockClear()
+    createWindow.mockReset().mockResolvedValue({ id: 40, tabs: [{ id: 91, windowId: 40 }], type: "normal", incognito: false })
+    update.mockReset().mockImplementation(async (id: number, properties: chrome.tabs.UpdateProperties) => {
+      if (properties.url) tabUrls.set(id, properties.url)
+      return get(id)
+    })
+    move.mockReset().mockImplementation(async (id: number, properties: chrome.tabs.MoveProperties) => { tabWindows.set(id, properties.windowId!); return get(id) })
     query.mockReset(); query.mockResolvedValue([]); focusWindow.mockReset(); focusWindow.mockResolvedValue({})
     debuggerAttach.mockReset(); debuggerSendCommand.mockReset(); debuggerDetach.mockReset()
     debuggerAttach.mockResolvedValue(undefined)
@@ -40,14 +67,29 @@ describe("Accounts background workflow", () => {
     vi.stubGlobal("crypto", webcrypto)
     vi.stubGlobal("chrome", {
       storage: { local: storageArea(local), session: storageArea(session) },
-      tabs: { create, update, remove, query },
-      windows: { update: focusWindow },
-      runtime: { openOptionsPage: vi.fn(async () => undefined) },
+      tabs: { create, update, remove, query, get, move, sendMessage: vi.fn(async () => ({ ok: true, loggedInToStore: true, settled: true })) },
+      windows: {
+        create: createWindow, update: focusWindow, remove: vi.fn(),
+        get: vi.fn(async (id: number) => ({ id, type: "normal", incognito: false })),
+        getLastFocused: vi.fn(async () => ({ id: 4, type: "normal", incognito: false })),
+        getAll: vi.fn(async () => [{ id: 4, type: "normal", incognito: false }]),
+      },
+      runtime: { id: "test-extension", getURL: (path: string) => `chrome-extension://test-extension/${path}`, openOptionsPage: vi.fn(async () => undefined) },
       debugger: { attach: debuggerAttach, sendCommand: debuggerSendCommand, detach: debuggerDetach },
     })
   })
 
   afterEach(() => vi.unstubAllGlobals())
+
+  async function completeSwitch(job: { id: string }) {
+    const pending = session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }
+    if (pending.stage !== "store") {
+      await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    }
+    return handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, {
+      tab: { id: 91 } as chrome.tabs.Tab, url: (await get(91)).url, documentId: "store-document",
+    })
+  }
 
   it("validates uniqueness and credential references", () => {
     const duplicate: AccountVault = {
@@ -111,7 +153,7 @@ describe("Accounts background workflow", () => {
       credentials: [{ id: "shared-credential", domain: "shared@example.test", password: "shared-password", otpAuthUri: "otpauth://totp/Shared?secret=JBSWY3DPEHPK3PXP" }],
       stores: [{ id: "shared-store", name: "Shared Store", credentialId: "shared-credential", storeUrl: "https://sellercentral.amazon.com/home?store=shared" }],
     }
-    const file = await encryptSharedVault(incoming, "share-password", 1_000)
+    const file = await encryptSharedVault(incoming, "share-password", 600_000)
     await expect(handleAccountsMessage({ type: "ACCOUNTS_IMPORT_SHARE", file, sharePassword: "wrong-password" }, {})).rejects.toThrow(/share password or damaged/i)
     expect((await handleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, {}) as any).vault).toEqual(localVault)
 
@@ -131,7 +173,7 @@ describe("Accounts background workflow", () => {
       version: 1,
       credentials: [{ id: "shared-credential", domain: "shared@example.test", password: "shared-password", otpAuthUri: "otpauth://totp/Shared?secret=JBSWY3DPEHPK3PXP" }],
       stores: [],
-    }, "share-password", 1_000)
+    }, "share-password", 600_000)
     await expect(handleAccountsMessage({
       type: "ACCOUNTS_CREATE_FROM_SHARE",
       file,
@@ -161,16 +203,17 @@ describe("Accounts background workflow", () => {
     }
     await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})
-    expect(create).toHaveBeenCalledWith({ active: false, url: "about:blank" })
+    expect(createWindow).toHaveBeenCalledWith({ url: "about:blank", type: "normal", focused: false, incognito: false })
     expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})).rejects.toThrow(/already running/i)
     const job = session[ACTIVE_JOB_STORAGE_KEY] as { id: string }
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "password" }, { tab: { id: 12 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" })).rejects.toThrow(/authorized/i)
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: SIGN_IN_URL })
     const email = await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "email" }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" })
     expect(email).toEqual({ ok: true, value: "operator@example.test" })
     expect(JSON.stringify(email)).not.toContain("private-password")
-    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
-    expect(update).toHaveBeenCalledWith(91, { active: true, url: vault.stores[0].storeUrl })
+    await completeSwitch(job)
+    expect(update).toHaveBeenCalledWith(91, { url: vault.stores[0].storeUrl })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
     expect(local[CURRENT_STORE_KEY]).toBe("store")
   })
@@ -203,7 +246,7 @@ describe("Accounts background workflow", () => {
     ])
     expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1)
     expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1)
-    expect(create).toHaveBeenCalledOnce()
+    expect(createWindow).toHaveBeenCalledOnce()
   })
 
   it("cleans up the reservation when login-tab creation fails", async () => {
@@ -214,7 +257,7 @@ describe("Accounts background workflow", () => {
       stores: [{ id: "store", name: "Example Outdoors", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home" }],
     }
     await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
-    create.mockRejectedValueOnce(new Error("create failed"))
+    createWindow.mockRejectedValueOnce(new Error("create failed"))
 
     await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})).rejects.toThrow("create failed")
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
@@ -311,9 +354,171 @@ describe("Accounts background workflow", () => {
     return session[ACTIVE_JOB_STORAGE_KEY] as { id: string }
   }
 
+  async function openSelectedStore(job: { id: string }) {
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home", documentId: "login-document" })
+    return { tab: { id: 91 } as chrome.tabs.Tab, url: (await get(91)).url, documentId: "store-document" }
+  }
+
+  it("reloads the user's Seller Central tab in place, unfocused, once a new loaded store document confirms readiness", async () => {
+    const job = await createActiveJob()
+    query.mockResolvedValue([{ id: 22, windowId: 4 } as chrome.tabs.Tab])
+    const sender = await openSelectedStore(job)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "store", storeNavigationDocumentId: "login-document" })
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+    expect(remove).not.toHaveBeenCalled()
+    expect(move).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
+    await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, { ...sender, documentId: "login-document" })).rejects.toThrow(/not loaded/)
+    get.mockResolvedValueOnce({ id: 91, windowId: 40, index: 0, status: "loading", url: sender.url })
+    // The sender check reads the tab first, then readiness checks whether loading finished.
+    get.mockResolvedValueOnce({ id: 91, windowId: 40, index: 0, status: "loading", url: sender.url })
+    expect(await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)).toMatchObject({ waitMs: 500 })
+    expect(remove).not.toHaveBeenCalled()
+    expect(move).not.toHaveBeenCalled()
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)
+    expect(update).toHaveBeenLastCalledWith(22, { url: "https://sellercentral.amazon.com/home?store=test" })
+    expect(update).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ active: true }))
+    expect(move).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
+    // Only the helper closes, after the user's tab started loading the store.
+    expect(remove).toHaveBeenCalledExactlyOnceWith(91)
+    expect(update.mock.invocationCallOrder.at(-1)).toBeLessThan(remove.mock.invocationCallOrder[0])
+    expect(session.accountsSwitchNotice).toEqual({ tabId: 22, storeName: "Example Outdoors" })
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
+  })
+
+  it("does not replace tabs if the store session is unconfirmed or moving the finished tab fails", async () => {
+    const job = await createActiveJob()
+    const sender = await openSelectedStore(job)
+    const send = chrome.tabs.sendMessage as ReturnType<typeof vi.fn>
+    send.mockImplementation(async (_id: number, message: { type: string }) => message.type === "REPORTS_SESSION_STATUS" ? { ok: true, loggedInToStore: false, settled: true } : { ok: true })
+    expect(await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)).toMatchObject({ waitMs: 500 })
+    expect(move).not.toHaveBeenCalled()
+    send.mockResolvedValue({ ok: true, loggedInToStore: true, settled: true })
+    move.mockRejectedValueOnce(new Error("cannot move tab"))
+    await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)).rejects.toThrow("cannot move tab")
+    expect(remove).not.toHaveBeenCalled()
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "store" })
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+  })
+
+  it("reloads a matching tab and leaves incognito and navigated-away tabs alone", async () => {
+    const job = await createActiveJob()
+    query.mockResolvedValue([
+      { id: 11, incognito: true } as chrome.tabs.Tab,
+      { id: 22 } as chrome.tabs.Tab,
+      { id: 33 } as chrome.tabs.Tab,
+    ])
+    tabUrls.set(22, "https://example.test/other-work")
+    await completeSwitch(job)
+    expect(update).toHaveBeenLastCalledWith(33, { url: "https://sellercentral.amazon.com/home?store=test" })
+    expect(remove).toHaveBeenCalledExactlyOnceWith(91)
+  })
+
+  it("keeps the helper's tab, unfocused, when no Seller Central tab is open to reload", async () => {
+    const job = await createActiveJob()
+    const windows = chrome.windows.get as ReturnType<typeof vi.fn>
+    windows.mockRejectedValue(new Error("window closed"))
+    const all = chrome.windows.getAll as ReturnType<typeof vi.fn>
+    all.mockResolvedValue([{ id: 40, type: "normal", incognito: false }, { id: 8, type: "normal", incognito: false }])
+    await completeSwitch(job)
+    expect(move).toHaveBeenCalledWith(91, { windowId: 8, index: -1 })
+    // Its page is already loaded, so it is told directly.
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(91, { type: "ACCOUNTS_SWITCH_DONE", storeName: "Example Outdoors" }, { documentId: "store-document" })
+    expect(session.accountsSwitchNotice).toEqual({ tabId: 91, storeName: "Example Outdoors" })
+    tabWindows.set(91, 40)
+    local[CURRENT_STORE_KEY] = undefined
+    await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})
+    expect(session.accountsSwitchNotice).toBeUndefined()
+    all.mockResolvedValue([{ id: 40, type: "normal", incognito: false }])
+    move.mockClear()
+    await completeSwitch(session[ACTIVE_JOB_STORAGE_KEY] as { id: string })
+    expect(move).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+  })
+
+  it("shows the finished-switch notice only to its tab until that tab dismisses it", async () => {
+    const job = await createActiveJob()
+    query.mockResolvedValue([{ id: 22, windowId: 4 } as chrome.tabs.Tab])
+    await completeSwitch(job)
+    const page = (tabId: number, frameId = 0) => ({ tab: { id: tabId } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home", frameId })
+
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_SWITCH_NOTICE" }, page(22))).toEqual({ ok: true, storeName: "Example Outdoors" })
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_SWITCH_NOTICE" }, page(22, 3))).toEqual({ ok: true })
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_SWITCH_NOTICE" }, page(33))).toEqual({ ok: true })
+    await handleAccountsMessage({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" }, page(33))
+    expect(session.accountsSwitchNotice).toBeDefined()
+    await handleAccountsMessage({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" }, page(22))
+    expect(session.accountsSwitchNotice).toBeUndefined()
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_SWITCH_NOTICE" }, page(22))).toEqual({ ok: true })
+  })
+
+  it("reports the steps a running switch takes, and where a paused one is waiting", async () => {
+    const job = await createActiveJob()
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {})).toMatchObject({ activeSwitch: { stage: "logout", signIn: true } })
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId: job.id, reason: "captcha" }, { tab: { id: 91 } as chrome.tabs.Tab, url: SIGN_IN_URL })
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {})).toMatchObject({ activeSwitch: { stage: "paused", resumeStage: "logout", signIn: true } })
+  })
+
+  it("brings the helper forward once for CAPTCHA and keeps the job resumable", async () => {
+    const job = await createActiveJob()
+    const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: SIGN_IN_URL }
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId: job.id, reason: "captcha" }, sender)
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId: job.id, reason: "captcha" }, sender)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "paused", resumeStage: "signin" })
+    expect(focusWindow).toHaveBeenCalledExactlyOnceWith(40, { focused: true, state: "normal" })
+    expect(remove).not.toHaveBeenCalled()
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {})).toMatchObject({ activeSwitch: { stage: "paused", attentionMessage: expect.stringContaining("CAPTCHA") } })
+    await completeSwitch(job)
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
+  })
+
+  it("keeps a failed login available for manual completion without closing old tabs", async () => {
+    const job = await createActiveJob()
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: job.id, error: "Amazon rejected the login." }, { tab: { id: 91 } as chrome.tabs.Tab, url: SIGN_IN_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "paused", resumeStage: "logout" })
+    expect(focusWindow).toHaveBeenCalledWith(40, { focused: true, state: "normal" })
+    expect(remove).not.toHaveBeenCalled()
+  })
+
+  it("cancels a readiness check in flight before any old tabs are closed", async () => {
+    const job = await createActiveJob()
+    const sender = await openSelectedStore(job)
+    let entered!: () => void
+    let release!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const send = chrome.tabs.sendMessage as ReturnType<typeof vi.fn>
+    send.mockImplementation(async (_id: number, message: { type: string }) => {
+      if (message.type === "REPORTS_SESSION_STATUS") { entered(); await gate }
+      return { ok: true, loggedInToStore: true, settled: true }
+    })
+    const ready = handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)
+    const rejected = expect(ready).rejects.toThrow(/cancelled/)
+    await started
+    const cancel = handleAccountsMessage({ type: "ACCOUNTS_CANCEL_SWITCH" }, {})
+    release()
+    await rejected
+    await cancel
+    expect(move).not.toHaveBeenCalled()
+    expect(remove).toHaveBeenCalledExactlyOnceWith(91)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+  })
+
+  it.each(["ACCOUNTS_LOCK", "ACCOUNTS_RESET"])("%s closes the helper without touching old Seller Central tabs", async (type) => {
+    await createActiveJob()
+    await handleAccountsMessage({ type }, {})
+    expect(remove).toHaveBeenCalledExactlyOnceWith(91)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+  })
+
   it("dispatches trusted mouse clicks in order and always detaches", async () => {
     const job = await createActiveJob()
     const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" }
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "email" }, sender)
 
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "continue", x: 120.5, y: 240.25 }, sender)).resolves.toEqual({ ok: true })
 
@@ -326,6 +531,7 @@ describe("Accounts background workflow", () => {
     expect(debuggerDetach).toHaveBeenCalledWith({ tabId: 91 })
 
     debuggerSendCommand.mockRejectedValueOnce(new Error("dispatch failed"))
+    ;(session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }).stage = "otp"
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "otp-submit", x: 1, y: 2 }, sender)).rejects.toThrow("dispatch failed")
     expect(debuggerDetach).toHaveBeenCalledTimes(2)
   })
@@ -354,7 +560,7 @@ describe("Accounts background workflow", () => {
     const job = await createActiveJob()
     expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toBeNull()
 
-    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    await completeSwitch(job)
     const unlocked = await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any
     expect(unlocked.currentStore).toEqual({ id: "store", name: "Example Outdoors" })
 
@@ -373,7 +579,7 @@ describe("Accounts background workflow", () => {
 
   it("clears the current store when that store is deleted or the vault is reset", async () => {
     const job = await createActiveJob()
-    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    await completeSwitch(job)
 
     const vault: AccountVault = {
       version: 1,
@@ -385,7 +591,7 @@ describe("Accounts background workflow", () => {
 
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "other" }, {})
     const nextJob = session[ACTIVE_JOB_STORAGE_KEY] as { id: string }
-    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: nextJob.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    await completeSwitch(nextJob)
     expect((await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any).currentStore).toEqual({ id: "other", name: "North Shop" })
 
     await handleAccountsMessage({ type: "ACCOUNTS_RESET" }, {})
@@ -432,7 +638,7 @@ describe("Accounts background workflow", () => {
     expect(focusWindow).not.toHaveBeenCalled()
   })
 
-  it("skips logout when switching to another store on the same credential and navigates an open tab", async () => {
+  it("skips logout for the same credential but waits for the background store page before replacement", async () => {
     await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
     const vault: AccountVault = {
       version: 1,
@@ -450,14 +656,45 @@ describe("Accounts background workflow", () => {
     ])
     const sender = { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab }
 
-    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, sender)).resolves.toEqual({ ok: true })
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, sender)).resolves.toMatchObject({ ok: true })
 
     expect(create).not.toHaveBeenCalled()
-    expect(update).toHaveBeenCalledWith(22, { active: true, url: vault.stores[1].storeUrl })
-    expect(focusWindow).toHaveBeenCalledWith(4, { focused: true })
-    expect(remove).toHaveBeenCalledWith([11])
+    expect(update).toHaveBeenCalledWith(91, { url: vault.stores[1].storeUrl })
+    expect(focusWindow).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+    expect(local[CURRENT_STORE_KEY]).toBe("loving-home")
+    expect(await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {})).toMatchObject({ activeSwitch: { stage: "store", signIn: false } })
+    await completeSwitch(session[ACTIVE_JOB_STORAGE_KEY] as { id: string })
+    // The tab in the starting window reloads in place; the other window's copy closes.
+    expect(update).toHaveBeenLastCalledWith(22, { url: vault.stores[1].storeUrl })
+    expect(move).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
+    expect(remove).toHaveBeenCalledWith(11)
+    expect(remove).toHaveBeenCalledWith(91)
+    expect(remove).not.toHaveBeenCalledWith(22)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
     expect(local[CURRENT_STORE_KEY]).toBe("shipping")
+  })
+
+  it("prefers reloading the tab the switch started from", async () => {
+    const job = await (async () => {
+      await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
+      await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault: {
+        version: 1,
+        credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
+        stores: [{ id: "store", name: "Example Outdoors", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=test" }],
+      } }, {})
+      await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab })
+      return session[ACTIVE_JOB_STORAGE_KEY] as { id: string }
+    })()
+    query.mockResolvedValue([
+      { id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab,
+      { id: 7, windowId: 4, lastAccessed: 10 } as chrome.tabs.Tab,
+    ])
+    await completeSwitch(job)
+    expect(update).toHaveBeenLastCalledWith(7, { url: "https://sellercentral.amazon.com/home?store=test" })
+    expect(remove).toHaveBeenCalledWith(22)
+    expect(remove).not.toHaveBeenCalledWith(7)
   })
 
   it("closes duplicate Seller Central tabs after a logout-login switch completes", async () => {
@@ -476,10 +713,13 @@ describe("Accounts background workflow", () => {
       { id: 33, windowId: 4, lastAccessed: 80 } as chrome.tabs.Tab,
     ])
 
-    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    await completeSwitch(job)
 
-    expect(update).toHaveBeenCalledWith(91, { active: true, url: vault.stores[0].storeUrl })
-    expect(remove).toHaveBeenCalledWith([11, 33])
+    expect(update).toHaveBeenCalledWith(91, { url: vault.stores[0].storeUrl })
+    expect(update).toHaveBeenLastCalledWith(33, { url: vault.stores[0].storeUrl })
+    expect(remove).toHaveBeenCalledWith(11)
+    expect(remove).toHaveBeenCalledWith(91)
+    expect(remove).not.toHaveBeenCalledWith(33)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
   })
 
@@ -498,15 +738,21 @@ describe("Accounts background workflow", () => {
     query.mockResolvedValue([])
     const sender = { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab }
 
-    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, sender)).resolves.toEqual({ ok: true })
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, sender)).resolves.toMatchObject({ ok: true })
 
-    expect(create).toHaveBeenCalledWith({ active: true, url: vault.stores[1].storeUrl, windowId: 4 })
-    expect(update).not.toHaveBeenCalled()
+    expect(createWindow).toHaveBeenCalledWith({ url: "about:blank", type: "normal", focused: false, incognito: false })
+    expect(update).toHaveBeenCalledWith(91, { url: vault.stores[1].storeUrl })
+    expect(focusWindow).not.toHaveBeenCalled()
+    tabIndexes.set(7, 3)
+    await completeSwitch(session[ACTIVE_JOB_STORAGE_KEY] as { id: string })
+    // The finished tab lands beside the tab the switch started from, without taking focus.
+    expect(move).toHaveBeenCalledWith(91, { windowId: 4, index: 4 })
+    expect(focusWindow).not.toHaveBeenCalled()
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
     expect(local[CURRENT_STORE_KEY]).toBe("shipping")
   })
 
-  it("reuses an existing Seller Central tab when switching to a different credential", async () => {
+  it("leaves existing Seller Central tabs alone while switching a different credential in the helper", async () => {
     await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
     const vault: AccountVault = {
       version: 1,
@@ -527,9 +773,11 @@ describe("Accounts background workflow", () => {
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "north" }, sender)
 
     expect(create).not.toHaveBeenCalled()
-    expect(update).toHaveBeenCalledWith(22, { url: LOGOUT_URL })
-    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "north", stage: "logout", tabId: 22, ownsTab: false })
-    expect(local[CURRENT_STORE_KEY]).toBe("loving-home")
+    expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "north", stage: "logout", tabId: 91, ownsTab: true, helperWindowId: 40, returnWindowId: 4 })
+    expect(remove).not.toHaveBeenCalled()
+    expect(focusWindow).not.toHaveBeenCalled()
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
   })
 
   it("creates a login tab when switching credentials and no Seller Central tab exists", async () => {
@@ -550,13 +798,13 @@ describe("Accounts background workflow", () => {
 
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "north" }, {})
 
-    expect(create).toHaveBeenCalledWith({ active: false, url: "about:blank" })
+    expect(createWindow).toHaveBeenCalledWith({ url: "about:blank", type: "normal", focused: false, incognito: false })
     expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "north", stage: "logout", ownsTab: true })
-    expect(local[CURRENT_STORE_KEY]).toBe("loving-home")
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
   })
 
-  it("does not close a reused Seller Central tab when canceling a switch", async () => {
+  it("closes only the helper tab when canceling a switch", async () => {
     await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
     const vault: AccountVault = {
       version: 1,
@@ -576,7 +824,7 @@ describe("Accounts background workflow", () => {
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "north" }, { tab: { id: 7, windowId: 4 } as chrome.tabs.Tab })
     await handleAccountsMessage({ type: "ACCOUNTS_CANCEL_SWITCH" }, {})
 
-    expect(remove).not.toHaveBeenCalled()
+    expect(remove).toHaveBeenCalledExactlyOnceWith(91)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
   })
 
@@ -594,7 +842,7 @@ describe("Accounts background workflow", () => {
 
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "shipping" }, {})
 
-    expect(create).toHaveBeenCalledWith({ active: false, url: "about:blank" })
+    expect(createWindow).toHaveBeenCalledWith({ url: "about:blank", type: "normal", focused: false, incognito: false })
     expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "shipping", stage: "logout", ownsTab: true })
     expect(local[CURRENT_STORE_KEY]).toBeUndefined()

@@ -24,6 +24,7 @@ function renderPalette(
 
   const props = {
     container,
+    protectedResults: true,
     enabledFeatures,
     open,
     onOpenCaseIds,
@@ -72,6 +73,20 @@ afterEach(() => {
 })
 
 describe("CommandPalette", () => {
+  it("launches Results from a webpage without preparing or fetching reports", async () => {
+    const user = userEvent.setup()
+    const onOpenReports = vi.fn().mockResolvedValue(undefined)
+    const onPrepareReports = vi.fn()
+    const onGenerateReports = vi.fn()
+    const props = renderPalette(true, undefined, undefined, undefined, onGenerateReports, undefined, undefined, { protectedResults: false, onOpenReports, onPrepareReports })
+    await user.click(screen.getByRole("option", { name: /Generate reports/ }))
+    expect(onOpenReports).toHaveBeenCalledOnce()
+    expect(onPrepareReports).not.toHaveBeenCalled()
+    expect(onGenerateReports).not.toHaveBeenCalled()
+    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    expect(screen.queryByRole("listbox", { name: "Report sections" })).not.toBeInTheDocument()
+  })
+
   function setTextareaLayout(
     input: HTMLTextAreaElement,
     { clientHeight, scrollHeight, scrollTop }: {
@@ -95,6 +110,7 @@ describe("CommandPalette", () => {
     expect(screen.getByText("Reports", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByText("Settings", { selector: "[cmdk-group-heading]" })).toBeVisible()
     expect(screen.getByRole("option", { name: /Open case IDs/ })).toHaveAttribute("aria-selected", "true")
+    expect(screen.getByRole("option", { name: /Scrape case/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Open shipment IDs/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Generate reports/ })).toBeVisible()
     expect(screen.getByRole("option", { name: /Search SKUs/ })).toBeVisible()
@@ -436,6 +452,69 @@ describe("CommandPalette", () => {
     expect(openCaseIds).not.toHaveBeenCalled()
   })
 
+  it("downloads one scraped case from the paste screen", async () => {
+    const user = userEvent.setup()
+    const onScrapeCases = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
+    const { onOpenChange } = renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      onScrapeCases,
+    })
+
+    await user.click(screen.getByRole("option", { name: /Scrape case/ }))
+    expect(screen.getByRole("button", { name: "Scrape" })).toBeDisabled()
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: "22420938051" } })
+    await user.click(screen.getByRole("button", { name: "Scrape 1 case" }))
+
+    expect(onScrapeCases).toHaveBeenCalledWith(["22420938051"])
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("launches a large scrape without a second in-page confirmation", async () => {
+    const user = userEvent.setup()
+    const onScrapeCases = vi.fn<(caseIds: string[]) => Promise<void>>().mockResolvedValue()
+    renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, { onScrapeCases })
+    const ids = Array.from({ length: 11 }, (_, index) => String(30_000_000_000 + index))
+
+    await user.click(screen.getByRole("option", { name: /Scrape case/ }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: ids.join("\n") } })
+    await user.click(screen.getByRole("button", { name: "Scrape 11 cases" }))
+
+    expect(screen.queryByRole("dialog", { name: "Confirm scrape" })).not.toBeInTheDocument()
+    expect(screen.queryByText(/tabs/)).not.toBeInTheDocument()
+    expect(onScrapeCases).toHaveBeenCalledWith(ids)
+  })
+
+  it("keeps the scrape screen open when a case fails", async () => {
+    const user = userEvent.setup()
+    const onScrapeCases = vi.fn<(caseIds: string[]) => Promise<void>>().mockRejectedValue(
+      new Error("Couldn’t scrape 22420938051. Couldn’t load the whole case."),
+    )
+    const { onOpenChange } = renderPalette(true, undefined, undefined, undefined, undefined, undefined, undefined, {
+      onScrapeCases,
+    })
+
+    await user.click(screen.getByRole("option", { name: /Scrape case/ }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Case IDs" }), { target: { value: "22420938051" } })
+    await user.click(screen.getByRole("button", { name: "Scrape 1 case" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn’t scrape 22420938051")
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it("hides Scrape case when the feature is off", () => {
+    renderPalette(
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { ...DEFAULT_ENABLED_FEATURES, "scrape-case": false },
+    )
+
+    expect(screen.queryByRole("option", { name: /Scrape case/ })).not.toBeInTheDocument()
+    expect(screen.getByRole("option", { name: /Open case IDs/ })).toBeVisible()
+  })
+
   it("extracts unique Shipment IDs from links and text and submits them", async () => {
     const user = userEvent.setup()
     const openShipmentIds = vi
@@ -659,12 +738,12 @@ describe("CommandPalette", () => {
     const user = userEvent.setup()
     renderPalette()
 
-    expect(document.querySelector("[data-slot=command-footer]")).toHaveTextContent("Navigate")
+    expect(document.querySelector("[data-slot=panel-footer]")).toHaveTextContent("Navigate")
     expect(document.querySelector("[data-slot=command-header]")).not.toBeInTheDocument()
 
     await user.click(screen.getByRole("option", { name: /Open case IDs/ }))
     expect(document.querySelector("[data-slot=command-header]")).toHaveTextContent("Commands/Open case IDs")
-    expect(document.querySelector("[data-slot=command-footer]")).toHaveTextContent("New line")
+    expect(document.querySelector("[data-slot=panel-footer]")).toHaveTextContent("New line")
   })
 
   it("labels the open button with how many IDs it will open", async () => {
@@ -761,12 +840,11 @@ describe("CommandPalette", () => {
       expect(screen.getByRole("dialog", { name: "Generate reports" })).toBeVisible()
 
       await user.keyboard("{Escape}")
-      expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
+      expect(screen.getByRole("button", { name: "Generate report" })).toBeVisible()
 
-      await startReport(user)
+      await user.click(screen.getByRole("button", { name: "Generate report" }))
       await user.click(await screen.findByRole("button", { name: "Back" }))
-      expect(screen.getByRole("dialog", { name: "Command Palette" })).toBeVisible()
-      expect(screen.getByRole("option", { name: /Generate reports/ })).toBeVisible()
+      expect(screen.getByRole("button", { name: "Generate report" })).toBeVisible()
     } finally {
       click.mockRestore()
     }
