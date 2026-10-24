@@ -421,6 +421,31 @@ describe("Seller Central account automation", () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: "job-1", kind: "otp" })
   })
 
+  it("confirms its login document is open to the background before content.js loads, and leaves other messages alone", async () => {
+    const addListener = vi.fn()
+    vi.stubGlobal("chrome", {
+      runtime: {
+        id: "test-extension",
+        getURL: (path: string) => `chrome-extension://test-extension/${path}`,
+        sendMessage: vi.fn(async () => ({ ok: true, job: null })),
+        onMessage: { addListener },
+      },
+    })
+    vi.resetModules()
+    const { handleResumeCheck } = await import("../src/" + "accountAutomation")
+    expect(addListener).toHaveBeenCalledWith(handleResumeCheck)
+    const background = { id: "test-extension", url: "chrome-extension://test-extension/background.js" }
+    const reply = vi.fn()
+
+    handleResumeCheck({ type: "ACCOUNTS_RESUME_CHECK" }, background, reply)
+    expect(reply).toHaveBeenCalledExactlyOnceWith({ ok: true })
+    reply.mockClear()
+    handleResumeCheck({ type: "REPORTS_SESSION_STATUS" }, background, reply)
+    handleResumeCheck({ type: "ACCOUNTS_RESUME_CHECK" }, { ...background, tab: { id: 4 } as chrome.tabs.Tab }, reply)
+    handleResumeCheck({ type: "ACCOUNTS_RESUME_CHECK" }, { id: "other-extension" }, reply)
+    expect(reply).not.toHaveBeenCalled()
+  })
+
   it("completes only after login when signed-in Seller Central UI is present", async () => {
     document.body.innerHTML = '<nav id="sc-top-nav-root"><a href="/home">Home</a></nav>'
     makeVisible()
