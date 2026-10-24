@@ -22,10 +22,11 @@ const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated."
 const PALETTE_UNSUPPORTED_PAGE = "The command palette can’t open on this page."
 const contentLog = createLogger("content")
 
-export type PaletteOpenMode = "commands" | "report-login"
+export type PaletteOpenMode = "commands" | "report-login" | "switching"
 
 interface MountedPalette {
   setOpen: (open: boolean, mode?: PaletteOpenMode) => void
+  showSwitchDone: (storeName: string) => void
 }
 
 interface PaletteAppModule {
@@ -88,6 +89,14 @@ export function handleContentKeyDown(
     .catch(() => {
       window.addEventListener("keydown", onKeyDown, true)
     })
+}
+
+/** A finished store switch reloads this tab; show its result until the user is back. */
+export async function showSwitchNotice(load: () => Promise<MountedPalette> = loadPalette): Promise<void> {
+  if (location.origin !== "https://sellercentral.amazon.com") return
+  const response = await chrome.runtime.sendMessage({ type: "ACCOUNTS_SWITCH_NOTICE" }) as { ok?: boolean; storeName?: unknown } | undefined
+  if (!response?.ok || typeof response.storeName !== "string") return
+  ;(await load()).showSwitchDone(response.storeName)
 }
 
 function emitReportProgress(event: ReportProgressEvent, runId?: string): void {
@@ -218,8 +227,14 @@ export function handleContentMessage(
     sendResponse({ ok: false, error: "Unauthorized extension message." })
     return undefined
   }
-  const record = message as { type?: unknown; mode?: unknown; runId?: unknown; caseIds?: unknown }
+  const record = message as { type?: unknown; mode?: unknown; runId?: unknown; caseIds?: unknown; storeName?: unknown }
   if (record.type === "ACCOUNTS_RESUME_CHECK") { sendResponse({ ok: true }); return }
+  if (record.type === "ACCOUNTS_SWITCH_DONE") {
+    const storeName = typeof record.storeName === "string" ? record.storeName : "the selected store"
+    void load().then((palette) => palette.showSwitchDone(storeName), () => undefined)
+    sendResponse({ ok: true })
+    return
+  }
   if (record.type === "REPORTS_ABORT") {
     if (typeof record.runId === "string") reportControllers.get(record.runId)?.controller.abort()
     sendResponse({ ok: true })
@@ -237,7 +252,7 @@ export function handleContentMessage(
     return true
   }
   if (record.type === "OPEN_PALETTE") {
-    const mode = record.mode === "report-login" ? "report-login" : undefined
+    const mode = record.mode === "report-login" || record.mode === "switching" ? record.mode : undefined
     void load()
       .then((palette) => {
         palette.setOpen(true, mode)
@@ -265,5 +280,6 @@ if (typeof window !== "undefined" && window.top === window) {
   if (typeof chrome !== "undefined") {
     if (chrome.runtime?.id) setLogSink(forwardLogsToBackground())
     chrome.runtime?.onMessage?.addListener(handleContentMessage)
+    if (chrome.runtime?.id && canHostPalette()) void showSwitchNotice().catch(() => undefined)
   }
 }

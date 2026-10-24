@@ -15,6 +15,8 @@ let lastCaptchaTextScanResult = false
 let runTimer: number | undefined
 let waitingForLoad = false
 let reportedWaitingPath: string | null = null
+let manualSignIn = false
+let stalledHiddenStage: string | null = null
 const automationLog = createLogger("automation")
 
 const EMAIL_INPUT_SELECTORS = ["#ap_email", 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]']
@@ -31,7 +33,7 @@ type AutomationResponse = {
   error?: string
   value?: string
   waitMs?: number
-  job?: { id: string; stage: string } | null
+  job?: { id: string; stage: string; resumeStage?: string } | null
 }
 
 async function send(message: Record<string, unknown>): Promise<AutomationResponse> {
@@ -66,6 +68,11 @@ function setWorkflowStatus(text: string, tone: "normal" | "error" = "normal"): v
   element.textContent = text
 }
 
+/** The confirmed store document stays open after the switch, so it must not keep the overlay. */
+function clearWorkflowStatus(): void {
+  document.getElementById(STATUS_ID)?.remove()
+}
+
 function input(selectors: readonly string[]): HTMLInputElement | null {
   for (const selector of selectors) {
     const element = document.querySelector(selector)
@@ -92,6 +99,12 @@ function fill(element: HTMLInputElement, value: string): void {
 
 type ClickAction = "continue" | "password-submit" | "otp-submit"
 
+/** Amazon wraps each submit input in a same-id span; a page-level click must reach the input itself. */
+function submitControl(element: HTMLElement): HTMLElement {
+  if (element instanceof HTMLInputElement || element instanceof HTMLButtonElement) return element
+  return element.querySelector<HTMLElement>('input[type="submit"], button[type="submit"], button, input[type="button"]') ?? element
+}
+
 async function activate(
   jobId: string,
   element: HTMLElement | null,
@@ -100,6 +113,13 @@ async function activate(
 ): Promise<void> {
   if (!element) throw new Error(missingMessage)
   if (!visible(element)) throw new Error(`${missingMessage} The control is not visible.`)
+  // A sign-in window covered by other windows is hidden, and Chrome does not deliver debugger
+  // input to hidden pages, so submit through the page there. It also avoids the debugging bar.
+  if (document.visibilityState === "hidden") {
+    automationLog.withRun(jobId).info("automation.click", { action, mode: "page" })
+    submitControl(element).click()
+    return
+  }
   const rect = element.getBoundingClientRect()
   const finite = [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)
   if (!finite || rect.width <= 0 || rect.height <= 0) {
@@ -135,9 +155,27 @@ function prepareStage(stage: string, failureMessage: string): boolean {
     scheduleRun(RETRY_DELAY_MS - elapsed)
     return false
   }
-  if ((attempts.get(stage) ?? 0) >= MAX_ATTEMPTS) throw new Error(failureMessage)
+  if ((attempts.get(stage) ?? 0) >= MAX_ATTEMPTS) {
+    if (document.visibilityState === "hidden") stalledHiddenStage = stage
+    throw new Error(failureMessage)
+  }
   inFlight = null
   return true
+}
+
+/** Needs attention shows the window; once visible, trusted clicks work, so retry the stalled step. */
+function retryStalledStageWhenVisible(): void {
+  const stage = stalledHiddenStage
+  if (!stage) return
+  stalledHiddenStage = null
+  document.addEventListener("visibilitychange", function onVisible() {
+    if (document.visibilityState !== "visible") return
+    document.removeEventListener("visibilitychange", onVisible)
+    attempts.delete(stage)
+    inFlight = null
+    manualSignIn = false
+    scheduleRun(0)
+  })
 }
 
 function markStageSubmitted(stage: string): void {
@@ -165,6 +203,20 @@ function hasAuthError(): boolean {
   const alert = Array.from(document.querySelectorAll('[role="alert"], .a-alert-error, #auth-error-message-box'))
     .find((element) => element.id !== STATUS_ID && visible(element) && (element.textContent?.trim().length ?? 0) > 0)
   return Boolean(alert)
+}
+
+function hasManualVerification(): boolean {
+  return /^\/ap\/(?:cvf|mfa|challenge|dcq|pv)(?:\/|$)/u.test(location.pathname)
+    && document.readyState === "complete"
+    && !input(EMAIL_INPUT_SELECTORS) && !input(PASSWORD_INPUT_SELECTORS) && !input(OTP_INPUT_SELECTORS)
+}
+
+async function requestAttention(jobId: string, reason: string): Promise<void> {
+  if (!attempts.has(reason)) {
+    attempts.set(reason, 1)
+    await send({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId, reason })
+  }
+  scheduleRun(1500)
 }
 
 /** Logged-in enough to open the saved store URL (shell UI or merchant/marketplace picker). */
@@ -202,7 +254,13 @@ async function leaveLogout(jobId: string): Promise<void> {
 async function failWorkflow(jobId: string, error: unknown): Promise<void> {
   const message = errorMessage(error, "Account switching failed.")
   setWorkflowStatus(message, "error")
-  await send({ type: "ACCOUNT_AUTOMATION_ERROR", jobId, error: message })
+  retryStalledStageWhenVisible()
+  // Report once per document; later polls keep retrying without flooding the log.
+  if (!manualSignIn) {
+    manualSignIn = true
+    await send({ type: "ACCOUNT_AUTOMATION_ERROR", jobId, error: message })
+  }
+  scheduleRun(1500)
 }
 
 function onLogoutIntercept(): boolean {
@@ -214,16 +272,47 @@ function onLogoutIntercept(): boolean {
 async function run(): Promise<void> {
   const response = await send({ type: "ACCOUNT_AUTOMATION_GET_JOB" })
   const job = response.job
-  if (!response.ok || !job) return
+  if (!response.ok || !job) {
+    clearWorkflowStatus()
+    return
+  }
+  const stage = job.resumeStage ?? job.stage
 
   try {
     if (hasCaptcha()) {
       setWorkflowStatus("Amazon needs you to complete the CAPTCHA. Automation will resume afterward.")
-      if (!attempts.has("captcha")) {
-        attempts.set("captcha", 1)
-        await send({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId: job.id })
+      await requestAttention(job.id, "captcha")
+      return
+    }
+    if (hasManualVerification()) {
+      setWorkflowStatus("Amazon needs you to complete verification in this window. Automation will resume afterward.")
+      await requestAttention(job.id, "verification")
+      return
+    }
+    if (stage === "store") {
+      if (hasAuthenticatedSellerUi() && document.readyState === "complete") {
+        setWorkflowStatus("Store loaded. Finishing the switch…")
+        const ready = await send({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id })
+        if (!ready.ok) throw new Error(ready.error ?? "Couldn’t finish the store switch.")
+        if (ready.waitMs) scheduleRun(ready.waitMs)
+        else clearWorkflowStatus()
+        return
       }
-      scheduleRun(1500)
+      if (location.pathname.startsWith("/ap/") && (input(EMAIL_INPUT_SELECTORS) || input(PASSWORD_INPUT_SELECTORS) || input(OTP_INPUT_SELECTORS))) {
+        const reauth = await send({ type: "ACCOUNT_AUTOMATION_REAUTH", jobId: job.id })
+        if (!reauth.ok) throw new Error(reauth.error ?? "Sign in to this account again.")
+        return
+      }
+      if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) throw new Error("The selected store did not finish loading. Review this window or cancel and retry.")
+      setWorkflowStatus("Opening and checking the selected store…")
+      scheduleRun(1000)
+      return
+    }
+    if (manualSignIn) {
+      if (hasAuthenticatedSellerUi() || location.pathname.startsWith("/account-switcher/")) {
+        const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
+        if (!completed.ok) throw new Error(completed.error ?? "Couldn’t open the selected store.")
+      } else scheduleRun(1500)
       return
     }
     if (hasAuthError()) {
@@ -232,7 +321,7 @@ async function run(): Promise<void> {
     }
 
     // Never fill credentials on Amazon's logout re-auth (return_to=sign-out); wait for canonical sign-in navigation.
-    if (job.stage === "logout" || leavingLogout) {
+    if (stage === "logout" || leavingLogout) {
       if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) {
         throw new Error("Amazon did not finish signing out. Cancel the switch and try again.")
       }
@@ -286,7 +375,7 @@ async function run(): Promise<void> {
       return
     }
 
-    if (isReadyForStoreNavigation() && shouldCompleteAuthenticatedSession(job.stage)) {
+    if (isReadyForStoreNavigation() && (job.stage === "paused" || shouldCompleteAuthenticatedSession(stage))) {
       setWorkflowStatus("Signed in. Opening the selected store…")
       const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
       if (!completed.ok) throw new Error(completed.error ?? "Couldn’t open the selected store.")

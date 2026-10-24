@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { canHostPalette, handleContentKeyDown, handleContentMessage, loadPalette } from "../src/content"
+import { canHostPalette, handleContentKeyDown, handleContentMessage, loadPalette, showSwitchNotice } from "../src/content"
 import { VIEW_CASE_SIGN_IN_ERROR } from "../src/lib/viewCase"
 import { setLogSink, type LogEntry } from "../src/lib/log"
 
@@ -31,7 +31,7 @@ describe("content script report messages", () => {
   it("opens the palette on the report sign-in screen", async () => {
     const setOpen = vi.fn()
     const sendResponse = vi.fn()
-    const load = vi.fn(async () => ({ setOpen }))
+    const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     expect(handleContentMessage(
       { type: "OPEN_PALETTE", mode: "report-login" },
@@ -44,9 +44,40 @@ describe("content script report messages", () => {
     expect(setOpen).toHaveBeenCalledWith(true, "report-login")
   })
 
+  it("shows the finished store switch on a page that was already loaded", async () => {
+    const showSwitchDone = vi.fn()
+    const sendResponse = vi.fn()
+    const load = vi.fn(async () => ({ setOpen: vi.fn(), showSwitchDone }))
+
+    handleContentMessage({ type: "ACCOUNTS_SWITCH_DONE", storeName: "JMG Outdoors" }, backgroundSender, sendResponse, load)
+
+    expect(sendResponse).toHaveBeenCalledWith({ ok: true })
+    await vi.waitFor(() => expect(showSwitchDone).toHaveBeenCalledWith("JMG Outdoors"))
+  })
+
+  it("asks for a finished-switch notice only on Seller Central pages", async () => {
+    const showSwitchDone = vi.fn()
+    const load = vi.fn(async () => ({ setOpen: vi.fn(), showSwitchDone }))
+    const sendMessage = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>
+    sendMessage.mockResolvedValue({ ok: true, storeName: "JMG Outdoors" })
+
+    await showSwitchNotice(load)
+    expect(sendMessage).not.toHaveBeenCalled()
+
+    vi.stubGlobal("location", { ...window.location, origin: "https://sellercentral.amazon.com" })
+    await showSwitchNotice(load)
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_SWITCH_NOTICE" })
+    expect(showSwitchDone).toHaveBeenCalledWith("JMG Outdoors")
+
+    sendMessage.mockResolvedValue({ ok: true })
+    showSwitchDone.mockClear()
+    await showSwitchNotice(load)
+    expect(showSwitchDone).not.toHaveBeenCalled()
+  })
+
   it("warms the palette on a modifier key without opening", () => {
     const setOpen = vi.fn()
-    const load = vi.fn(async () => ({ setOpen }))
+    const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     handleContentKeyDown(
       new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),
@@ -70,7 +101,7 @@ describe("content script report messages", () => {
 
   it("opens the palette on the shortcut after warming", async () => {
     const setOpen = vi.fn()
-    const load = vi.fn(async () => ({ setOpen }))
+    const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     handleContentKeyDown(
       new KeyboardEvent("keydown", { key: "Meta", metaKey: true }),

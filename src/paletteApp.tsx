@@ -1,8 +1,10 @@
 import * as React from "react"
+import { createPortal } from "react-dom"
 import { createRoot, type Root } from "react-dom/client"
 
 import styles from "./styles.css?inline"
 import { CommandPalette, type AccountsStatus, type PaletteMode, type ReportsPrepareResult } from "./CommandPalette"
+import { SwitchStatusCard } from "./SwitchProgress"
 import { applyPrefersColorScheme } from "./lib/colorScheme"
 import {
   createLogger,
@@ -18,6 +20,7 @@ import { reportWarnings, type GeneratedReport, type ReportDownloadFormat } from 
 import {
   DEFAULT_ENABLED_FEATURES,
   enabledFeaturesEqual,
+  isFeatureEnabled,
   parseSettings,
   type EnabledFeatures,
   type ExtensionSettings,
@@ -136,6 +139,8 @@ export interface MountedCommandPalette {
   destroy: () => void
   host: HTMLElement
   setOpen: (open: boolean, mode?: PaletteMode) => void
+  /** Shows "Switched to …" until the user clicks or presses a key on this page. */
+  showSwitchDone: (storeName: string) => void
   shadowRoot: ShadowRoot
 }
 
@@ -314,6 +319,9 @@ export async function focusAccountSwitch(): Promise<void> {
 }
 export async function cancelAccountSwitch(): Promise<void> {
   await requestBackground({ type: "ACCOUNTS_CANCEL_SWITCH" })
+}
+export async function dismissSwitchNotice(): Promise<void> {
+  await requestBackground({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" })
 }
 export async function manageAccounts(): Promise<void> {
   await requestBackground({ type: "ACCOUNTS_OPEN_OPTIONS" })
@@ -544,6 +552,11 @@ export function mountCommandPalette({
   let enabledFeatures: EnabledFeatures = DEFAULT_ENABLED_FEATURES
   let openGeneration = 0
   let firstOpenAssetsSettled = false
+  /** The small store-switch card, for when the palette is hidden or another tab is in view. */
+  let switchCard: { key: number; doneStoreName?: string } | null = null
+  let switchCardKey = 0
+  /** Set while the palette shows a finished switch the background asked this tab to show. */
+  let switchedStoreName: string | undefined
 
   let fontLoaded = false
   let settingsLoaded = false
@@ -578,10 +591,49 @@ export function mountCommandPalette({
           onManageAccounts={manageAccounts}
           onOpenTimeOut={openTimeOut}
           onOpenChange={setOpen}
+          switchedStoreName={switchedStoreName}
         />
+        {/* Like the dialog, it sits directly in the shadow root, so it follows the host's dark class. */}
+        {switchCard ? createPortal(
+          <SwitchStatusCard
+            key={switchCard.key}
+            doneStoreName={switchCard.doneStoreName}
+            onCancel={cancelAccountSwitch}
+            onDismiss={dismissSwitchCard}
+            onGetAccountsStatus={getAccountsStatus}
+            onShowSignIn={focusAccountSwitch}
+          />,
+          shadowRoot,
+        ) : null}
       </React.StrictMode>,
     )
   }
+
+  const showSwitchCard = (doneStoreName?: string) => {
+    switchCard = { key: ++switchCardKey, ...(doneStoreName ? { doneStoreName } : {}) }
+    renderPalette()
+  }
+
+  function dismissSwitchCard() {
+    if (!switchCard) return
+    switchCard = null
+    renderPalette()
+    void dismissSwitchNotice().catch(() => undefined)
+  }
+
+  /** Picks up a switch still running once the palette is hidden, or when this tab comes back into view. */
+  const watchForAccountSwitch = () => {
+    // The open palette shows the switch itself; closing it checks again.
+    if (isOpen || switchCard || !isFeatureEnabled(enabledFeatures, "accounts")) return
+    void getAccountsStatus().then((status) => {
+      if (status.activeSwitch && !switchCard && !isOpen) showSwitchCard()
+    }, () => undefined)
+  }
+
+  const onVisibilityChange = () => {
+    if (targetDocument.visibilityState === "visible") watchForAccountSwitch()
+  }
+  targetDocument.addEventListener("visibilitychange", onVisibilityChange)
 
   const setOpen = (nextOpen: boolean, mode: PaletteMode = "commands") => {
     if (nextOpen) openMode = mode
@@ -595,6 +647,8 @@ export function mountCommandPalette({
     const generation = ++openGeneration
 
     if (nextOpen) {
+      // The palette takes over showing the switch; a fresh card follows when it closes.
+      switchCard = null
       previousFocus = getDeepActiveElement(targetDocument)
       applyPaletteRemScale(host, targetDocument)
       // Reopened during the close animation: the page is still locked.
@@ -602,6 +656,10 @@ export function mountCommandPalette({
       else unlockDocumentScroll = lockDocumentScroll(targetDocument)
     } else {
       unlockAfterRadixScrollLock()
+      if (switchedStoreName !== undefined) {
+        switchedStoreName = undefined
+        void dismissSwitchNotice().catch(() => undefined)
+      }
     }
     isOpen = nextOpen
     host.setAttribute(PALETTE_OPEN_ATTRIBUTE, String(nextOpen))
@@ -620,6 +678,7 @@ export function mountCommandPalette({
       }
       if (!nextOpen) {
         requestAnimationFrame(() => previousFocus?.focus({ preventScroll: true }))
+        watchForAccountSwitch()
       }
     }
 
@@ -663,10 +722,15 @@ export function mountCommandPalette({
     host,
     shadowRoot,
     setOpen,
+    showSwitchDone: (storeName) => {
+      switchedStoreName = storeName
+      setOpen(true, "switch-done")
+    },
     destroy: () => {
       host.setAttribute(PALETTE_OPEN_ATTRIBUTE, "false")
       unlockNow()
       targetDocument.defaultView?.removeEventListener("keydown", onKeyDown, true)
+      targetDocument.removeEventListener("visibilitychange", onVisibilityChange)
       if (typeof chrome !== "undefined") chrome.runtime?.onMessage?.removeListener(onRuntimeMessage)
       ;(targetDocument.defaultView as PasteGuardWindow | null)?.[
         PASTE_GUARD_KEY

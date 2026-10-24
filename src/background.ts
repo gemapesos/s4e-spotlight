@@ -79,6 +79,9 @@ const MAX_BULK_IDS = 50
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
 const UNLOCK_ATTEMPTS_KEY = "accountsUnlockAttempts"
 const UNLOCK_RESUME_KEY = "accountsUnlockResume"
+/** "Switched to …" stays on the finished tab, across its reloads, until the user dismisses it. */
+const SWITCH_NOTICE_KEY = "accountsSwitchNotice"
+interface SwitchNotice { tabId: number; storeName: string }
 const log = createLogger("background")
 const createChromeTab: CreateTab = (properties) => chrome.tabs.create(properties)
 const removeChromeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)
@@ -296,10 +299,21 @@ interface ActiveJob {
   storeId: string
   /** For logs only; the vault stays the source of truth. */
   storeName?: string
-  stage: "logout" | "signin" | "email" | "password" | "otp" | "authenticated" | "paused"
+  stage: "logout" | "signin" | "email" | "password" | "otp" | "store" | "authenticated" | "paused"
   startedAt: number
   /** True when this job created the tab; cancel/failure must not close reused SC tabs. */
   ownsTab: boolean
+  helperWindowId?: number
+  returnWindowId?: number
+  /** Where the switch was started; reloaded into the store if it shows Seller Central. */
+  sourceTabId?: number
+  incognito?: boolean
+  /** False while a same-credential switch only opens the store URL; true once it signs in. */
+  signIn?: boolean
+  /** The login document cannot also confirm the subsequent store navigation. */
+  storeNavigationDocumentId?: string
+  resumeStage?: ActiveJob["stage"]
+  attentionMessage?: string
 }
 
 const AUTOMATION_CLICK_ACTIONS = new Set(["continue", "password-submit", "otp-submit"])
@@ -317,15 +331,24 @@ const VAULT_ADMIN_TYPES = new Set([
 let vaultOperations: Promise<unknown> = Promise.resolve()
 let vaultGeneration = 0
 let operationGeneration = 0
+let switchGeneration = 0
+let operationSwitchGeneration = 0
 
 function assertVaultOperationCurrent(): void {
   if (operationGeneration !== vaultGeneration) throw new Error("The vault changed while this operation was running. Please try again.")
 }
 
+function assertSwitchOperationCurrent(): void {
+  assertVaultOperationCurrent()
+  if (operationSwitchGeneration !== switchGeneration) throw new Error("The account switch was cancelled.")
+}
+
 function queueVaultOperation<T>(action: () => Promise<T>): Promise<T> {
   const generation = vaultGeneration
+  const switchVersion = switchGeneration
   const result = vaultOperations.catch(() => undefined).then(async () => {
     operationGeneration = generation
+    operationSwitchGeneration = switchVersion
     assertVaultOperationCurrent()
     const response = await action()
     assertVaultOperationCurrent()
@@ -360,8 +383,11 @@ async function requestAccountUnlock(storeId: unknown, sender: chrome.runtime.Mes
   const stores = (stored[STORE_INDEX_KEY] ?? []) as StoreIndexRecord[]
   if (!stores.some((store) => store.id === storeId)) throw new Error("The selected store no longer exists.")
   const id = crypto.randomUUID()
+  // Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it focused
+  // after Accounts loads, so the master password field never gets focus. Open it in the
+  // background and activate it once Accounts is showing.
   const tab = await chrome.tabs.create({
-    active: true, windowId: source.windowId, openerTabId: source.id,
+    active: false, windowId: source.windowId, openerTabId: source.id,
     url: "about:blank",
   })
   if (tab.id === undefined) throw new Error("Chrome could not open Accounts.")
@@ -370,7 +396,11 @@ async function requestAccountUnlock(storeId: unknown, sender: chrome.runtime.Mes
   await chrome.storage.session.set({ [UNLOCK_RESUME_KEY]: pending })
   // Commit the handoff before Accounts can load and try to consume it.
   assertVaultOperationCurrent()
-  await chrome.tabs.update(tab.id, { url: `${chrome.runtime.getURL("options.html")}?resume=${encodeURIComponent(id)}` })
+  const accountsUrl = `${chrome.runtime.getURL("options.html")}?resume=${encodeURIComponent(id)}`
+  await chrome.tabs.update(tab.id, { url: accountsUrl })
+  // Show the tab even if the load wait times out, rather than leaving Accounts hidden.
+  await waitForTabCompleteMatching(tab.id, (url) => url === accountsUrl).catch(() => undefined)
+  await chrome.tabs.update(tab.id, { active: true })
   return { ok: true }
 }
 
@@ -386,7 +416,15 @@ async function resumeAccountSwitch(id: unknown, sender: chrome.runtime.MessageSe
   if (!alive?.ok) throw new Error("The original page is no longer open. Select the store again.")
   await chrome.tabs.update(source.id!, { active: true })
   const result = await handleAccountsMessageNow({ type: "ACCOUNTS_START_SWITCH", storeId: pending.storeId }, { ...sender, tab: source })
+  if (result.ok) void showSwitchingPalette(source.id!, pending.sourceDocumentId)
   return result.ok ? { ...result, resumed: true } : result
+}
+
+/** The page the switch was chosen on follows it, as it would had the vault been unlocked. */
+async function showSwitchingPalette(tabId: number, documentId: string): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "OPEN_PALETTE", mode: "switching" }, { documentId })
+  } catch { /* the page can't show the palette */ }
 }
 
 /** Serialize key/vault changes; Lock invalidates work immediately and completes after prior commits. */
@@ -399,10 +437,12 @@ export async function handleAccountsMessage(message: Record<string, unknown>, se
   if (type === "ACCOUNTS_LOCK" && !isPageSender(sender, "options.html") && !isPageSender(sender, "popup.html")) {
     throw new Error("Lock accounts from an extension page.")
   }
-  if (type === "ACCOUNTS_STATUS" || type === "ACCOUNT_AUTOMATION_GET_JOB" || type === "ACCOUNTS_OPEN_OPTIONS") {
+  if (type === "ACCOUNTS_STATUS" || type === "ACCOUNT_AUTOMATION_GET_JOB" || type === "ACCOUNTS_OPEN_OPTIONS"
+    || type === "ACCOUNTS_SWITCH_NOTICE" || type === "ACCOUNTS_SWITCH_NOTICE_DISMISS") {
     return handleAccountsMessageNow(message, sender)
   }
   if (type === "ACCOUNTS_LOCK" || type === "ACCOUNTS_RESET" || type === "ACCOUNTS_CHANGE_MASTER_PASSWORD") vaultGeneration += 1
+  if (type === "ACCOUNTS_CANCEL_SWITCH") switchGeneration += 1
   return queueVaultOperation(() => handleAccountsMessageNow(message, sender))
 }
 
@@ -987,63 +1027,150 @@ export async function prepareReports(senderTab?: chrome.tabs.Tab): Promise<Repor
   }
 }
 
-async function openStoreUrl(storeUrl: string, senderTab?: chrome.tabs.Tab): Promise<void> {
+/** Rechecks a queried tab, since it may have navigated away or closed since the query. */
+async function isSellerCentralTabFor(job: ActiveJob, tabId: number): Promise<boolean> {
+  let current: chrome.tabs.Tab
+  try { current = await chrome.tabs.get(tabId) } catch { return false }
+  return Boolean(current.url) && new URL(current.url!).origin === "https://sellercentral.amazon.com" && Boolean(current.incognito) === Boolean(job.incognito)
+}
+
+async function closeDuplicateSellerCentralTabs(job: ActiveJob, keepTabId: number): Promise<void> {
   const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
-  const tab = pickSellerCentralTab(tabs, senderTab?.windowId)
-  if (tab?.id !== undefined) {
-    await chrome.tabs.update(tab.id, { active: true, url: storeUrl })
-    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
-    void restorePageFocus(tab.id)
-    void closeDuplicateSellerCentralTabs(tab.id)
-    return
-  }
-  const created = await chrome.tabs.create({
-    active: true,
-    url: storeUrl,
-    ...(senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }),
-  })
-  if (created.id !== undefined) {
-    void restorePageFocus(created.id)
-    void closeDuplicateSellerCentralTabs(created.id)
+  for (const tab of tabs) {
+    if (tab.id === undefined || tab.id === job.tabId || tab.id === keepTabId || Boolean(tab.incognito) !== Boolean(job.incognito)) continue
+    if (!await isSellerCentralTabFor(job, tab.id)) continue
+    assertSwitchOperationCurrent()
+    try { await chrome.tabs.remove(tab.id) } catch { /* already closed or retained by Chrome */ }
   }
 }
 
-async function closeDuplicateSellerCentralTabs(keepTabId: number): Promise<void> {
-  const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
-  const toClose = tabs
-    .map((tab) => tab.id)
-    .filter((id): id is number => id !== undefined && id !== keepTabId)
-  if (toClose.length === 0) return
-  try { await chrome.tabs.remove(toClose) } catch { /* best effort */ }
-}
-
-/** Show a background-created tab once it renders a real page, so focus lands in the page. */
-export async function activateLoadedTab(tabId: number): Promise<void> {
-  try {
-    await waitForTabComplete(tabId)
-  } catch {
-    /* still activate so the user can see a partial page */
+/** The user's Seller Central tab to reload in place: the one the switch started from, else the most recent. */
+async function reusableSellerCentralTab(job: ActiveJob): Promise<number | undefined> {
+  const tabs = (await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN, windowType: "normal" }))
+    .filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined && tab.id !== job.tabId && Boolean(tab.incognito) === Boolean(job.incognito))
+  const rank = (tab: chrome.tabs.Tab) => (tab.id === job.sourceTabId ? 2 : 0) + (tab.windowId === job.returnWindowId ? 1 : 0)
+  const ordered = [...tabs].sort((a, b) => rank(b) - rank(a) || (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+  for (const tab of ordered) {
+    if (await isSellerCentralTabFor(job, tab.id)) return tab.id
   }
-  try {
-    const tab = await chrome.tabs.get(tabId)
-    await chrome.tabs.update(tabId, { active: true })
-    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
-  } catch { /* tab closed mid-switch */ }
+  return undefined
 }
 
-/** Yank keyboard focus out of the omnibox after extension-driven navigations. */
-export async function restorePageFocus(tabId: number): Promise<void> {
+/** Where a kept helper tab goes: beside the tab the switch started from, else at the end. */
+async function indexAfterSource(job: ActiveJob, windowId: number): Promise<number> {
+  if (job.sourceTabId === undefined) return -1
   try {
-    if (typeof chrome.tabs?.get !== "function" || typeof chrome.tabs?.onUpdated?.addListener !== "function") {
-      return
+    const source = await chrome.tabs.get(job.sourceTabId)
+    return source.windowId === windowId ? source.index + 1 : -1
+  } catch { return -1 }
+}
+
+async function closeOwnedSwitchTab(job?: ActiveJob): Promise<void> {
+  if (job?.ownsTab && job.tabId >= 0) {
+    if (job.helperWindowId !== undefined) {
+      try {
+        if ((await chrome.tabs.get(job.tabId)).windowId !== job.helperWindowId) return
+      } catch { return }
     }
-    await waitForTabComplete(tabId)
-    const tab = await chrome.tabs.get(tabId)
-    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
-    await chrome.tabs.update(tabId, { active: true })
-  } catch {
-    /* tab closed mid-switch */
+    // Closing its sole tab also closes the helper window. Other user-added tabs survive.
+    try { await chrome.tabs.remove(job.tabId) } catch { /* already closed */ }
   }
+}
+
+async function showSwitchTab(job: ActiveJob): Promise<void> {
+  const tab = await chrome.tabs.get(job.tabId)
+  assertSwitchOperationCurrent()
+  await chrome.tabs.update(job.tabId, { active: true })
+  if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true, state: "normal" })
+}
+
+async function pauseSwitch(job: ActiveJob, reason: string): Promise<void> {
+  const messages: Record<string, string> = {
+    captcha: "Complete the CAPTCHA in the sign-in window.",
+    verification: "Complete Amazon’s verification in the sign-in window.",
+    manual: "Complete sign-in manually in the sign-in window.",
+    error: "Sign-in needs your attention. Review the sign-in window or cancel and retry.",
+  }
+  const attentionMessage = messages[reason] ?? messages.verification
+  const alreadyShown = job.stage === "paused" && job.attentionMessage === attentionMessage
+  if (job.stage !== "paused") job.resumeStage = job.stage
+  job.attentionMessage = attentionMessage
+  await setJobStage(job, "paused")
+  if (!alreadyShown) await showSwitchTab(job)
+}
+
+async function switchDestinationWindow(job: ActiveJob): Promise<number | undefined> {
+  if (job.returnWindowId !== undefined) {
+    try {
+      const window = await chrome.windows.get(job.returnWindowId)
+      if (window.type === "normal" && Boolean(window.incognito) === Boolean(job.incognito)) return window.id
+    } catch { /* the original window was closed */ }
+  }
+  const windows = await chrome.windows.getAll({ windowTypes: ["normal"] })
+  return windows.find((window) => window.id !== job.helperWindowId && Boolean(window.incognito) === Boolean(job.incognito))?.id
+}
+
+/** Finish only after the saved store URL has produced a new, loaded, signed-in document. */
+async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+  if ((job.resumeStage ?? job.stage) !== "store" || sender.documentId === job.storeNavigationDocumentId) {
+    throw new Error("The selected store has not loaded yet.")
+  }
+  const url = new URL(sender.url!)
+  if (url.pathname.startsWith("/ap/") || url.pathname.startsWith("/account-switcher/") || url.pathname.startsWith("/sign-out")) {
+    throw new Error("The selected store has not loaded yet.")
+  }
+  const tab = await chrome.tabs.get(job.tabId)
+  if (tab.status !== "complete" || tab.url?.split("#")[0] !== sender.url?.split("#")[0]) return { ok: true, waitMs: 500 }
+  const session = await chrome.tabs.sendMessage(job.tabId, { type: "REPORTS_SESSION_STATUS" }, { documentId: sender.documentId }) as { ok?: boolean; loggedInToStore?: boolean; settled?: boolean } | undefined
+  assertSwitchOperationCurrent()
+  if (!session?.ok || !session.loggedInToStore || !session.settled) return { ok: true, waitMs: 500 }
+
+  // Sign-in is shared, so the user's own tab can simply load the store. It keeps its place, and
+  // neither it nor its window is activated: the user may be working elsewhere.
+  const { store } = await getJobRecords(job)
+  let finalTabId = await reusableSellerCentralTab(job)
+  assertSwitchOperationCurrent()
+  if (finalTabId !== undefined) {
+    // Recheck the store document before reloading or closing any of the user's tabs.
+    await assertWorkflowSender(sender, job.id)
+    await chrome.storage.session.set({ [SWITCH_NOTICE_KEY]: { tabId: finalTabId, storeName: store.name } satisfies SwitchNotice })
+    try {
+      await chrome.tabs.update(finalTabId, { url: store.storeUrl })
+    } catch {
+      finalTabId = undefined // closed meanwhile: keep the helper's tab instead
+    }
+  }
+  if (finalTabId === undefined) {
+    const destination = await switchDestinationWindow(job)
+    assertSwitchOperationCurrent()
+    if (destination !== undefined && destination !== tab.windowId) {
+      // Moving its only tab closes the helper window. A moved tab is not activated.
+      await chrome.tabs.move(job.tabId, { windowId: destination, index: await indexAfterSource(job, destination) })
+    }
+    // Recheck the document after the move before replacing any existing SC tabs.
+    await assertWorkflowSender(sender, job.id)
+    finalTabId = job.tabId
+    await chrome.storage.session.set({ [SWITCH_NOTICE_KEY]: { tabId: finalTabId, storeName: store.name } satisfies SwitchNotice })
+  }
+  await closeDuplicateSellerCentralTabs(job, finalTabId)
+  assertSwitchOperationCurrent()
+  await setCurrentStoreId(job.storeId)
+  await setActiveJob(undefined)
+  jobLog(job).info("account.switch.complete", { store: store.name, ms: Date.now() - job.startedAt, tab: finalTabId === job.tabId ? "helper" : "reloaded" })
+  if (finalTabId === job.tabId) void confirmSwitchDone(job.tabId, store.name, sender.documentId)
+  else try { await chrome.tabs.remove(job.tabId) } catch { /* closing its only tab closes the helper window */ }
+  return { ok: true }
+}
+
+/** A loaded page asks for its notice on startup; a kept helper page is already loaded, so tell it. */
+async function confirmSwitchDone(tabId: number, storeName: string, documentId?: string): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "ACCOUNTS_SWITCH_DONE", storeName }, { documentId })
+  } catch { /* the finished page navigated or closed */ }
+}
+
+async function getSwitchNotice(): Promise<SwitchNotice | undefined> {
+  return (await chrome.storage.session.get(SWITCH_NOTICE_KEY))[SWITCH_NOTICE_KEY] as SwitchNotice | undefined
 }
 
 function jobLog(job: ActiveJob) {
@@ -1059,12 +1186,13 @@ async function getActiveJob(): Promise<ActiveJob | undefined> {
   if (job && Date.now() - job.startedAt >= ACTIVE_JOB_TTL_MS) {
     jobLog(job).warn("account.switch.expired", jobContext(job))
     await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
+    await closeOwnedSwitchTab(job)
     return undefined
   }
   return job
 }
 async function setActiveJob(job?: ActiveJob): Promise<void> {
-  assertVaultOperationCurrent()
+  assertSwitchOperationCurrent()
   if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job })
   else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
 }
@@ -1073,6 +1201,7 @@ async function setActiveJob(job?: ActiveJob): Promise<void> {
 async function setJobStage(job: ActiveJob, stage: ActiveJob["stage"]): Promise<void> {
   if (job.stage !== stage) jobLog(job).info("account.switch.stage", { ...jobContext(job), stage, from: job.stage })
   job.stage = stage
+  if (stage !== "paused") { delete job.resumeStage; delete job.attentionMessage }
   await setActiveJob(job)
 }
 
@@ -1094,6 +1223,7 @@ async function assertWorkflowSender(sender: chrome.runtime.MessageSender, jobId:
   if (sender.documentLifecycle && sender.documentLifecycle !== "active") throw new Error("The login document is no longer active.")
   const alive = await chrome.tabs.sendMessage(job.tabId, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: sender.documentId }) as { ok?: boolean } | undefined
   if (!alive?.ok) throw new Error("The login document has navigated away.")
+  assertSwitchOperationCurrent()
   return job
 }
 async function getJobRecords(job: ActiveJob): Promise<{ store: StoreRecord; credential: CredentialRecord }> {
@@ -1111,11 +1241,12 @@ async function withJobDebugger<T>(
   const target = { tabId: job.tabId }
   let attached = false
   try {
-    assertVaultOperationCurrent()
+    assertSwitchOperationCurrent()
     const tab = await chrome.tabs.get(job.tabId)
     if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com" || !new URL(tab.url).pathname.startsWith("/ap/")) throw new Error("The login tab has navigated away.")
     await chrome.debugger.attach(target, "1.3")
     attached = true
+    assertSwitchOperationCurrent()
     return await action(target)
   } finally {
     if (attached) {
@@ -1134,42 +1265,47 @@ function requireSharePassword(value: unknown): string {
   return value
 }
 
-/** Starts a switch to a store on another credential: sign out in a Seller Central tab, then sign in. */
-async function startSignInSwitch(store: StoreRecord, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
-  const tabs = await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
-  const existingTabId = pickSellerCentralTab(tabs, sender.tab?.windowId)?.id
-  const ownsTab = existingTabId === undefined
-  let tabId = existingTabId
+/** All store switches run in an unfocused, normal window until verified or needing input. */
+async function startSignInSwitch(store: StoreRecord, sender: chrome.runtime.MessageSender, sameCredential = false): Promise<ApiResponse> {
+  const original = sender.tab?.windowId === undefined
+    ? await chrome.windows.getLastFocused({ windowTypes: ["normal"] })
+    : await chrome.windows.get(sender.tab.windowId)
+  const incognito = Boolean(original.incognito)
+  let helperWindowId: number | undefined
+  let tabId: number | undefined
   try {
-    if (tabId === undefined) {
-      // Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it
-      // focused across the whole switch, so create it in the background and activate it
-      // once it is showing a real page.
-      const tab = await chrome.tabs.create({
-        active: false,
-        url: "about:blank",
-        ...(sender.tab?.windowId === undefined ? {} : { windowId: sender.tab.windowId }),
-      })
-      if (tab.id === undefined) throw new Error("Chrome did not create the login tab.")
-      tabId = tab.id
-    }
+    assertSwitchOperationCurrent()
+    const helper = await chrome.windows.create({ url: "about:blank", type: "normal", focused: false, incognito })
+    helperWindowId = helper?.id
+    if (helperWindowId === undefined) throw new Error("Chrome did not create the sign-in window.")
+    tabId = helper?.tabs?.[0]?.id ?? (await chrome.tabs.query({ windowId: helperWindowId }))[0]?.id
+    if (tabId === undefined) throw new Error("Chrome did not create the login tab.")
     const job: ActiveJob = {
       id: crypto.randomUUID(),
       tabId,
       storeId: store.id,
       storeName: store.name,
-      stage: "logout",
+      stage: sameCredential ? "store" : "logout",
       startedAt: Date.now(),
-      ownsTab,
+      ownsTab: true,
+      helperWindowId,
+      returnWindowId: original.id,
+      ...(sender.tab?.id === undefined ? {} : { sourceTabId: sender.tab.id }),
+      incognito,
+      signIn: !sameCredential,
     }
     await setActiveJob(job)
-    await chrome.tabs.update(tabId, { url: LOGOUT_URL })
-    void activateLoadedTab(tabId)
-    jobLog(job).info("account.switch.start", { store: store.name, path: "sign-in", tab: ownsTab ? "new" : "reused" })
+    await chrome.storage.session.remove(SWITCH_NOTICE_KEY)
+    if (!sameCredential) await setCurrentStoreId(undefined)
+    assertSwitchOperationCurrent()
+    await chrome.tabs.update(tabId, { url: sameCredential ? store.storeUrl : LOGOUT_URL })
+    jobLog(job).info("account.switch.start", { store: store.name, path: sameCredential ? "same-credential" : "sign-in", tab: "helper-window" })
     return { ok: true, jobId: job.id }
   } catch (error) {
-    if (ownsTab && tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
-    await setActiveJob(undefined)
+    if (tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
+    else if (helperWindowId !== undefined) try { await chrome.windows.remove(helperWindowId) } catch { /* best effort */ }
+    // Lock/Cancel owns cleanup once it invalidates this operation.
+    if (operationGeneration === vaultGeneration && operationSwitchGeneration === switchGeneration) await setActiveJob(undefined)
     throw error
   }
 }
@@ -1195,7 +1331,15 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
         stores,
         currentStore: currentStoreFromIndex(stores, currentStoreId),
         activeSwitch: job
-          ? { storeId: job.storeId, storeName: activeStore?.name ?? "Selected store", stage: job.stage, startedAt: job.startedAt }
+          ? {
+            storeId: job.storeId,
+            storeName: activeStore?.name ?? "Selected store",
+            stage: job.stage,
+            startedAt: job.startedAt,
+            signIn: Boolean(job.signIn),
+            ...(job.resumeStage ? { resumeStage: job.resumeStage } : {}),
+            ...(job.attentionMessage ? { attentionMessage: job.attentionMessage } : {}),
+          }
           : undefined,
       }
     }
@@ -1233,10 +1377,13 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
       done({ ok: true })
       return { ok: true }
     }
-    case "ACCOUNTS_LOCK":
+    case "ACCOUNTS_LOCK": {
+      const job = await getActiveJob()
       await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY, UNLOCK_RESUME_KEY])
+      await closeOwnedSwitchTab(job)
       log.info("vault.lock")
       return { ok: true }
+    }
     case "ACCOUNTS_GET_VAULT": {
       const { vault } = await getUnlockedVault()
       return { ok: true, vault }
@@ -1297,11 +1444,14 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
       log.info("vault.changePassword")
       return { ok: true }
     }
-    case "ACCOUNTS_RESET":
+    case "ACCOUNTS_RESET": {
+      const job = await getActiveJob()
       await chrome.storage.local.remove([VAULT_STORAGE_KEY, STORE_INDEX_KEY, CURRENT_STORE_KEY])
-      await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY, UNLOCK_RESUME_KEY, UNLOCK_ATTEMPTS_KEY])
+      await chrome.storage.session.remove([SESSION_KEY_STORAGE_KEY, ACTIVE_JOB_STORAGE_KEY, UNLOCK_RESUME_KEY, UNLOCK_ATTEMPTS_KEY, SWITCH_NOTICE_KEY])
+      await closeOwnedSwitchTab(job)
       log.warn("vault.reset")
       return { ok: true }
+    }
     case "ACCOUNTS_OPEN_OPTIONS":
       await chrome.runtime.openOptionsPage()
       return { ok: true }
@@ -1315,43 +1465,47 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
         if (!store) throw new Error("The selected store was not found.")
         const currentStoreId = await getCurrentStoreId()
         const currentStore = currentStoreId ? vault.stores.find(({ id }) => id === currentStoreId) : undefined
-        if (currentStore && currentStore.credentialId === store.credentialId) {
-          await openStoreUrl(store.storeUrl, sender.tab)
-          await setCurrentStoreId(store.id)
-          log.info("account.switch.start", { store: store.name, path: "same-credential" })
-          return { ok: true }
-        }
-        return startSignInSwitch(store, sender)
+        return startSignInSwitch(store, sender, currentStore?.credentialId === store.credentialId)
       })
     }
     case "ACCOUNTS_FOCUS_CURRENT_STORE": {
       if (!(await getCurrentStoreId())) throw new Error("No store is currently selected.")
       return focusOrOpenSellerCentralTab(sender.tab)
     }
+    case "ACCOUNTS_SWITCH_NOTICE": {
+      const notice = await getSwitchNotice()
+      if (!notice || notice.tabId !== sender.tab?.id || sender.frameId !== 0) return { ok: true }
+      return { ok: true, storeName: notice.storeName }
+    }
+    case "ACCOUNTS_SWITCH_NOTICE_DISMISS": {
+      const notice = await getSwitchNotice()
+      if (notice && notice.tabId === sender.tab?.id) await chrome.storage.session.remove(SWITCH_NOTICE_KEY)
+      return { ok: true }
+    }
     case "ACCOUNTS_FOCUS_SWITCH": {
       const job = await getActiveJob()
       if (!job || job.tabId < 0) throw new Error("No account switch is running.")
-      const tab = await chrome.tabs.update(job.tabId, { active: true })
-      if (tab?.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+      await showSwitchTab(job)
       return { ok: true }
     }
     case "ACCOUNTS_CANCEL_SWITCH": {
       const job = await getActiveJob()
       if (!job) return { ok: true }
       await setActiveJob(undefined)
-      if (job.ownsTab && job.tabId >= 0) try { await chrome.tabs.remove(job.tabId) } catch { /* tab already closed */ }
+      await closeOwnedSwitchTab(job)
       jobLog(job).info("account.switch.cancelled", jobContext(job))
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_GET_JOB": {
       const job = await getActiveJob()
       if (!job || sender.tab?.id !== job.tabId || sender.frameId !== 0 || !sender.documentId || !sender.url || new URL(sender.url).origin !== "https://sellercentral.amazon.com") return { ok: true, job: null }
-      return { ok: true, job: { id: job.id, stage: job.stage } }
+      return { ok: true, job: { id: job.id, stage: job.stage, ...(job.resumeStage ? { resumeStage: job.resumeStage } : {}) } }
     }
     case "ACCOUNT_AUTOMATION_SECRET": {
       const job = await assertWorkflowSender(sender, message.jobId)
       if (!sender.url || !new URL(sender.url).pathname.startsWith("/ap/")) throw new Error("Credentials are only available on an Amazon sign-in page.")
-      if (job.stage === "logout" || job.stage === "authenticated" || new URL(sender.url).searchParams.get("openid.return_to")?.includes("/sign-out")) {
+      const stage = job.resumeStage ?? job.stage
+      if (stage === "logout" || stage === "store" || stage === "authenticated" || new URL(sender.url).searchParams.get("openid.return_to")?.includes("/sign-out")) {
         throw new Error("Credentials are not available during this login step.")
       }
       const { credential } = await getJobRecords(job)
@@ -1387,8 +1541,10 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
       const expectedStage = { continue: "email", "password-submit": "password", "otp-submit": "otp" }[message.action]
       if (job.stage !== expectedStage) throw new Error("This click does not match the current login step.")
       await withJobDebugger(job, async (target) => {
-        const send = (type: string, extra: Record<string, unknown> = {}) =>
-          chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type, x, y, ...extra })
+        const send = (type: string, extra: Record<string, unknown> = {}) => {
+          assertSwitchOperationCurrent()
+          return chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { type, x, y, ...extra })
+        }
         await send("mouseMoved")
         await send("mousePressed", { button: "left", clickCount: 1 })
         await send("mouseReleased", { button: "left", clickCount: 1 })
@@ -1398,31 +1554,42 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
     }
     case "ACCOUNT_AUTOMATION_PAUSED": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      await setJobStage(job, "paused")
-      jobLog(job).warn("account.switch.paused", { ...jobContext(job), reason: "captcha" })
+      const reason = typeof message.reason === "string" ? message.reason : "captcha"
+      await pauseSwitch(job, reason)
+      jobLog(job).warn("account.switch.paused", { ...jobContext(job), reason })
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_LEAVE_LOGOUT": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      if (job.stage !== "logout") return { ok: true }
+      if ((job.resumeStage ?? job.stage) !== "logout") return { ok: true }
       await advanceLogoutToSignIn(job)
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_COMPLETE": {
       const job = await assertWorkflowSender(sender, message.jobId)
+      if ((job.resumeStage ?? job.stage) === "store") return { ok: true }
       const { store } = await getJobRecords(job)
-      await setJobStage(job, "authenticated")
-      await chrome.tabs.update(job.tabId, { active: true, url: store.storeUrl })
-      await setCurrentStoreId(store.id)
-      await setActiveJob(undefined)
-      void restorePageFocus(job.tabId)
-      void closeDuplicateSellerCentralTabs(job.tabId)
-      jobLog(job).info("account.switch.complete", { store: store.name, ms: Date.now() - job.startedAt })
+      job.storeNavigationDocumentId = sender.documentId
+      await setJobStage(job, "store")
+      await chrome.tabs.update(job.tabId, { url: store.storeUrl })
+      return { ok: true }
+    }
+    case "ACCOUNT_AUTOMATION_STORE_READY": {
+      const job = await assertWorkflowSender(sender, message.jobId)
+      return finishAccountSwitch(job, sender)
+    }
+    case "ACCOUNT_AUTOMATION_REAUTH": {
+      const job = await assertWorkflowSender(sender, message.jobId)
+      if ((job.resumeStage ?? job.stage) !== "store" || !new URL(sender.url!).pathname.startsWith("/ap/")) throw new Error("Unexpected sign-in step.")
+      await setCurrentStoreId(undefined)
+      job.signIn = true
+      await setJobStage(job, "signin")
+      await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_ERROR": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      await setActiveJob(undefined)
+      await pauseSwitch(job, "error")
       const error = typeof message.error === "string" ? message.error : "Unknown error."
       jobLog(job).error("account.switch.failed", { ...jobContext(job), error })
       return { ok: true }
@@ -1474,10 +1641,11 @@ export async function handleAccountTabUpdated(
 ): Promise<void> {
   if (changeInfo.status !== "complete") return
   const generation = vaultGeneration
+  const switchVersion = switchGeneration
   try {
     await queueVaultOperation(() => handleAccountTabUpdatedNow(tabId, changeInfo, tab))
   } catch (error) {
-    if (generation === vaultGeneration) throw error
+    if (generation === vaultGeneration && switchVersion === switchGeneration) throw error
   }
 }
 
@@ -1579,6 +1747,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       const stored = await chrome.storage.session.get(UNLOCK_RESUME_KEY)
       const pending = stored[UNLOCK_RESUME_KEY] as UnlockResume | undefined
       if (pending && (pending.sourceTabId === tabId || pending.accountsTabId === tabId)) await chrome.storage.session.remove(UNLOCK_RESUME_KEY)
+      if ((await getSwitchNotice())?.tabId === tabId) await chrome.storage.session.remove(SWITCH_NOTICE_KEY)
       const job = await getActiveJob()
       if (job?.tabId !== tabId) return
       jobLog(job).warn("account.switch.tabClosed", jobContext(job))

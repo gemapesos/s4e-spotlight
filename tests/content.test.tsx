@@ -519,6 +519,67 @@ describe("content-script mount", () => {
     }
   })
 
+  it("keeps a store switch's progress on the page after the palette closes", async () => {
+    const activeSwitch = { storeId: "jmg", storeName: "JMG Outdoors", stage: "email", startedAt: 1, signIn: true }
+    const sendMessage = vi.fn(async (message: { type?: string }) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: true, stores: [{ id: "jmg", name: "JMG Outdoors" }], activeSwitch }
+      return { ok: true, settings: {} }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+    mounted?.setOpen(true)
+    await vi.waitFor(() => expect(mounted?.shadowRoot.querySelector("[role=dialog]")).not.toBeNull())
+    expect(mounted?.shadowRoot.querySelector("[aria-label='Store switch']")).toBeNull()
+
+    mounted?.setOpen(false)
+
+    await vi.waitFor(() => expect(mounted?.shadowRoot.querySelector("[aria-label='Store switch']")).toHaveTextContent("Switching to JMG Outdoors"))
+    expect(mounted?.shadowRoot.querySelector("[aria-label='Store switch']")).toHaveTextContent("Entering the account email…")
+    expect(mounted?.host.style.pointerEvents).toBe("none")
+    // Outside .palette-scope, like the dialog, so it takes the host's font and dark theme.
+    const card = mounted?.shadowRoot.querySelector("[data-slot='switch-status']")
+    expect(card?.parentNode).toBe(mounted?.shadowRoot)
+    expect(card?.closest(".palette-scope")).toBeNull()
+  })
+
+  it("drops the corner card while the palette is open, and only brings it back for a switch still running", async () => {
+    let activeSwitch: Record<string, unknown> | undefined = { storeId: "jmg", storeName: "JMG Outdoors", stage: "email", startedAt: 1, signIn: true }
+    const sendMessage = vi.fn(async (message: { type?: string }) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: true, stores: [{ id: "jmg", name: "JMG Outdoors" }], activeSwitch }
+      return { ok: true, settings: {} }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+    const card = () => mounted?.shadowRoot.querySelector("[aria-label='Store switch']")
+    mounted?.setOpen(true)
+    await vi.waitFor(() => expect(mounted?.shadowRoot.querySelector("[role=dialog]")).not.toBeNull())
+    mounted?.setOpen(false)
+    await vi.waitFor(() => expect(card()).not.toBeNull())
+
+    mounted?.setOpen(true)
+    await vi.waitFor(() => expect(card()).toBeNull())
+    document.dispatchEvent(new Event("visibilitychange"))
+    activeSwitch = undefined
+    mounted?.setOpen(false)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(card()).toBeNull()
+  })
+
+  it("opens the palette on a finished store switch, and clears the notice once closed", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: true, settings: {} }))
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    mounted = mountCommandPalette({ document, shadowMode: "open" })
+
+    mounted?.showSwitchDone("JMG Outdoors")
+
+    await vi.waitFor(() => expect(mounted?.shadowRoot.querySelector("[role=dialog]")).toHaveTextContent("Switched to JMG Outdoors"))
+    expect(mounted?.host).toHaveAttribute("data-s4e-palette-open", "true")
+    expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" })
+
+    mounted?.setOpen(false)
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" })
+  })
+
   it("isolates the UI in a shadow root and ignores a duplicate mount", () => {
     mounted = mountCommandPalette({ document, shadowMode: "open" })
 

@@ -59,6 +59,7 @@ import { extractRemovalOrderIds, findRemovalOrderIds } from "@/lib/removalOrderI
 import { extractShipmentIds, findShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds, findSkuIds } from "@/lib/skuIds"
 import { ReportProgressPanel } from "@/ReportProgressPanel"
+import { SWITCH_STAGE_LABELS, SwitchScreen } from "@/SwitchProgress"
 
 export type PaletteMode =
   | "commands"
@@ -72,6 +73,9 @@ export type PaletteMode =
   | "report-login"
   | "report-options"
   | "generating-reports"
+  | "switching"
+  /** Opened by the extension on the tab a switch reloaded. */
+  | "switch-done"
 /** Removal orders have no screen of their own; they're only opened from the Detected row. */
 type IdentifierMode = "case-ids" | "scrape-case" | "shipment-ids" | "sku-ids" | "removal-order-ids"
 type IdentifierAction = "open" | "scrape"
@@ -96,6 +100,8 @@ const SCREEN_DEPTH: Record<PaletteMode, number> = {
   "confirm-ids": 2,
   unlock: 2,
   "generating-reports": 2,
+  switching: 2,
+  "switch-done": 2,
 }
 /** Detected IDs shown as chips under the input; the rest are counted. */
 const MAX_ID_CHIPS = 12
@@ -154,24 +160,23 @@ export interface CommandDefinition {
 }
 
 export interface AccountStoreSummary { id: string; name: string }
-export interface ActiveSwitchSummary { storeId: string; storeName: string; stage: string; startedAt: number }
+export interface ActiveSwitchSummary {
+  storeId: string
+  storeName: string
+  stage: string
+  startedAt: number
+  /** False when a same-credential switch only opens the store. */
+  signIn?: boolean
+  /** The step a paused switch is waiting on. */
+  resumeStage?: string
+  attentionMessage?: string
+}
 export interface AccountsStatus {
   initialized: boolean
   unlocked: boolean
   stores: AccountStoreSummary[]
   activeSwitch?: ActiveSwitchSummary
   currentStore?: AccountStoreSummary | null
-}
-
-/** What an account switch is doing, in the user's terms. */
-const SWITCH_STAGE_LABELS: Record<string, string> = {
-  logout: "Signing out of the current account…",
-  signin: "Opening Amazon sign-in…",
-  email: "Entering the account email…",
-  password: "Entering the password…",
-  otp: "Entering the verification code…",
-  paused: "Waiting for you to complete the CAPTCHA.",
-  authenticated: "Opening the store…",
 }
 
 const EMPTY_ACCOUNTS_STATUS: AccountsStatus = {
@@ -295,6 +300,8 @@ export interface CommandPaletteProps {
   onOpenTimeOut?: () => Promise<void> | void
   onOpenChange: (open: boolean) => void
   enabledFeatures?: EnabledFeatures
+  /** The store a finished switch reached, for the switch-done screen. */
+  switchedStoreName?: string
 }
 
 export function CommandPalette({
@@ -325,6 +332,7 @@ export function CommandPalette({
   onOpenTimeOut = async () => undefined,
   onOpenChange,
   enabledFeatures = DEFAULT_ENABLED_FEATURES,
+  switchedStoreName,
 }: CommandPaletteProps) {
   const [mode, setMode] = React.useState<PaletteMode>(
     open && initialMode && (protectedResults || !["report-options", "generating-reports"].includes(initialMode)) ? initialMode : "commands",
@@ -476,7 +484,7 @@ export function CommandPalette({
 
   React.useEffect(() => {
     if (open) {
-      if (initialMode === "report-login") setMode("report-login")
+      if (initialMode === "report-login" || initialMode === "switching" || initialMode === "switch-done") setMode(initialMode)
       return
     }
     reportRunRef.current += 1
@@ -513,6 +521,26 @@ export function CommandPalette({
       cancelled = true
     }
   }, [accountsEnabled, onGetAccountsStatus, open])
+
+  React.useEffect(() => {
+    // The switch screens follow the switch themselves.
+    if (!open || !accountsEnabled || !activeSwitch || mode === "switching" || mode === "switch-done") return
+    let cancelled = false
+    let timer: number
+    const refresh = async () => {
+      try {
+        const status = await onGetAccountsStatus()
+        if (cancelled) return
+        setActiveSwitch(status.activeSwitch)
+        setCurrentStore(status.currentStore ?? null)
+        setAccountsUnlocked(status.unlocked)
+        if (!status.activeSwitch) return
+      } catch { /* retry while the palette remains open */ }
+      if (!cancelled) timer = window.setTimeout(() => void refresh(), 1000)
+    }
+    timer = window.setTimeout(() => void refresh(), 1000)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [accountsEnabled, activeSwitch?.storeId, mode, onGetAccountsStatus, open])
 
   React.useEffect(() => {
     if (isIdentifierInputMode(mode)) identifierInputRef.current?.focus()
@@ -595,7 +623,9 @@ export function CommandPalette({
         return
       }
       await onStartAccountSwitch(store.id)
-      close()
+      // Seller Central can't be used until the switch finishes, so follow it here.
+      setMode("switching")
+      setSubmitting(false)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Couldn’t start the account switch.")
       setSubmitting(false)
@@ -750,6 +780,8 @@ export function CommandPalette({
 
   const handleEscapeKeyDown = React.useCallback((event: KeyboardEvent) => {
     event.preventDefault()
+    // A switch keeps running when hidden; stopping it midway would leave Seller Central signed out.
+    if (mode === "switching" || mode === "switch-done") return onOpenChange(false)
     // Escape stops a running report; the run counter drops its late results.
     if (mode === "generating-reports") {
       setSubmitting(false)
@@ -797,6 +829,8 @@ export function CommandPalette({
       title: "Generate reports",
       description: generatedReport ? "Download the report." : "Generating the Seller Central report.",
     },
+    switching: { title: "Switch store", description: "Follow the store switch while it signs in." },
+    "switch-done": { title: "Switch store", description: "The store switch finished." },
   }
   const { title, description } = isIdentifierInputMode(mode) ? inputMode : screens[mode]
 
@@ -1031,8 +1065,8 @@ export function CommandPalette({
             <div className="mx-1.5 mt-0.5 mb-1.5 flex items-center gap-2.5 rounded-[0.625rem] bg-muted py-2.5 pr-2.5 pl-3" role="status">
               <Spinner aria-hidden="true" className="text-foreground/70" role="presentation" />
               <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate font-medium">Switching to {activeSwitch.storeName}</span>
-                <span className="truncate text-xs leading-4 text-muted-foreground">{SWITCH_STAGE_LABELS[activeSwitch.stage] ?? activeSwitch.stage}</span>
+                <span className="truncate font-medium">{activeSwitch.stage === "paused" ? "Needs attention" : `Switching to ${activeSwitch.storeName}`}</span>
+                <span className="truncate text-xs leading-4 text-muted-foreground">{activeSwitch.attentionMessage ?? SWITCH_STAGE_LABELS[activeSwitch.stage] ?? activeSwitch.stage}</span>
               </div>
               <button
                 className="h-7 shrink-0 rounded-[0.375rem] bg-background px-2.5 text-xs leading-4 font-medium text-foreground ring-1 ring-foreground/10 transition-colors hover:bg-muted disabled:opacity-50"
@@ -1219,7 +1253,16 @@ export function CommandPalette({
           </>}>
             <CommandHint keys={["esc"]}>{submitting ? "Stop and go back" : "Back"}</CommandHint>
           </CommandFooter>
-        </> : mode === "report-login" ? <>
+        </> : mode === "switching" || mode === "switch-done" ? (
+          <SwitchScreen
+            doneStoreName={mode === "switch-done" ? switchedStoreName ?? currentStore?.name ?? "the selected store" : undefined}
+            onCancel={onCancelAccountSwitch}
+            onClose={close}
+            onEnded={() => void openAccounts()}
+            onGetAccountsStatus={onGetAccountsStatus}
+            onShowSignIn={onFocusAccountSwitch}
+          />
+        ) : mode === "report-login" ? <>
           <CommandHeader backDisabled={submitting} onBack={returnToCommands} parent="Commands" title="Generate reports" />
           {notice(
             Building2,

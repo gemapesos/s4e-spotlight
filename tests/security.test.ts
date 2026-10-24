@@ -32,6 +32,9 @@ describe("security boundaries", () => {
   const sendMessage = vi.fn()
   const update = vi.fn()
   const attach = vi.fn()
+  const tabUpdatedListeners = new Set<(tabId: number, changeInfo: { status?: string }, tab: chrome.tabs.Tab) => void>()
+  // Extension pages a test tab was sent to, so it reads back as loaded there.
+  const extensionTabUrls = new Map<number, string>()
 
   beforeEach(async () => {
     vi.stubGlobal("crypto", webcrypto)
@@ -42,9 +45,14 @@ describe("security boundaries", () => {
     local[STORE_INDEX_KEY] = [{ id: "store", name: "Fixture" }]
     session[SESSION_KEY_STORAGE_KEY] = serializeKey(encrypted.keyBytes)
     create.mockReset().mockResolvedValue({ id: 200, windowId: 1 })
-    get.mockReset().mockImplementation(async (id: number) => ({ id, windowId: 1, status: "complete", url: id === 91 ? SIGN_IN_URL : "https://untrusted.example/" }))
+    tabUpdatedListeners.clear()
+    extensionTabUrls.clear()
+    get.mockReset().mockImplementation(async (id: number) => ({ id, windowId: 1, status: "complete", url: extensionTabUrls.get(id) ?? (id === 91 ? SIGN_IN_URL : "https://untrusted.example/") }))
     query.mockReset().mockResolvedValue([{ id: 91, windowId: 1 }])
-    update.mockReset().mockResolvedValue({ id: 91, windowId: 1 })
+    update.mockReset().mockImplementation(async (id: number, changes: { url?: string }) => {
+      if (changes.url?.startsWith(origin)) extensionTabUrls.set(id, changes.url)
+      return { id: 91, windowId: 1 }
+    })
     sendMessage.mockReset().mockImplementation(async (_id: number, message: { type: string }) => {
       if (message.type === "REPORTS_SESSION_STATUS") return { ok: true, loggedInToStore: true, settled: true }
       if (message.type === "REPORTS_FETCH_STRANDED") return { ok: true, listings: [{ sku: "fixture-sku" }] }
@@ -54,8 +62,15 @@ describe("security boundaries", () => {
     vi.stubGlobal("chrome", {
       runtime: { id: "security-fixture", getURL: (path: string) => `${origin}${path}`, openOptionsPage: vi.fn() },
       storage: { local: area(local), session: area(session) },
-      tabs: { create, get, query, sendMessage, update, remove: vi.fn() },
-      windows: { update: vi.fn() },
+      tabs: {
+        create, get, query, sendMessage, update, remove: vi.fn(),
+        onUpdated: { addListener: vi.fn((listener) => tabUpdatedListeners.add(listener)), removeListener: vi.fn((listener) => tabUpdatedListeners.delete(listener)) },
+      },
+      windows: {
+        update: vi.fn(), create: vi.fn(async () => ({ id: 40, tabs: [{ id: 91, windowId: 40 }] })),
+        get: vi.fn(async (id: number) => ({ id, type: "normal", incognito: false })),
+        getLastFocused: vi.fn(async () => ({ id: 1, type: "normal", incognito: false })),
+      },
       debugger: { attach, sendCommand: vi.fn(), detach: vi.fn() },
     })
   })
@@ -177,8 +192,24 @@ describe("security boundaries", () => {
     await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 999 } as chrome.tabs.Tab })).rejects.toThrow(/expired/)
     await handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 200 } as chrome.tabs.Tab })
     expect(sendMessage).toHaveBeenCalledWith(7, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: "source-document" })
-    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "store" })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "store", sourceTabId: 7 })
+    // The page the store was chosen on follows the switch, as if the vault had been unlocked.
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(7, { type: "OPEN_PALETTE", mode: "switching" }, { documentId: "source-document" }))
     await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 200 } as chrome.tabs.Tab })).rejects.toThrow(/expired/)
+  })
+
+  it("opens Accounts in the background and activates it only once it has loaded", async () => {
+    // A foreground about:blank tab leaves focus in the omnibox instead of the master password field.
+    get.mockImplementation(async (id: number) => ({ id, windowId: 1, status: "loading", url: extensionTabUrls.get(id) }))
+    const requesting = handleAccountsMessage({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId: "store" }, contentSender)
+    await vi.waitFor(() => expect(tabUpdatedListeners.size).toBe(1))
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ active: false, url: "about:blank" }))
+    expect(update).not.toHaveBeenCalledWith(200, { active: true })
+    const accountsUrl = extensionTabUrls.get(200)!
+    for (const listener of [...tabUpdatedListeners]) listener(200, { status: "complete" }, { id: 200, url: accountsUrl } as chrome.tabs.Tab)
+    await requesting
+    expect(update.mock.calls.map(([, changes]) => changes)).toEqual([{ url: accountsUrl }, { active: true }])
+    expect(tabUpdatedListeners.size).toBe(0)
   })
 
   it.each([

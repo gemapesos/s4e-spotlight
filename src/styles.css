@@ -207,7 +207,8 @@
 
 [data-slot="dialog-portal"],
 [data-slot="dialog-overlay"],
-[data-slot="dialog-content"] {
+[data-slot="dialog-content"],
+[data-slot="switch-status"] {
   color: var(--foreground);
   font-family: var(--font-sans);
   font-synthesis: none;
