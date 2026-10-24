@@ -23,7 +23,7 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "debugger"],
+  "permissions": ["storage", "debugger", "cookies"],
   "host_permissions": ["https://sellercentral.amazon.com/*"],
   "options_page": "options.html",
   "web_accessible_resources": [

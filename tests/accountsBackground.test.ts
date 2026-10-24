@@ -1,19 +1,24 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage as rawHandleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, validateVault } from "../src/background"
+import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage as rawHandleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, signInUrlFor, validateVault } from "../src/background"
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, decryptSharedVault, generateTotp, decryptVault, encryptSharedVault, SHARE_FILE_KIND, STORE_INDEX_KEY, VAULT_STORAGE_KEY, type AccountVault } from "../src/lib/accounts"
 
 
+// Sign-in returns straight to the store the fixtures switch to.
+const STORE_SIGN_IN_URL = signInUrlFor("https://sellercentral.amazon.com/home?store=test")
 const accountsSender: chrome.runtime.MessageSender = { id: "test-extension", url: "chrome-extension://test-extension/options.html", frameId: 0, documentId: "accounts-document" }
 // Happy-path fixtures use real context metadata. Authorization regression tests call the raw handler.
 function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender) {
   const automation = String(message.type).startsWith("ACCOUNT_AUTOMATION_")
-  return rawHandleAccountsMessage(message, {
+  const result = rawHandleAccountsMessage(message, {
     ...accountsSender,
     ...(automation ? { url: "https://sellercentral.amazon.com/ap/signin", documentId: "login-document" } : {}),
     ...sender,
   })
+  // A started switch signs out in a follow-up vault operation; a read queued behind it waits for it.
+  const settled = () => rawHandleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, accountsSender).catch(() => undefined)
+  return message.type === "ACCOUNTS_START_SWITCH" ? result.finally(settled) : result
 }
 
 function storageArea(values: Record<string, unknown>) {
@@ -84,6 +89,8 @@ describe("Accounts background workflow", () => {
   async function completeSwitch(job: { id: string }) {
     const pending = session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }
     if (pending.stage !== "store") {
+      // Sign-in lands the helper on Seller Central home.
+      tabUrls.set(91, "https://sellercentral.amazon.com/home")
       await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
     }
     // The store loads in the user's tab when one is open, else in the helper's.
@@ -278,7 +285,9 @@ describe("Accounts background workflow", () => {
       throw new Error("navigation failed")
     })
 
-    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})).rejects.toThrow("navigation failed")
+    // Signing out follows the start, so a failed navigation ends the switch afterward.
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})).resolves.toMatchObject({ ok: true })
+    expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(remove).toHaveBeenCalledWith(91)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
   })
@@ -296,7 +305,7 @@ describe("Accounts background workflow", () => {
 
     await handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: "https://sellercentral.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fsellercentral.amazon.com%2Fsign-out" } as chrome.tabs.Tab)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin" })
-    expect(update).toHaveBeenCalledWith(91, { url: SIGN_IN_URL })
+    expect(update).toHaveBeenCalledWith(91, { url: STORE_SIGN_IN_URL })
   })
 
   it("leaves sign-out as soon as its redirect commits, without loading the logout re-auth page", async () => {
@@ -309,7 +318,7 @@ describe("Accounts background workflow", () => {
     expect(update).not.toHaveBeenCalled()
     await handleAccountTabUpdated(91, { status: "loading", url: reauth }, { id: 91, url: reauth } as chrome.tabs.Tab)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin" })
-    expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: SIGN_IN_URL })
+    expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: STORE_SIGN_IN_URL })
     // The interrupted re-auth page finishing later does not navigate again.
     await handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: reauth } as chrome.tabs.Tab)
     expect(update).toHaveBeenCalledTimes(1)
@@ -335,6 +344,95 @@ describe("Accounts background workflow", () => {
     }
   })
 
+  function stubCookies() {
+    const cookie = (name: string, domain: string, path = "/") => ({ name, domain, path, storeId: "0" }) as chrome.cookies.Cookie
+    const removeCookie = vi.fn(async (_details: chrome.cookies.CookieDetails) => undefined)
+    ;(chrome as unknown as { cookies: unknown }).cookies = {
+      getAllCookieStores: vi.fn(async () => [{ id: "0", tabIds: [91] }]),
+      getAll: vi.fn(async (details: chrome.cookies.GetAllDetails) => details.url
+        ? [cookie("at-main", ".amazon.com"), cookie("ubid-main", ".amazon.com"), cookie("session-token", ".amazon.com")]
+        : [cookie("sc-session", "sellercentral.amazon.com", "/ap"), cookie("session-token", ".amazon.com")]),
+      remove: removeCookie,
+    }
+    const fetchSignOut = vi.fn(async () => ({ type: "opaqueredirect", status: 0 }) as Response)
+    vi.stubGlobal("fetch", fetchSignOut)
+    return { removeCookie, fetchSignOut }
+  }
+
+  it("signs out by ending the session and dropping its cookies, then signs in back to the store, without sign-out pages", async () => {
+    const { removeCookie, fetchSignOut } = stubCookies()
+    await createActiveJob()
+
+    expect(fetchSignOut).toHaveBeenCalledWith(LOGOUT_URL, expect.objectContaining({ credentials: "include", redirect: "manual" }))
+    expect(removeCookie.mock.calls.map(([details]) => details)).toEqual([
+      { url: "https://sellercentral.amazon.com/", name: "at-main", storeId: "0" },
+      { url: "https://sellercentral.amazon.com/", name: "session-token", storeId: "0" },
+      { url: "https://sellercentral.amazon.com/ap", name: "sc-session", storeId: "0" },
+    ])
+    expect(update).not.toHaveBeenCalledWith(91, { url: LOGOUT_URL })
+    expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: STORE_SIGN_IN_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin", cookieSignOut: true })
+  })
+
+  it("uses Amazon's sign-out page when sign-in shows the old session survived the dropped cookies", async () => {
+    stubCookies()
+    const job = await createActiveJob()
+    update.mockClear()
+    const home = "https://sellercentral.amazon.com/home"
+
+    await handleAccountTabUpdated(91, { status: "loading", url: home }, { id: 91, url: home } as chrome.tabs.Tab)
+    expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: LOGOUT_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "logout", cookieSignOut: false })
+    // The page that showed the old session cannot cut the sign-out short.
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: home })
+    expect(update).toHaveBeenCalledTimes(1)
+    await handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: LOGOUT_URL } as chrome.tabs.Tab)
+    expect(update).toHaveBeenLastCalledWith(91, { url: STORE_SIGN_IN_URL })
+  })
+
+  it("hands the store to the user's tab as soon as the sign-in redirect commits", async () => {
+    const job = await createActiveJob()
+    query.mockResolvedValue([{ id: 22, windowId: 4 } as chrome.tabs.Tab])
+    const storeUrl = "https://sellercentral.amazon.com/home?store=test"
+    ;(session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }).stage = "otp"
+    update.mockClear()
+
+    // Still signing in: Amazon's own pages are not a landing.
+    await handleAccountTabUpdated(91, { status: "loading", url: "https://sellercentral.amazon.com/ap/mfa" }, { id: 91 } as chrome.tabs.Tab)
+    expect(update).not.toHaveBeenCalled()
+    await handleAccountTabUpdated(91, { status: "loading", url: storeUrl }, { id: 91, url: storeUrl } as chrome.tabs.Tab)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "store", tabId: 22 })
+    expect(update).toHaveBeenCalledExactlyOnceWith(22, { url: storeUrl })
+    expect(remove).toHaveBeenCalledExactlyOnceWith(91)
+  })
+
+  it("stays in the user's tab when signing in again there lands on the store", async () => {
+    const job = await createActiveJob()
+    query.mockResolvedValue([{ id: 22, windowId: 4 } as chrome.tabs.Tab, { id: 33, windowId: 4 } as chrome.tabs.Tab])
+    const storeUrl = "https://sellercentral.amazon.com/home?store=test"
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home" })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ tabId: 22, ownsTab: false })
+    ;(session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }).stage = "otp"
+    update.mockClear(); remove.mockClear()
+
+    await handleAccountTabUpdated(22, { status: "loading", url: storeUrl }, { id: 22, url: storeUrl } as chrome.tabs.Tab)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "store", tabId: 22 })
+    expect(update).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+  })
+
+  it("keeps the helper on the store it landed on when no Seller Central tab is open", async () => {
+    const job = await createActiveJob()
+    const landed = "https://sellercentral.amazon.com/home?store=test&ref_=signin"
+    ;(session[ACTIVE_JOB_STORAGE_KEY] as { stage: string }).stage = "password"
+    update.mockClear()
+
+    await handleAccountTabUpdated(91, { status: "loading", url: landed }, { id: 91, url: landed } as chrome.tabs.Tab)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "store", tabId: 91 })
+    expect(update).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+  })
+
   it("routes a completed logout page to the canonical sign-in URL", async () => {
     await createActiveJob()
     update.mockClear()
@@ -342,7 +440,7 @@ describe("Accounts background workflow", () => {
     await handleAccountTabUpdated(91, { status: "complete" }, { id: 91, url: LOGOUT_URL } as chrome.tabs.Tab)
 
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin" })
-    expect(update).toHaveBeenCalledWith(91, { url: SIGN_IN_URL })
+    expect(update).toHaveBeenCalledWith(91, { url: STORE_SIGN_IN_URL })
   })
 
   it("does not treat Seller Central home as a logout intercept", async () => {
@@ -363,7 +461,7 @@ describe("Accounts background workflow", () => {
 
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)).resolves.toEqual({ ok: true })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin" })
-    expect(update).toHaveBeenCalledWith(91, { url: SIGN_IN_URL })
+    expect(update).toHaveBeenCalledWith(91, { url: STORE_SIGN_IN_URL })
   })
 
   it("navigates to sign-in once when the tab listener and content script leave logout together", async () => {
