@@ -354,9 +354,10 @@ describe("Accounts background workflow", () => {
     let jar = [
       cookie("at-main", ".amazon.com"), cookie("ubid-main", ".amazon.com"), cookie("x-amz-captcha-1", "sellercentral.amazon.com"),
       cookie("__Host-mselc", "sellercentral.amazon.com"), cookie("signin-sso-state-us", ".amazon.com", "/ap/"),
+      cookie("x-www", "www.amazon.com"), cookie("other-site", ".example.test"),
     ]
     debuggerSendCommand.mockImplementation(async (_target, method, params) => {
-      if (method === "Network.getCookies") return { cookies: jar }
+      if (method === "Network.getAllCookies") return { cookies: jar }
       if (method === "Network.deleteCookies") {
         const { name, domain, path } = params as { name: string; domain: string; path: string }
         if (name !== survivor) jar = jar.filter((entry) => !(entry.name === name && entry.domain === domain && entry.path === path))
@@ -371,8 +372,9 @@ describe("Accounts background workflow", () => {
     await createActiveJob()
 
     expect(fetch).not.toHaveBeenCalled()
-    // Amazon-wide session cookies are invisible to chrome.cookies, so the debugger deletes them.
-    expect(deletedNames()).toEqual(["at-main", "__Host-mselc", "signin-sso-state-us"])
+    // Amazon session cookies on any host are invisible to chrome.cookies, so the debugger deletes them;
+    // other sites' cookies and browser identity stay.
+    expect(deletedNames()).toEqual(["at-main", "__Host-mselc", "signin-sso-state-us", "x-www"])
     expect(debuggerDetach).toHaveBeenCalledWith({ tabId: 91 })
     expect(update).not.toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: STORE_SIGN_IN_URL })

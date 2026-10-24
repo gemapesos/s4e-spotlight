@@ -1766,20 +1766,23 @@ async function signOutWithoutPages(jobId) {
 async function clearSessionWithoutPages(job) {
 	const startedAt = Date.now();
 	try {
-		const { deleted, left } = await withTabDebugger(job.tabId, async (target) => {
-			const deleted = (await tabCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+		const { before, deleted, left } = await withTabDebugger(job.tabId, async (target) => {
+			const before = await amazonCookies(target);
+			const deleted = before.filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
 			await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", {
 				name,
 				domain,
 				path
 			})));
-			const left = (await tabCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+			const left = (await amazonCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
 			return {
+				before,
 				deleted,
 				left
 			};
 		});
 		assertSwitchOperationCurrent();
+		logJar(job, "signOut-before", describeJar(before));
 		jobLog(job).info("account.switch.signedOut", {
 			...jobContext(job),
 			deleted: deleted.length,
@@ -1790,6 +1793,10 @@ async function clearSessionWithoutPages(job) {
 		});
 		if (left.length > 0) return false;
 		job.cookieSignOut = true;
+		signInTrail = {
+			tabId: job.tabId,
+			hops: []
+		};
 		return true;
 	} catch (error) {
 		assertSwitchOperationCurrent();
@@ -1800,9 +1807,18 @@ async function clearSessionWithoutPages(job) {
 		return false;
 	}
 }
-async function tabCookies(target) {
-	const result = await chrome.debugger.sendCommand(target, "Network.getCookies", { urls: SELLER_CENTRAL_COOKIE_URLS });
-	return result?.cookies ?? [];
+/**
+* Every Amazon cookie in the tab's profile, on any host or path: Seller Central's sign-in can be
+* restored by cookies it does not itself send. Falls back to what Seller Central sends.
+*/
+async function amazonCookies(target) {
+	let all;
+	try {
+		all = (await chrome.debugger.sendCommand(target, "Network.getAllCookies"))?.cookies ?? [];
+	} catch {
+		all = (await chrome.debugger.sendCommand(target, "Network.getCookies", { urls: SELLER_CENTRAL_COOKIE_URLS }))?.cookies ?? [];
+	}
+	return all.filter((cookie) => /(?:^|\.)amazon\.com$/u.test(cookie.domain.replace(/^\./u, "")));
 }
 /** Reuses the switch's debugger session, or attaches just for `action`, so its debugging bar only flashes. */
 async function withTabDebugger(tabId, action) {
@@ -1817,13 +1833,47 @@ async function withTabDebugger(tabId, action) {
 		} catch {}
 	}
 }
-/** Diagnostics: cookies by name and scope only, never values: name|domain+path|h(ttpOnly)s(ecure)x(session)|sameSite. */
+/**
+* Diagnostics: cookies by name and scope only, never values: name|domain+path|h(ttpOnly)s(ecure)x(session)|sameSite,
+* plus the expiry of session cookies, which shows whether one was set again after sign-out.
+*/
 function describeJar(entries) {
-	return entries.map((entry) => `${entry.name}|${entry.domain}${entry.path}|${entry.httpOnly ? "h" : ""}${entry.secure ? "s" : ""}${entry.session ? "x" : ""}|${entry.sameSite ?? ""}`).sort();
+	return entries.map((entry) => `${entry.name}|${entry.domain}${entry.path}|${entry.httpOnly ? "h" : ""}${entry.secure ? "s" : ""}${entry.session ? "x" : ""}|${entry.sameSite ?? ""}` + (SESSION_COOKIES.includes(entry.name) && entry.expires && entry.expires > 0 ? `|exp=${Math.round(entry.expires)}` : "")).sort();
+}
+/** Log entries are size-capped, so long lists go out in parts. */
+function logJar(job, phase, jar) {
+	for (let start = 0; start < Math.max(jar.length, 1); start += 25) {
+		jobLog(job).info("account.switch.signOutJar", {
+			phase,
+			part: start / 25 + 1,
+			count: jar.length,
+			entries: jar.slice(start, start + 25)
+		});
+	}
+}
+/** Diagnostics: where the sign-in tab went after a cookie sign-out (host and path only), until sign-in is decided. */
+let signInTrail;
+function recordSignInHop(tabId, value) {
+	if (!value || signInTrail?.tabId !== tabId || signInTrail.hops.length >= 20) return;
+	try {
+		const url = new URL(value);
+		signInTrail.hops.push(`${url.host}${url.pathname}`);
+	} catch {}
 }
 /** Sign-in went straight back to Seller Central, so Amazon still knows the old session: sign out properly. */
 async function fallBackToSignOutPage(job, landedUrl) {
-	jobLog(job).warn("account.switch.cookieSignOutFallback", jobContext(job));
+	const hops = signInTrail?.tabId === job.tabId ? signInTrail.hops : [];
+	signInTrail = undefined;
+	jobLog(job).warn("account.switch.cookieSignOutFallback", {
+		...jobContext(job),
+		landed: new URL(landedUrl).pathname,
+		hops
+	});
+	try {
+		logJar(job, "fallback", describeJar(await withTabDebugger(job.tabId, amazonCookies)));
+	} catch (error) {
+		jobLog(job).warn("account.switch.signOutJarFailed", { error: describeError(error) });
+	}
 	job.cookieSignOut = false;
 	job.signOutFallbackFrom = landedUrl;
 	logoutExits.delete(job.id);
@@ -1837,6 +1887,7 @@ async function fallBackToSignOutPage(job, landedUrl) {
 */
 async function openStoreAfterSignIn(job, landedUrl, documentId) {
 	if ((job.resumeStage ?? job.stage) === "store") return;
+	signInTrail = undefined;
 	const { store } = await getJobRecords(job);
 	const helperTabId = job.tabId;
 	const handedOff = await moveJobToUserTab(job);
@@ -2030,6 +2081,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 		if (source.tabId === debuggerTabId) debuggerTabId = undefined;
 	});
 	chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+		recordSignInHop(tabId, changeInfo.url);
 		if (changeInfo.status === "loading" || changeInfo.url) void revokeResultsForTab(tabId);
 		void handleAccountTabUpdated(tabId, changeInfo, tab).catch(() => log.warn("account.switch.navigationFailed"));
 	});
