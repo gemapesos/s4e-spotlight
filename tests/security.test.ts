@@ -63,7 +63,7 @@ describe("security boundaries", () => {
       runtime: { id: "security-fixture", getURL: (path: string) => `${origin}${path}`, openOptionsPage: vi.fn() },
       storage: { local: area(local), session: area(session) },
       tabs: {
-        create, get, query, sendMessage, update, remove: vi.fn(),
+        create, get, query, sendMessage, update, remove: vi.fn(async () => undefined),
         onUpdated: { addListener: vi.fn((listener) => tabUpdatedListeners.add(listener)), removeListener: vi.fn((listener) => tabUpdatedListeners.delete(listener)) },
       },
       windows: {
@@ -195,6 +195,8 @@ describe("security boundaries", () => {
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "store", sourceTabId: 7 })
     // The page the store was chosen on follows the switch, as if the vault had been unlocked.
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(7, { type: "OPEN_PALETTE", mode: "switching" }, { documentId: "source-document" }))
+    // The Accounts tab opened just for the unlock does not linger once the switch is underway.
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(200)
     await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 200 } as chrome.tabs.Tab })).rejects.toThrow(/expired/)
   })
 
