@@ -48,7 +48,7 @@ describe("Accounts background workflow", () => {
   const tabIndexes = new Map<number, number>()
   const get = vi.fn(async (id: number) => ({ id, windowId: tabWindows.get(id) ?? 4, index: tabIndexes.get(id) ?? 0, status: "complete", url: tabUrls.get(id) ?? "https://sellercentral.amazon.com/home" }))
   const debuggerAttach = vi.fn(async () => undefined)
-  const debuggerSendCommand = vi.fn(async () => undefined)
+  const debuggerSendCommand = vi.fn(async (_target: unknown, _method: string, _params?: Record<string, unknown>): Promise<unknown> => undefined)
   const debuggerDetach = vi.fn(async () => undefined)
 
   beforeEach(() => {
@@ -67,8 +67,13 @@ describe("Accounts background workflow", () => {
     query.mockReset(); query.mockResolvedValue([]); focusWindow.mockReset(); focusWindow.mockResolvedValue({})
     debuggerAttach.mockReset(); debuggerSendCommand.mockReset(); debuggerDetach.mockReset()
     debuggerAttach.mockResolvedValue(undefined)
-    debuggerSendCommand.mockResolvedValue(undefined)
+    // Cookie commands fail by default, so switches use Amazon's sign-out page unless a test clears cookies.
+    debuggerSendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method.startsWith("Network.")) throw new Error("No cookie access in this fixture.")
+      return undefined
+    })
     debuggerDetach.mockResolvedValue(undefined)
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("No network in tests.") }))
     vi.stubGlobal("crypto", webcrypto)
     vi.stubGlobal("chrome", {
       storage: { local: storageArea(local), session: storageArea(session) },
@@ -344,34 +349,43 @@ describe("Accounts background workflow", () => {
     }
   })
 
-  function stubCookies() {
-    const cookie = (name: string, domain: string, path = "/") => ({ name, domain, path, storeId: "0" }) as chrome.cookies.Cookie
-    const removeCookie = vi.fn(async (_details: chrome.cookies.CookieDetails) => undefined)
-    ;(chrome as unknown as { cookies: unknown }).cookies = {
-      getAllCookieStores: vi.fn(async () => [{ id: "0", tabIds: [91] }]),
-      getAll: vi.fn(async (details: chrome.cookies.GetAllDetails) => details.url
-        ? [cookie("at-main", ".amazon.com"), cookie("ubid-main", ".amazon.com"), cookie("session-token", ".amazon.com")]
-        : [cookie("sc-session", "sellercentral.amazon.com", "/ap"), cookie("session-token", ".amazon.com")]),
-      remove: removeCookie,
-    }
-    const fetchSignOut = vi.fn(async () => ({ type: "opaqueredirect", status: 0 }) as Response)
+  function stubCookies({ survivor }: { survivor?: string } = {}) {
+    const cookie = (name: string, domain: string, path = "/") => ({ name, domain, path })
+    let jar = [
+      cookie("at-main", ".amazon.com"), cookie("ubid-main", ".amazon.com"), cookie("x-amz-captcha-1", "sellercentral.amazon.com"),
+      cookie("__Host-mselc", "sellercentral.amazon.com"), cookie("signin-sso-state-us", ".amazon.com", "/ap/"),
+    ]
+    debuggerSendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === "Network.getCookies") return { cookies: jar }
+      if (method === "Network.deleteCookies") {
+        const { name, domain, path } = params as { name: string; domain: string; path: string }
+        if (name !== survivor) jar = jar.filter((entry) => !(entry.name === name && entry.domain === domain && entry.path === path))
+      }
+      return undefined
+    })
+    const fetchSignOut = vi.fn(async () => ({ status: 200, url: "https://sellercentral.amazon.com/ap/signin?x=1" }) as Response)
     vi.stubGlobal("fetch", fetchSignOut)
-    return { removeCookie, fetchSignOut }
+    return { fetchSignOut, deletedNames: () => debuggerSendCommand.mock.calls.filter(([, method]) => method === "Network.deleteCookies").map(([, , params]) => (params as { name: string }).name) }
   }
 
-  it("signs out by ending the session and dropping its cookies, then signs in back to the store, without sign-out pages", async () => {
-    const { removeCookie, fetchSignOut } = stubCookies()
+  it("signs out by ending the session and deleting its cookies through the debugger, then signs in back to the store", async () => {
+    const { fetchSignOut, deletedNames } = stubCookies()
     await createActiveJob()
 
-    expect(fetchSignOut).toHaveBeenCalledWith(LOGOUT_URL, expect.objectContaining({ credentials: "include", redirect: "manual" }))
-    expect(removeCookie.mock.calls.map(([details]) => details)).toEqual([
-      { url: "https://sellercentral.amazon.com/", name: "at-main", storeId: "0" },
-      { url: "https://sellercentral.amazon.com/", name: "session-token", storeId: "0" },
-      { url: "https://sellercentral.amazon.com/ap", name: "sc-session", storeId: "0" },
-    ])
+    expect(fetchSignOut).toHaveBeenCalledWith(LOGOUT_URL, expect.objectContaining({ credentials: "include" }))
+    // Amazon-wide session cookies are invisible to chrome.cookies, so the debugger deletes them.
+    expect(deletedNames()).toEqual(["at-main", "__Host-mselc", "signin-sso-state-us"])
+    expect(debuggerDetach).toHaveBeenCalledWith({ tabId: 91 })
     expect(update).not.toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: STORE_SIGN_IN_URL })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "signin", cookieSignOut: true })
+  })
+
+  it("uses Amazon's sign-out page when a session cookie survives deletion", async () => {
+    stubCookies({ survivor: "at-main" })
+    await createActiveJob()
+    expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: LOGOUT_URL })
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ stage: "logout" })
   })
 
   it("uses Amazon's sign-out page when sign-in shows the old session survived the dropped cookies", async () => {
@@ -654,6 +668,8 @@ describe("Accounts background workflow", () => {
 
   it("dispatches trusted mouse clicks in order on one debugger session, detaching on failure and after sign-in", async () => {
     const job = await createActiveJob()
+    // Signing out used its own short debugger session; count only the sign-in clicks.
+    debuggerAttach.mockClear(); debuggerSendCommand.mockClear(); debuggerDetach.mockClear()
     const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" }
     await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, sender)
     await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: job.id, kind: "email" }, sender)
@@ -687,6 +703,7 @@ describe("Accounts background workflow", () => {
 
   it("no longer handles passkey dismissal escape requests", async () => {
     const job = await createActiveJob()
+    debuggerAttach.mockClear(); debuggerSendCommand.mockClear(); debuggerDetach.mockClear() // ignore the sign-out step's session
     const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" }
 
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_ESCAPE", jobId: job.id }, sender)).rejects.toThrow(/unknown account command/i)
@@ -695,6 +712,7 @@ describe("Accounts background workflow", () => {
 
   it("rejects unauthorized or malformed trusted-click requests before attaching", async () => {
     const job = await createActiveJob()
+    debuggerAttach.mockClear(); debuggerSendCommand.mockClear(); debuggerDetach.mockClear() // ignore the sign-out step's session
     const validSender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" }
 
     await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: job.id, action: "continue", x: 1, y: 2 }, { ...validSender, tab: { id: 12 } as chrome.tabs.Tab })).rejects.toThrow(/authorized/i)

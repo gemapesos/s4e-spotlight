@@ -1715,14 +1715,29 @@ function advanceLogoutToSignIn(job) {
 	return exit;
 }
 /** Cookies that identify the browser rather than the session; keeping them avoids new-device checks. */
+/** Browser identity and solved-CAPTCHA cookies; keeping them avoids new-device checks and repeat CAPTCHAs. */
 const SIGN_OUT_KEPT_COOKIES = new Set([
 	"ubid-main",
 	"session-id",
 	"session-id-time",
 	"i18n-prefs",
 	"lc-main",
-	"sp-cdn"
+	"sp-cdn",
+	"x-amz-captcha-1",
+	"x-amz-captcha-2"
 ]);
+/** The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc. */
+const SESSION_COOKIES = [
+	"at-main",
+	"sess-at-main",
+	"sst-main",
+	"x-main",
+	"session-token",
+	"sso-state-main",
+	"__Host-mselc"
+];
+/** Every cookie the sign-in flow sends lives under one of these; /ap/ adds signin-sso-state-us. */
+const SELLER_CENTRAL_COOKIE_URLS = [SELLER_CENTRAL_HOME_URL, "https://sellercentral.amazon.com/ap/signin"];
 const SIGN_OUT_REQUEST_TIMEOUT_MS = 1500;
 /**
 * Signs out without loading Amazon's sign-out pages: ask Amazon to end the session, drop its
@@ -1743,24 +1758,46 @@ async function signOutWithoutPages(jobId) {
 		throw error;
 	}
 }
-/** Returns false when cookies cannot be cleared here, so the sign-out page must do it. */
+/**
+* Clears the session through the debugger: chrome.cookies only lists hosts the extension may access,
+* which hides every .amazon.com session cookie. Returns false, leaving it to the sign-out page, when
+* that fails or any session cookie survives.
+*/
 async function clearSessionWithoutPages(job) {
 	const startedAt = Date.now();
 	try {
-		const storeId = await cookieStoreIdFor(job);
 		// Best effort, so the old session ends on Amazon's side too. The worker's requests carry the
 		// regular profile's cookies, so an incognito switch only drops its own.
-		const revoked = job.incognito ? "skipped" : await requestSellerCentralSignOut();
+		const request = job.incognito ? { result: "skipped" } : await requestSellerCentralSignOut();
 		assertSwitchOperationCurrent();
-		const cleared = await clearSellerCentralSessionCookies(storeId);
+		const { before, deleted, left } = await withTabDebugger(job.tabId, async (target) => {
+			const before = await tabCookies(target);
+			const deleted = before.filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+			await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", {
+				name,
+				domain,
+				path
+			})));
+			const left = (await tabCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+			return {
+				before,
+				deleted,
+				left
+			};
+		});
 		assertSwitchOperationCurrent();
-		job.cookieSignOut = true;
+		logJar(job, "before", describeJar(before));
 		jobLog(job).info("account.switch.signedOut", {
 			...jobContext(job),
-			revoked,
-			cleared,
+			...request,
+			// Whether the request alone ended the session: it would have removed these.
+			sessionAfterRequest: SESSION_COOKIES.filter((name) => before.some((cookie) => cookie.name === name)),
+			deleted: deleted.length,
+			left: describeJar(left),
 			ms: Date.now() - startedAt
 		});
+		if (left.length > 0) return false;
+		job.cookieSignOut = true;
 		return true;
 	} catch (error) {
 		assertSwitchOperationCurrent();
@@ -1771,42 +1808,56 @@ async function clearSessionWithoutPages(job) {
 		return false;
 	}
 }
-async function cookieStoreIdFor(job) {
-	const stores = await chrome.cookies.getAllCookieStores();
-	const storeId = stores.find((store) => store.tabIds.includes(job.tabId))?.id;
-	if (storeId === undefined && job.incognito) throw new Error("The sign-in tab's cookie store was not found.");
-	return storeId;
-}
 async function requestSellerCentralSignOut() {
+	const startedAt = Date.now();
 	try {
 		const response = await fetch(LOGOUT_URL, {
 			credentials: "include",
-			redirect: "manual",
 			signal: AbortSignal.timeout(SIGN_OUT_REQUEST_TIMEOUT_MS)
 		});
-		return response.type === "opaqueredirect" ? "redirected" : String(response.status);
+		return {
+			request: response.status,
+			requestEnd: new URL(response.url).pathname,
+			requestMs: Date.now() - startedAt
+		};
 	} catch (error) {
-		return error instanceof Error ? error.name : "failed";
+		return {
+			request: error instanceof Error ? error.name : "failed",
+			requestMs: Date.now() - startedAt
+		};
 	}
 }
-/** Removes the cookies Seller Central sends, including Amazon-wide ones, except browser identity. */
-async function clearSellerCentralSessionCookies(storeId) {
-	const scope = storeId === undefined ? {} : { storeId };
-	const [sent, scoped] = await Promise.all([chrome.cookies.getAll({
-		url: SELLER_CENTRAL_HOME_URL,
-		...scope
-	}), chrome.cookies.getAll({
-		domain: "sellercentral.amazon.com",
-		...scope
-	})]);
-	const unique = new Map([...sent, ...scoped].map((cookie) => [`${cookie.domain}|${cookie.path}|${cookie.name}`, cookie]));
-	const removable = [...unique.values()].filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
-	await Promise.all(removable.map((cookie) => chrome.cookies.remove({
-		url: `https://sellercentral.amazon.com${cookie.path}`,
-		name: cookie.name,
-		storeId: cookie.storeId
-	})));
-	return removable.length;
+async function tabCookies(target) {
+	const result = await chrome.debugger.sendCommand(target, "Network.getCookies", { urls: SELLER_CENTRAL_COOKIE_URLS });
+	return result?.cookies ?? [];
+}
+/** Reuses the switch's debugger session, or attaches just for `action`, so its debugging bar only flashes. */
+async function withTabDebugger(tabId, action) {
+	const target = { tabId };
+	const attachedHere = debuggerTabId !== tabId;
+	if (attachedHere) await chrome.debugger.attach(target, "1.3");
+	try {
+		return await action(target);
+	} finally {
+		if (attachedHere) try {
+			await chrome.debugger.detach(target);
+		} catch {}
+	}
+}
+/** Diagnostics: cookies by name and scope only, never values: name|domain+path|h(ttpOnly)s(ecure)x(session)|sameSite. */
+function describeJar(entries) {
+	return entries.map((entry) => `${entry.name}|${entry.domain}${entry.path}|${entry.httpOnly ? "h" : ""}${entry.secure ? "s" : ""}${entry.session ? "x" : ""}|${entry.sameSite ?? ""}`).sort();
+}
+/** Log entries are size-capped, so long lists go out in parts. */
+function logJar(job, phase, jar) {
+	for (let start = 0; start < Math.max(jar.length, 1); start += 25) {
+		jobLog(job).info("account.switch.signOutJar", {
+			phase,
+			part: start / 25 + 1,
+			count: jar.length,
+			entries: jar.slice(start, start + 25)
+		});
+	}
 }
 /** Sign-in went straight back to Seller Central, so Amazon still knows the old session: sign out properly. */
 async function fallBackToSignOutPage(job, landedUrl) {
