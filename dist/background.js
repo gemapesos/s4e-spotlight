@@ -1738,10 +1738,10 @@ const SESSION_COOKIES = [
 ];
 /** Every cookie the sign-in flow sends lives under one of these; /ap/ adds signin-sso-state-us. */
 const SELLER_CENTRAL_COOKIE_URLS = [SELLER_CENTRAL_HOME_URL, "https://sellercentral.amazon.com/ap/signin"];
-const SIGN_OUT_REQUEST_TIMEOUT_MS = 1500;
 /**
-* Signs out without loading Amazon's sign-out pages: ask Amazon to end the session, drop its
-* cookies, and open sign-in. Falls back to the sign-out page if any of that is unavailable.
+* Signs out without loading Amazon's sign-out pages: drop the session's cookies and open sign-in.
+* A background sign-out request would also end it on Amazon's side, but live it took over 1.5 s and
+* its redirects can land on sign-in and race the helper's own sign-in cookies. Falls back to the sign-out page if any of that is unavailable.
 */
 async function signOutWithoutPages(jobId) {
 	const job = await getActiveJob();
@@ -1766,13 +1766,8 @@ async function signOutWithoutPages(jobId) {
 async function clearSessionWithoutPages(job) {
 	const startedAt = Date.now();
 	try {
-		// Best effort, so the old session ends on Amazon's side too. The worker's requests carry the
-		// regular profile's cookies, so an incognito switch only drops its own.
-		const request = job.incognito ? { result: "skipped" } : await requestSellerCentralSignOut();
-		assertSwitchOperationCurrent();
-		const { before, deleted, left } = await withTabDebugger(job.tabId, async (target) => {
-			const before = await tabCookies(target);
-			const deleted = before.filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+		const { deleted, left } = await withTabDebugger(job.tabId, async (target) => {
+			const deleted = (await tabCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
 			await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", {
 				name,
 				domain,
@@ -1780,20 +1775,17 @@ async function clearSessionWithoutPages(job) {
 			})));
 			const left = (await tabCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
 			return {
-				before,
 				deleted,
 				left
 			};
 		});
 		assertSwitchOperationCurrent();
-		logJar(job, "before", describeJar(before));
 		jobLog(job).info("account.switch.signedOut", {
 			...jobContext(job),
-			...request,
-			// Whether the request alone ended the session: it would have removed these.
-			sessionAfterRequest: SESSION_COOKIES.filter((name) => before.some((cookie) => cookie.name === name)),
 			deleted: deleted.length,
+			// Session cookies that ignored deletion; any means the sign-out page must finish the job.
 			left: describeJar(left),
+			sessionLeft: SESSION_COOKIES.filter((name) => left.some((cookie) => cookie.name === name)),
 			ms: Date.now() - startedAt
 		});
 		if (left.length > 0) return false;
@@ -1806,25 +1798,6 @@ async function clearSessionWithoutPages(job) {
 			error: describeError(error)
 		});
 		return false;
-	}
-}
-async function requestSellerCentralSignOut() {
-	const startedAt = Date.now();
-	try {
-		const response = await fetch(LOGOUT_URL, {
-			credentials: "include",
-			signal: AbortSignal.timeout(SIGN_OUT_REQUEST_TIMEOUT_MS)
-		});
-		return {
-			request: response.status,
-			requestEnd: new URL(response.url).pathname,
-			requestMs: Date.now() - startedAt
-		};
-	} catch (error) {
-		return {
-			request: error instanceof Error ? error.name : "failed",
-			requestMs: Date.now() - startedAt
-		};
 	}
 }
 async function tabCookies(target) {
@@ -1847,17 +1820,6 @@ async function withTabDebugger(tabId, action) {
 /** Diagnostics: cookies by name and scope only, never values: name|domain+path|h(ttpOnly)s(ecure)x(session)|sameSite. */
 function describeJar(entries) {
 	return entries.map((entry) => `${entry.name}|${entry.domain}${entry.path}|${entry.httpOnly ? "h" : ""}${entry.secure ? "s" : ""}${entry.session ? "x" : ""}|${entry.sameSite ?? ""}`).sort();
-}
-/** Log entries are size-capped, so long lists go out in parts. */
-function logJar(job, phase, jar) {
-	for (let start = 0; start < Math.max(jar.length, 1); start += 25) {
-		jobLog(job).info("account.switch.signOutJar", {
-			phase,
-			part: start / 25 + 1,
-			count: jar.length,
-			entries: jar.slice(start, start + 25)
-		});
-	}
 }
 /** Sign-in went straight back to Seller Central, so Amazon still knows the old session: sign out properly. */
 async function fallBackToSignOutPage(job, landedUrl) {

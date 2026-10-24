@@ -363,16 +363,14 @@ describe("Accounts background workflow", () => {
       }
       return undefined
     })
-    const fetchSignOut = vi.fn(async () => ({ status: 200, url: "https://sellercentral.amazon.com/ap/signin?x=1" }) as Response)
-    vi.stubGlobal("fetch", fetchSignOut)
-    return { fetchSignOut, deletedNames: () => debuggerSendCommand.mock.calls.filter(([, method]) => method === "Network.deleteCookies").map(([, , params]) => (params as { name: string }).name) }
+    return { deletedNames: () => debuggerSendCommand.mock.calls.filter(([, method]) => method === "Network.deleteCookies").map(([, , params]) => (params as { name: string }).name) }
   }
 
-  it("signs out by ending the session and deleting its cookies through the debugger, then signs in back to the store", async () => {
-    const { fetchSignOut, deletedNames } = stubCookies()
+  it("signs out by deleting the session's cookies through the debugger, then signs in back to the store", async () => {
+    const { deletedNames } = stubCookies()
     await createActiveJob()
 
-    expect(fetchSignOut).toHaveBeenCalledWith(LOGOUT_URL, expect.objectContaining({ credentials: "include" }))
+    expect(fetch).not.toHaveBeenCalled()
     // Amazon-wide session cookies are invisible to chrome.cookies, so the debugger deletes them.
     expect(deletedNames()).toEqual(["at-main", "__Host-mselc", "signin-sso-state-us"])
     expect(debuggerDetach).toHaveBeenCalledWith({ tabId: 91 })

@@ -467,5 +467,20 @@ async function run(): Promise<void> {
   }
 }
 
-if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground())
+/**
+ * The background confirms a login document is still open before releasing credentials. This script
+ * starts at document_end, before content.js (document_idle) can answer, so it answers that check itself.
+ * Other messages are left to content.js: answering them here would win the reply.
+ */
+export function handleResumeCheck(message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void): undefined {
+  if ((message as { type?: unknown } | null)?.type !== "ACCOUNTS_RESUME_CHECK") return undefined
+  if (sender.id !== chrome.runtime.id || sender.tab || (sender.url && sender.url !== chrome.runtime.getURL("background.js"))) return undefined
+  sendResponse({ ok: true })
+  return undefined
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime?.id) {
+  setLogSink(forwardLogsToBackground())
+  chrome.runtime.onMessage?.addListener(handleResumeCheck)
+}
 void runExclusive()
