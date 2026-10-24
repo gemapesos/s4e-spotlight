@@ -34,6 +34,7 @@ async function loadAutomation(html: string, secret: string) {
 beforeEach(() => {
   vi.useRealTimers()
   document.body.replaceChildren()
+  Object.defineProperty(document, "readyState", { configurable: true, get: () => "complete" })
 })
 
 afterEach(() => {
@@ -42,9 +43,153 @@ afterEach(() => {
   vi.useRealTimers()
   document.body.replaceChildren()
   Object.defineProperty(document, "readyState", { configurable: true, get: () => "complete" })
+  Reflect.deleteProperty(document, "visibilityState")
 })
 
 describe("Seller Central account automation", () => {
+  it("confirms the loaded store separately from sign-in completion", async () => {
+    document.body.innerHTML = '<div id="sc-navtab-home">Target store</div>'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => message.type === "ACCOUNT_AUTOMATION_GET_JOB" ? { ok: true, job: { id: "job-1", stage: "store" } } : { ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: "job-1" }))
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_COMPLETE" }))
+  })
+
+  it("waits for the store document to finish loading before confirming it", async () => {
+    vi.spyOn(window, "setTimeout").mockImplementation(() => undefined as never)
+    Object.defineProperty(document, "readyState", { configurable: true, get: () => "interactive" })
+    document.body.innerHTML = '<div id="sc-navtab-home">Target store</div>'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => message.type === "ACCOUNT_AUTOMATION_GET_JOB" ? { ok: true, job: { id: "job-1", stage: "store" } } : { ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.waitFor(() => expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Opening and checking the selected store"))
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_STORE_READY" }))
+  })
+
+  it("removes the status overlay from the store page once the switch is confirmed", async () => {
+    document.body.innerHTML = '<div id="sc-navtab-home">Target store</div>'
+    makeVisible()
+    let overlayWhileConfirming: string | null | undefined
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: { id: "job-1", stage: "store" } }
+      if (message.type === "ACCOUNT_AUTOMATION_STORE_READY") overlayWhileConfirming = document.querySelector("#s4e-account-switch-status")?.textContent
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: "job-1" }))
+    await vi.waitFor(() => expect(document.querySelector("#s4e-account-switch-status")).toBeNull())
+    expect(overlayWhileConfirming).toContain("Store loaded")
+  })
+
+  it("reports a store page that never loads once, then keeps waiting for manual completion", async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = "<main>Choose an account</main>"
+    let current: { id: string; stage: string; resumeStage?: string } = { id: "job-1", stage: "store" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: current }
+      if (message.type === "ACCOUNT_AUTOMATION_ERROR") current = { id: "job-1", stage: "paused", resumeStage: "store" }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    const errors = sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNT_AUTOMATION_ERROR")
+    expect(errors).toEqual([[{ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1", error: "The selected store did not finish loading. Review this window or cancel and retry." }]])
+    expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("did not finish loading")
+    expect(sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNT_AUTOMATION_GET_JOB").length).toBeGreaterThan(10)
+  })
+
+  it("submits a hidden background sign-in through the page instead of a trusted click", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" })
+    document.body.innerHTML = '<form><input id="ap_email" type="email"><span id="continue" class="a-button"><span class="a-button-inner"><input id="continue" class="a-button-input" type="submit"></span></span></form>'
+    makeVisible()
+    vi.spyOn(window, "setTimeout").mockImplementation(() => undefined as never)
+    const click = vi.spyOn(HTMLElement.prototype, "click").mockImplementation(() => undefined)
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_SECRET") return { ok: true, value: "operator@example.test" }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+
+    await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+    expect(click.mock.contexts[0]).toBe(document.querySelector("input.a-button-input"))
+    expect(document.querySelector<HTMLInputElement>("#ap_email")?.value).toBe("operator@example.test")
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_CLICK" }))
+  })
+
+  it("retries a step that stalled while hidden with a trusted click once the window is shown", async () => {
+    vi.useFakeTimers()
+    let visibility: DocumentVisibilityState = "hidden"
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility })
+    document.body.innerHTML = '<form><input id="ap_email" type="email"><input id="continue" type="submit" value="Continue"></form>'
+    makeVisible()
+    vi.spyOn(HTMLElement.prototype, "click").mockImplementation(() => undefined)
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_SECRET") return { ok: true, value: "operator@example.test" }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(11_000)
+
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1", error: "Amazon’s Continue button did not advance the login." })
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_CLICK" }))
+
+    visibility = "visible"
+    document.dispatchEvent(new Event("visibilitychange"))
+    await vi.advanceTimersByTimeAsync(10)
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_CLICK", jobId: "job-1", action: "continue" }))
+  })
+
+  it("re-enters sign-in if a same-credential store navigation finds an expired session", async () => {
+    vi.stubGlobal("location", { ...window.location, pathname: "/ap/signin" })
+    document.body.innerHTML = '<input id="ap_email" type="email">'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => message.type === "ACCOUNT_AUTOMATION_GET_JOB" ? { ok: true, job: { id: "job-1", stage: "store" } } : { ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_REAUTH", jobId: "job-1" }))
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_SECRET" }))
+  })
+
+  it("requests attention for manual verification and preserves a paused store step", async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal("location", { ...window.location, pathname: "/ap/cvf" })
+    document.body.innerHTML = '<main>Approve this sign-in on your phone.</main>'
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => message.type === "ACCOUNT_AUTOMATION_GET_JOB" ? { ok: true, job: { id: "job-1", stage: "paused", resumeStage: "store" } } : { ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId: "job-1", reason: "verification" })
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_SECRET" }))
+  })
+
+  it("resumes a manually completed sign-in from a paused initial login step", async () => {
+    document.body.innerHTML = '<div id="sc-navtab-home">Signed in</div>'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => message.type === "ACCOUNT_AUTOMATION_GET_JOB" ? { ok: true, job: { id: "job-1", stage: "paused", resumeStage: "signin" } } : { ok: true })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: "job-1" }))
+  })
+
   it("fills the observed email form and requests a trusted center click", async () => {
     const { click, sendMessage } = await loadAutomation(
       '<form><input id="ap_email" type="email"><input id="continue" type="submit" value="Continue"></form>',

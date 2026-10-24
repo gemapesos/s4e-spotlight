@@ -6,6 +6,7 @@ import { CommandPalette } from "../src/CommandPalette"
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   document.body.replaceChildren()
 })
 
@@ -32,7 +33,33 @@ function renderAccounts(overrides: Record<string, unknown> = {}) {
   return props
 }
 
+/** Makes the started switch show up in status, the way the background reports it. */
+function reportSwitchOnStart(props: ReturnType<typeof renderAccounts>, storeId = "store-1", storeName = "JMG Outdoors") {
+  props.onStartAccountSwitch.mockImplementation(async () => {
+    props.onGetAccountsStatus.mockResolvedValue({
+      initialized: true,
+      unlocked: true,
+      stores: [{ id: storeId, name: storeName }],
+      activeSwitch: { storeId, storeName, stage: "logout", startedAt: 1, signIn: true },
+    })
+  })
+}
+
 describe("Accounts palette", () => {
+  it("shows manual attention and refreshes a background switch through completion", async () => {
+    vi.useFakeTimers()
+    const status = { initialized: true, unlocked: true, stores: [{ id: "store-1", name: "JMG Outdoors" }] }
+    const onGetAccountsStatus = vi.fn().mockResolvedValue({ ...status, activeSwitch: { storeId: "store-1", storeName: "JMG Outdoors", stage: "paused", startedAt: Date.now(), attentionMessage: "Complete Amazon’s verification in the sign-in window." } })
+    renderAccounts({ initialMode: "accounts", onGetAccountsStatus })
+    await act(async () => { await Promise.resolve() })
+    expect(screen.getByText("Needs attention")).toBeVisible()
+    expect(screen.getByText("Complete Amazon’s verification in the sign-in window.")).toBeVisible()
+    onGetAccountsStatus.mockResolvedValue({ ...status, currentStore: status.stores[0] })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    expect(screen.queryByText("Needs attention")).not.toBeInTheDocument()
+    expect(screen.getByText("Current")).toBeVisible()
+  })
+
   it("prefetches stores when the palette opens", async () => {
     const props = renderAccounts()
     await vi.waitFor(() => expect(props.onGetAccountsStatus).toHaveBeenCalled())
@@ -41,14 +68,76 @@ describe("Accounts palette", () => {
   it("switches from a matching store on the main search without opening Accounts", async () => {
     const user = userEvent.setup()
     const props = renderAccounts()
+    reportSwitchOnStart(props)
     await vi.waitFor(() => expect(props.onGetAccountsStatus).toHaveBeenCalled())
 
     await user.type(screen.getByRole("combobox", { name: "Search commands" }), "JMG")
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
 
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
-    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    expect(await screen.findByText("Switching to JMG Outdoors")).toBeVisible()
+    expect(props.onOpenChange).not.toHaveBeenCalledWith(false)
     expect(screen.queryByRole("combobox", { name: "Search accounts" })).not.toBeInTheDocument()
+  })
+
+  it("follows a started switch on its own screen, and Escape hides it without cancelling", async () => {
+    const user = userEvent.setup()
+    const props = renderAccounts()
+    reportSwitchOnStart(props)
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+
+    expect(await screen.findByRole("listitem", { name: "Sign out: In progress" })).toBeVisible()
+    expect(screen.getByRole("listitem", { name: "Open store: Waiting" })).toBeVisible()
+    expect(screen.getByText("0 of 4")).toBeVisible()
+    expect(screen.getByText("Signing out of the current account…")).toBeVisible()
+    expect(screen.getByText("Hide, keeps running")).toBeVisible()
+
+    await user.keyboard("{Escape}")
+    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    expect(props.onCancelAccountSwitch).not.toHaveBeenCalled()
+  })
+
+  it("cancels from the switch screen and goes back to the store list", async () => {
+    const user = userEvent.setup()
+    const props = renderAccounts()
+    reportSwitchOnStart(props)
+    props.onCancelAccountSwitch.mockImplementation(async () => {
+      props.onGetAccountsStatus.mockResolvedValue({ initialized: true, unlocked: true, stores: [{ id: "store-1", name: "JMG Outdoors" }] })
+    })
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+    await user.click(await screen.findByRole("button", { name: "Cancel switch" }))
+
+    expect(props.onCancelAccountSwitch).toHaveBeenCalledOnce()
+    expect(await screen.findByRole("combobox", { name: "Search accounts" })).toBeVisible()
+    expect(props.onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+
+  it("shows the finished switch on the same screen when it completes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const props = renderAccounts()
+    reportSwitchOnStart(props)
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+    expect(await screen.findByText("Switching to JMG Outdoors")).toBeVisible()
+
+    props.onGetAccountsStatus.mockResolvedValue({ initialized: true, unlocked: true, stores: [{ id: "store-1", name: "JMG Outdoors" }], currentStore: { id: "store-1", name: "JMG Outdoors" } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+
+    expect(screen.getByText("Switched to JMG Outdoors")).toBeVisible()
+    expect(screen.getByText("JMG Outdoors is ready")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: /Done/ }))
+    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("opens on the finished switch for a tab the switch reloaded", async () => {
+    const props = renderAccounts({ initialMode: "switch-done", switchedStoreName: "North Shop" })
+
+    expect(await screen.findByText("Switched to North Shop")).toBeVisible()
+    expect(screen.getByText("Click anywhere or press any key to continue.", { exact: false })).toBeVisible()
+    expect(props.onStartAccountSwitch).not.toHaveBeenCalled()
   })
 
   it("unlocks from a top-level store match before switching", async () => {
@@ -120,11 +209,13 @@ describe("Accounts palette", () => {
   it("shows configured stores and starts an unlocked switch", async () => {
     const user = userEvent.setup()
     const props = renderAccounts()
+    reportSwitchOnStart(props)
     await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
     expect(props.onGetAccountsStatus).toHaveBeenCalled()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
-    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    expect(await screen.findByText("Switching to JMG Outdoors")).toBeVisible()
+    expect(props.onOpenChange).not.toHaveBeenCalledWith(false)
   })
 
   it("unlocks a locked vault before starting the selected store", async () => {
@@ -289,10 +380,11 @@ describe("Accounts palette", () => {
         currentStore: { id: "store-1", name: "JMG Outdoors" },
       }),
     })
+    reportSwitchOnStart(props, "store-2", "North Shop")
     await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
     await user.click(await screen.findByRole("option", { name: "North Shop" }))
     expect(props.onFocusCurrentStore).not.toHaveBeenCalled()
     expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-2")
-    expect(props.onOpenChange).toHaveBeenCalledWith(false)
+    expect(await screen.findByText("Switching to North Shop")).toBeVisible()
   })
 })

@@ -4322,6 +4322,13 @@ function handleContentKeyDown(event, load = loadPalette) {
 		window.addEventListener("keydown", onKeyDown, true);
 	});
 }
+/** A finished store switch reloads this tab; show its result until the user is back. */
+async function showSwitchNotice(load = loadPalette) {
+	if (location.origin !== "https://sellercentral.amazon.com") return;
+	const response = await chrome.runtime.sendMessage({ type: "ACCOUNTS_SWITCH_NOTICE" });
+	if (!response?.ok || typeof response.storeName !== "string") return;
+	(await load()).showSwitchDone(response.storeName);
+}
 function emitReportProgress(event, runId) {
 	if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return;
 	void chrome.runtime.sendMessage({
@@ -4487,6 +4494,12 @@ function handleContentMessage(message, sender, sendResponse, load = loadPalette)
 		sendResponse({ ok: true });
 		return;
 	}
+	if (record.type === "ACCOUNTS_SWITCH_DONE") {
+		const storeName = typeof record.storeName === "string" ? record.storeName : "the selected store";
+		void load().then((palette) => palette.showSwitchDone(storeName), () => undefined);
+		sendResponse({ ok: true });
+		return;
+	}
 	if (record.type === "REPORTS_ABORT") {
 		if (typeof record.runId === "string") reportControllers.get(record.runId)?.controller.abort();
 		sendResponse({ ok: true });
@@ -4505,7 +4518,7 @@ function handleContentMessage(message, sender, sendResponse, load = loadPalette)
 		return true;
 	}
 	if (record.type === "OPEN_PALETTE") {
-		const mode = record.mode === "report-login" ? "report-login" : undefined;
+		const mode = record.mode === "report-login" || record.mode === "switching" ? record.mode : undefined;
 		void load().then((palette) => {
 			palette.setOpen(true, mode);
 		}).then(() => sendResponse({ ok: true }), (error) => sendResponse({
@@ -4525,6 +4538,7 @@ if (typeof window !== "undefined" && window.top === window) {
 	if (typeof chrome !== "undefined") {
 		if (chrome.runtime?.id) setLogSink(forwardLogsToBackground());
 		chrome.runtime?.onMessage?.addListener(handleContentMessage);
+		if (chrome.runtime?.id && canHostPalette()) void showSwitchNotice().catch(() => undefined);
 	}
 }
 
