@@ -416,7 +416,11 @@ async function resumeAccountSwitch(id: unknown, sender: chrome.runtime.MessageSe
   if (!alive?.ok) throw new Error("The original page is no longer open. Select the store again.")
   await chrome.tabs.update(source.id!, { active: true })
   const result = await handleAccountsMessageNow({ type: "ACCOUNTS_START_SWITCH", storeId: pending.storeId }, { ...sender, tab: source })
-  if (result.ok) void showSwitchingPalette(source.id!, pending.sourceDocumentId)
+  if (result.ok) {
+    void showSwitchingPalette(source.id!, pending.sourceDocumentId)
+    // Accounts was opened only to unlock for this switch; close it now that the store page has focus.
+    void chrome.tabs.remove(pending.accountsTabId).catch(() => undefined)
+  }
   return result.ok ? { ...result, resumed: true } : result
 }
 
