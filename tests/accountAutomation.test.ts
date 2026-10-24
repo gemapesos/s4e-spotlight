@@ -31,13 +31,37 @@ async function loadAutomation(html: string, secret: string) {
   return { click, sendMessage }
 }
 
+// Each test imports a fresh copy of the script; stop earlier copies from watching this document
+// or waking up later and reporting to the next test's chrome stub.
+const observers: MutationObserver[] = []
+const timers = new Set<number>()
+const nativeSetTimeout = globalThis.setTimeout
+const nativeClearTimeout = globalThis.clearTimeout
+const trackedSetTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+  const id = (nativeSetTimeout as unknown as typeof window.setTimeout)(handler, timeout, ...args)
+  timers.add(id)
+  return id
+}) as typeof setTimeout
+const NativeMutationObserver = globalThis.MutationObserver
+class TrackedMutationObserver extends NativeMutationObserver {
+  constructor(callback: MutationCallback) {
+    super(callback)
+    observers.push(this)
+  }
+}
+
 beforeEach(() => {
+  vi.stubGlobal("MutationObserver", TrackedMutationObserver)
+  vi.stubGlobal("setTimeout", trackedSetTimeout)
   vi.useRealTimers()
   document.body.replaceChildren()
   Object.defineProperty(document, "readyState", { configurable: true, get: () => "complete" })
 })
 
 afterEach(() => {
+  for (const observer of observers.splice(0)) observer.disconnect()
+  for (const id of timers) (nativeClearTimeout as unknown as typeof window.clearTimeout)(id)
+  timers.clear()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
@@ -345,6 +369,56 @@ describe("Seller Central account automation", () => {
       jobId: "job-1",
       error: "Amazon’s Continue button did not advance the login.",
     })
+  })
+
+  it("runs the next step as soon as Amazon swaps the form in place, without waiting out the retry timer", async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = '<form><input id="ap_email" type="email"><input id="continue" type="submit" value="Continue"></form>'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_SECRET") return { ok: true, value: "fixture-value" }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(0)
+    const actions = () => sendMessage.mock.calls.map(([message]) => message).filter((message) => message.type === "ACCOUNT_AUTOMATION_CLICK").map((message) => message.action)
+    expect(actions()).toEqual(["continue"])
+
+    document.body.innerHTML = '<form><input id="ap_password" type="password"><input id="signInSubmit" type="submit" value="Sign in"></form>'
+    await vi.advanceTimersByTimeAsync(200)
+    expect(actions()).toEqual(["continue", "password-submit"])
+  })
+
+  it("asks for a later verification code once when Amazon rejects the first", async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = '<div class="a-alert-error">The code you entered is not valid.</div><input id="auth-mfa-otpcode"><input id="auth-signin-button" type="submit" value="Sign in">'
+    makeVisible()
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job }
+      if (message.type === "ACCOUNT_AUTOMATION_SECRET") return { ok: true, value: "123456" }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    await import("../src/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: "job-1", kind: "otp", retry: true })
+    expect(document.querySelector<HTMLInputElement>("#auth-mfa-otpcode")?.value).toBe("123456")
+    expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Retrying with the next verification code")
+    // A second rejection on the same page stops instead of retrying again.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNT_AUTOMATION_SECRET")).toHaveLength(1)
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_ERROR" }))
+  })
+
+  it("requests a verification code without a retry on a clean code page", async () => {
+    document.body.innerHTML = '<input id="auth-mfa-otpcode"><input id="auth-signin-button" type="submit" value="Sign in">'
+    const { sendMessage } = await loadAutomation(document.body.innerHTML, "654321")
+    expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: "job-1", kind: "otp" })
   })
 
   it("completes only after login when signed-in Seller Central UI is present", async () => {
