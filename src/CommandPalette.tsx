@@ -6,6 +6,7 @@ import {
   CircleAlert,
   Clock,
   Download,
+  FileJson,
   FileSpreadsheet,
   FileText,
   FolderOpen,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { CancelButton, PrimaryButton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
 import {
   CommandCheckbox,
@@ -26,13 +28,11 @@ import {
   CommandHeader,
   CommandHint,
   CommandInput,
-  CommandKbd,
   CommandItem,
   CommandList,
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { extractCaseIds, findCaseIds } from "@/lib/caseIds"
@@ -59,10 +59,12 @@ import { extractRemovalOrderIds, findRemovalOrderIds } from "@/lib/removalOrderI
 import { extractShipmentIds, findShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds, findSkuIds } from "@/lib/skuIds"
 import { ReportProgressPanel } from "@/ReportProgressPanel"
+import { SWITCH_STAGE_LABELS, SwitchScreen } from "@/SwitchProgress"
 
 export type PaletteMode =
   | "commands"
   | "case-ids"
+  | "scrape-case"
   | "shipment-ids"
   | "sku-ids"
   | "confirm-ids"
@@ -71,8 +73,12 @@ export type PaletteMode =
   | "report-login"
   | "report-options"
   | "generating-reports"
+  | "switching"
+  /** Opened by the extension on the tab a switch reloaded. */
+  | "switch-done"
 /** Removal orders have no screen of their own; they're only opened from the Detected row. */
-type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "removal-order-ids"
+type IdentifierMode = "case-ids" | "scrape-case" | "shipment-ids" | "sku-ids" | "removal-order-ids"
+type IdentifierAction = "open" | "scrape"
 
 const CONFIRM_THRESHOLD = 10
 const MAX_BULK_IDS = 50
@@ -85,6 +91,7 @@ const MOD_KEY = typeof navigator !== "undefined" && /Mac|iPhone|iPad/u.test(navi
 const SCREEN_DEPTH: Record<PaletteMode, number> = {
   commands: 0,
   "case-ids": 1,
+  "scrape-case": 1,
   "shipment-ids": 1,
   "sku-ids": 1,
   accounts: 1,
@@ -93,6 +100,8 @@ const SCREEN_DEPTH: Record<PaletteMode, number> = {
   "confirm-ids": 2,
   unlock: 2,
   "generating-reports": 2,
+  switching: 2,
+  "switch-done": 2,
 }
 /** Detected IDs shown as chips under the input; the rest are counted. */
 const MAX_ID_CHIPS = 12
@@ -103,6 +112,10 @@ interface InputModeDefinition {
   extractIds: (input: string) => string[]
   /** Every ID in the input, repeats included, to count what was ignored. */
   findIds: (input: string) => string[]
+  /** Open tabs, or download the case thread. */
+  action: IdentifierAction
+  /** Shown when submit fails without an Error. */
+  failureError: string
   invalidError: string
   /** The instruction above the input. */
   label: string
@@ -114,12 +127,22 @@ interface InputModeDefinition {
 }
 
 function isIdentifierInputMode(mode: PaletteMode): mode is Extract<IdentifierMode, PaletteMode> {
-  return mode === "case-ids" || mode === "shipment-ids" || mode === "sku-ids"
+  return mode === "case-ids" || mode === "scrape-case" || mode === "shipment-ids" || mode === "sku-ids"
 }
 
-function openIdsLabel(count: number, noun: string): string {
-  if (count === 0) return "Open"
-  return `Open ${count} ${noun}${count === 1 ? "" : "s"}`
+function identifierActionLabel(action: IdentifierAction, count: number, noun: string): string {
+  const verb = action === "scrape" ? "Scrape" : "Open"
+  if (count === 0) return verb
+  return `${verb} ${count} ${noun}${count === 1 ? "" : "s"}`
+}
+
+function identifierSubmittingLabel(action: IdentifierAction): string {
+  return action === "scrape" ? "Scraping…" : "Opening…"
+}
+
+function identifierLimitError(action: IdentifierAction): string {
+  if (action === "scrape") return `Scrape no more than ${MAX_BULK_IDS} cases at a time.`
+  return `Open no more than ${MAX_BULK_IDS} IDs at a time.`
 }
 
 function detectedIdentifierLabel(noun: string, ids: string[]): string {
@@ -137,24 +160,23 @@ export interface CommandDefinition {
 }
 
 export interface AccountStoreSummary { id: string; name: string }
-export interface ActiveSwitchSummary { storeId: string; storeName: string; stage: string; startedAt: number }
+export interface ActiveSwitchSummary {
+  storeId: string
+  storeName: string
+  stage: string
+  startedAt: number
+  /** False when a same-credential switch only opens the store. */
+  signIn?: boolean
+  /** The step a paused switch is waiting on. */
+  resumeStage?: string
+  attentionMessage?: string
+}
 export interface AccountsStatus {
   initialized: boolean
   unlocked: boolean
   stores: AccountStoreSummary[]
   activeSwitch?: ActiveSwitchSummary
   currentStore?: AccountStoreSummary | null
-}
-
-/** What an account switch is doing, in the user's terms. */
-const SWITCH_STAGE_LABELS: Record<string, string> = {
-  logout: "Signing out of the current account…",
-  signin: "Opening Amazon sign-in…",
-  email: "Entering the account email…",
-  password: "Entering the password…",
-  otp: "Entering the verification code…",
-  paused: "Waiting for you to complete the CAPTCHA.",
-  authenticated: "Opening the store…",
 }
 
 const EMPTY_ACCOUNTS_STATUS: AccountsStatus = {
@@ -175,6 +197,7 @@ export const commandGroups: ReadonlyArray<{
     heading: "Open",
     commands: [
       { id: "open-case-ids", label: "Open case IDs", icon: FolderOpen, keywords: ["case", "cases", "ticket", "support"] },
+      { id: "scrape-case", label: "Scrape case", icon: FileJson, keywords: ["case", "cases", "scrape", "json", "export", "replies", "thread"] },
       { id: "open-shipment-ids", label: "Open shipment IDs", icon: Truck, keywords: ["shipment", "shipments", "fba", "inbound", "transfer"] },
       { id: "search-skus", label: "Search SKUs", icon: Package, keywords: ["sku", "skus", "asin", "msku", "listing", "product"] },
       { id: "time-out", label: "Open Time Out", icon: Clock, keywords: ["timeout", "time", "sheet", "form", "break"], external: true },
@@ -243,24 +266,31 @@ function ReportDownloadButton({
 export interface ReportsPrepareResult {
   loggedInToStore: boolean
   openedPromptOnSellerCentral?: boolean
+  runId?: string
 }
 
 export interface CommandPaletteProps {
   container: ShadowRoot | HTMLElement
   open: boolean
   initialMode?: PaletteMode
+  /** Report data is rendered only by the packaged Results document. Background checks enforce access. */
+  protectedResults?: boolean
+  initialIdentifierInput?: string
+  onOpenReports?: () => Promise<void>
+  onCancelReports?: () => Promise<void>
   onOpenCaseIds: (caseIds: string[]) => Promise<void> | void
+  onScrapeCases?: (caseIds: string[]) => Promise<void> | void
   onOpenShipmentIds: (shipmentIds: string[]) => Promise<void> | void
   onOpenRemovalOrderIds?: (removalOrderIds: string[]) => Promise<void> | void
   onOpenSkuIds?: (skuIds: string[]) => Promise<void> | void
   onGetAccountsStatus?: () => Promise<AccountsStatus>
-  onUnlockAccounts?: (masterPassword: string) => Promise<void>
+  onUnlockAccounts?: (storeId: string) => Promise<void>
   onStartAccountSwitch?: (storeId: string) => Promise<void>
   onFocusCurrentStore?: () => Promise<void>
   onFocusAccountSwitch?: () => Promise<void>
   onCancelAccountSwitch?: () => Promise<void>
   onManageAccounts?: () => Promise<void>
-  onPrepareReports?: () => Promise<ReportsPrepareResult>
+  onPrepareReports?: (sections?: readonly ReportSource[]) => Promise<ReportsPrepareResult>
   onGenerateReports?: (
     currentStoreName?: string,
     onProgress?: (event: ReportProgressEvent) => void,
@@ -270,13 +300,22 @@ export interface CommandPaletteProps {
   onOpenTimeOut?: () => Promise<void> | void
   onOpenChange: (open: boolean) => void
   enabledFeatures?: EnabledFeatures
+  /** The store a finished switch reached, for the switch-done screen. */
+  switchedStoreName?: string
 }
 
 export function CommandPalette({
   container,
   open,
   initialMode,
+  protectedResults = false,
+  initialIdentifierInput = "",
+  onOpenReports = async () => undefined,
+  onCancelReports = async () => undefined,
   onOpenCaseIds,
+  onScrapeCases = async () => {
+    throw new Error("Couldn’t scrape cases. Please try again.")
+  },
   onOpenShipmentIds,
   onOpenRemovalOrderIds = async () => undefined,
   onOpenSkuIds = async () => undefined,
@@ -293,14 +332,15 @@ export function CommandPalette({
   onOpenTimeOut = async () => undefined,
   onOpenChange,
   enabledFeatures = DEFAULT_ENABLED_FEATURES,
+  switchedStoreName,
 }: CommandPaletteProps) {
   const [mode, setMode] = React.useState<PaletteMode>(
-    open && initialMode && initialMode !== "commands" ? initialMode : "commands",
+    open && initialMode && (protectedResults || !["report-options", "generating-reports"].includes(initialMode)) ? initialMode : "commands",
   )
-  const [identifierMode, setIdentifierMode] = React.useState<IdentifierMode>("case-ids")
+  const [identifierMode, setIdentifierMode] = React.useState<IdentifierMode>(initialMode && isIdentifierInputMode(initialMode) ? initialMode : "case-ids")
   const [commandSearch, setCommandSearch] = React.useState("")
   const [accountSearch, setAccountSearch] = React.useState("")
-  const [identifierInput, setIdentifierInput] = React.useState("")
+  const [identifierInput, setIdentifierInput] = React.useState(initialIdentifierInput)
   const [pendingIds, setPendingIds] = React.useState<string[]>([])
   const [error, setError] = React.useState<string | null>(null)
   const [submitting, setSubmitting] = React.useState(false)
@@ -314,7 +354,6 @@ export function CommandPalette({
   const [accountsLoaded, setAccountsLoaded] = React.useState(false)
   const [accountsUnlocked, setAccountsUnlocked] = React.useState(false)
   const [selectedStore, setSelectedStore] = React.useState<AccountStoreSummary | null>(null)
-  const [masterPassword, setMasterPassword] = React.useState("")
   const [fadeMask, setFadeMask] = React.useState<FadeMaskState>("none")
   const identifierInputRef = React.useRef<HTMLTextAreaElement>(null)
   /** Bumped whenever a report run is abandoned, so its late results can't overwrite a newer run. */
@@ -323,9 +362,11 @@ export function CommandPalette({
 
   const inputModes = React.useMemo<Record<IdentifierMode, InputModeDefinition>>(() => ({
     "case-ids": {
+      action: "open",
       ariaLabel: "Case IDs",
       description: "Enter one or more 11-digit Amazon Seller Central Case IDs.",
       extractIds: extractCaseIds,
+      failureError: "Couldn’t open case tabs. Please try again.",
       findIds: findCaseIds,
       invalidError: "Enter at least one 11-digit Case ID.",
       label: "Paste one or more 11-digit case IDs",
@@ -335,10 +376,27 @@ export function CommandPalette({
       title: "Open case IDs",
       unit: "case ID",
     },
+    "scrape-case": {
+      action: "scrape",
+      ariaLabel: "Case IDs",
+      description: "Enter one or more 11-digit Amazon Seller Central Case IDs to download.",
+      extractIds: extractCaseIds,
+      failureError: "Couldn’t scrape cases. Please try again.",
+      findIds: findCaseIds,
+      invalidError: "Enter at least one 11-digit Case ID.",
+      label: "Paste one or more 11-digit case IDs",
+      noun: "case",
+      placeholder: "Paste case IDs, links or text…",
+      submit: onScrapeCases,
+      title: "Scrape case",
+      unit: "case ID",
+    },
     "shipment-ids": {
+      action: "open",
       ariaLabel: "Shipment IDs",
       description: "Enter one or more Amazon Seller Central FBA Shipment IDs.",
       extractIds: extractShipmentIds,
+      failureError: "Couldn’t open shipment tabs. Please try again.",
       findIds: findShipmentIds,
       invalidError: "Enter at least one valid FBA Shipment ID.",
       label: "Paste one or more FBA shipment IDs",
@@ -349,9 +407,11 @@ export function CommandPalette({
       unit: "shipment ID",
     },
     "removal-order-ids": {
+      action: "open",
       ariaLabel: "Removal order IDs",
       description: "Enter one or more S4E removal order IDs.",
       extractIds: extractRemovalOrderIds,
+      failureError: "Couldn’t open removal order tabs. Please try again.",
       findIds: findRemovalOrderIds,
       invalidError: "Enter at least one valid removal order ID.",
       label: "Paste one or more removal order IDs",
@@ -362,9 +422,11 @@ export function CommandPalette({
       unit: "removal order ID",
     },
     "sku-ids": {
+      action: "open",
       ariaLabel: "SKUs",
       description: "Enter one or more Amazon Seller Central SKUs, one per line.",
       extractIds: extractSkuIds,
+      failureError: "Couldn’t open SKU tabs. Please try again.",
       findIds: findSkuIds,
       invalidError: "Enter at least one SKU.",
       label: "Paste one or more SKUs, one per line",
@@ -374,7 +436,7 @@ export function CommandPalette({
       title: "Search SKUs",
       unit: "SKU",
     },
-  }), [onOpenCaseIds, onOpenRemovalOrderIds, onOpenShipmentIds, onOpenSkuIds])
+  }), [onOpenCaseIds, onOpenRemovalOrderIds, onOpenShipmentIds, onOpenSkuIds, onScrapeCases])
   const inputMode = inputModes[identifierMode]
   const confirmBackMode: PaletteMode = identifierMode === "removal-order-ids" ? "commands" : identifierMode
   const warnings = React.useMemo(() => (generatedReport ? reportWarnings(generatedReport) : []), [generatedReport])
@@ -422,7 +484,7 @@ export function CommandPalette({
 
   React.useEffect(() => {
     if (open) {
-      if (initialMode === "report-login") setMode("report-login")
+      if (initialMode === "report-login" || initialMode === "switching" || initialMode === "switch-done") setMode(initialMode)
       return
     }
     reportRunRef.current += 1
@@ -438,7 +500,6 @@ export function CommandPalette({
     setReportSections(REPORT_SOURCES)
     setGeneratedReport(null)
     setSelectedStore(null)
-    setMasterPassword("")
   }, [initialMode, open])
 
   React.useEffect(() => {
@@ -462,6 +523,26 @@ export function CommandPalette({
   }, [accountsEnabled, onGetAccountsStatus, open])
 
   React.useEffect(() => {
+    // The switch screens follow the switch themselves.
+    if (!open || !accountsEnabled || !activeSwitch || mode === "switching" || mode === "switch-done") return
+    let cancelled = false
+    let timer: number
+    const refresh = async () => {
+      try {
+        const status = await onGetAccountsStatus()
+        if (cancelled) return
+        setActiveSwitch(status.activeSwitch)
+        setCurrentStore(status.currentStore ?? null)
+        setAccountsUnlocked(status.unlocked)
+        if (!status.activeSwitch) return
+      } catch { /* retry while the palette remains open */ }
+      if (!cancelled) timer = window.setTimeout(() => void refresh(), 1000)
+    }
+    timer = window.setTimeout(() => void refresh(), 1000)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [accountsEnabled, activeSwitch?.storeId, mode, onGetAccountsStatus, open])
+
+  React.useEffect(() => {
     if (isIdentifierInputMode(mode)) identifierInputRef.current?.focus()
   }, [mode])
 
@@ -483,7 +564,7 @@ export function CommandPalette({
       await definition.submit(ids)
       close()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : `Couldn’t open ${definition.noun} tabs. Please try again.`)
+      setError(caught instanceof Error ? caught.message : definition.failureError)
       setSubmitting(false)
     }
   }, [close, identifierMode, inputModes])
@@ -492,8 +573,8 @@ export function CommandPalette({
     if (submitting) return
     setIdentifierMode(mode)
     if (ids.length === 0) return setError(inputModes[mode].invalidError)
-    if (ids.length > MAX_BULK_IDS) return setError(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
-    if (ids.length > CONFIRM_THRESHOLD) {
+    if (ids.length > MAX_BULK_IDS) return setError(identifierLimitError(inputModes[mode].action))
+    if (ids.length > CONFIRM_THRESHOLD && inputModes[mode].action !== "scrape") {
       setPendingIds(ids)
       setError(null)
       setMode("confirm-ids")
@@ -542,7 +623,9 @@ export function CommandPalette({
         return
       }
       await onStartAccountSwitch(store.id)
-      close()
+      // Seller Central can't be used until the switch finishes, so follow it here.
+      setMode("switching")
+      setSubmitting(false)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Couldn’t start the account switch.")
       setSubmitting(false)
@@ -551,18 +634,16 @@ export function CommandPalette({
 
   const unlockAndStart = React.useCallback(async () => {
     if (!selectedStore || submitting) return
-    if (!masterPassword) return setError("Enter your master password.")
     setError(null)
     setSubmitting(true)
     try {
-      await onUnlockAccounts(masterPassword)
-      await onStartAccountSwitch(selectedStore.id)
+      await onUnlockAccounts(selectedStore.id)
       close()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Couldn’t unlock accounts.")
       setSubmitting(false)
     }
-  }, [close, masterPassword, onStartAccountSwitch, onUnlockAccounts, selectedStore, submitting])
+  }, [close, onUnlockAccounts, selectedStore, submitting])
 
   const manageAccounts = React.useCallback(async () => {
     setError(null)
@@ -587,7 +668,7 @@ export function CommandPalette({
     setMode("generating-reports")
     setSubmitting(true)
     try {
-      const prepared = await onPrepareReports()
+      const prepared = await onPrepareReports(sections)
       if (!isCurrentRun()) return
       if (!prepared.loggedInToStore) {
         setSubmitting(false)
@@ -641,6 +722,11 @@ export function CommandPalette({
       setMode("case-ids")
       return
     }
+    if (commandId === "scrape-case") {
+      setIdentifierMode("scrape-case")
+      setMode("scrape-case")
+      return
+    }
     if (commandId === "open-shipment-ids") {
       setIdentifierMode("shipment-ids")
       setMode("shipment-ids")
@@ -652,6 +738,14 @@ export function CommandPalette({
       return
     }
     if (commandId === "generate-reports") {
+      if (!protectedResults) {
+        setSubmitting(true)
+        void onOpenReports().then(close, (caught: unknown) => {
+          setError(caught instanceof Error ? caught.message : "Couldn’t open Results.")
+          setSubmitting(false)
+        })
+        return
+      }
       setReportSections(REPORT_SOURCES)
       setError(null)
       setMode("report-options")
@@ -662,7 +756,7 @@ export function CommandPalette({
       return
     }
     if (commandId === "accounts") void openAccounts()
-  }, [openAccounts, openTimeOut])
+  }, [close, onOpenReports, openAccounts, openTimeOut, protectedResults])
 
   const handleSwitchAction = React.useCallback(async (action: "focus" | "cancel") => {
     setError(null)
@@ -677,14 +771,17 @@ export function CommandPalette({
 
   const returnToCommands = React.useCallback(() => {
     reportRunRef.current += 1
-    setMode("commands")
+    void onCancelReports().catch(() => undefined)
+    setMode(protectedResults && mode === "generating-reports" ? "report-options" : "commands")
     setError(null)
     setGeneratedReport(null)
     setReportProgress(INITIAL_REPORT_PROGRESS)
-  }, [])
+  }, [mode, onCancelReports, protectedResults])
 
   const handleEscapeKeyDown = React.useCallback((event: KeyboardEvent) => {
     event.preventDefault()
+    // A switch keeps running when hidden; stopping it midway would leave Seller Central signed out.
+    if (mode === "switching" || mode === "switch-done") return onOpenChange(false)
     // Escape stops a running report; the run counter drops its late results.
     if (mode === "generating-reports") {
       setSubmitting(false)
@@ -704,12 +801,11 @@ export function CommandPalette({
     if (mode === "report-options") return returnToCommands()
     if (mode === "report-login") return setMode("commands")
     if (mode === "unlock") {
-      if (masterPassword) return setMasterPassword("")
       return setMode("accounts")
     }
     if (accountSearch) return setAccountSearch("")
     setMode("commands")
-  }, [accountSearch, commandSearch, confirmBackMode, identifierInput, masterPassword, mode, onOpenChange, returnToCommands, submitting])
+  }, [accountSearch, commandSearch, confirmBackMode, identifierInput, mode, onOpenChange, returnToCommands, submitting])
 
   const screens: Record<Exclude<PaletteMode, IdentifierMode>, { title: string; description: string }> = {
     commands: { title: "Command Palette", description: "Search for a command to run." },
@@ -718,7 +814,9 @@ export function CommandPalette({
       title: "Unlock accounts",
       description: `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.`,
     },
-    "confirm-ids": { title: "Confirm bulk open", description: `Open ${pendingIds.length} ${inputMode.noun} tabs.` },
+    "confirm-ids": inputMode.action === "scrape"
+      ? { title: "Confirm scrape", description: `Scrape ${pendingIds.length} cases.` }
+      : { title: "Confirm bulk open", description: `Open ${pendingIds.length} ${inputMode.noun} tabs.` },
     "report-login": {
       title: "Generate reports",
       description: "Sign in to a Seller Central store to generate reports.",
@@ -731,6 +829,8 @@ export function CommandPalette({
       title: "Generate reports",
       description: generatedReport ? "Download the report." : "Generating the Seller Central report.",
     },
+    switching: { title: "Switch store", description: "Follow the store switch while it signs in." },
+    "switch-done": { title: "Switch store", description: "The store switch finished." },
   }
   const { title, description } = isIdentifierInputMode(mode) ? inputMode : screens[mode]
 
@@ -755,29 +855,19 @@ export function CommandPalette({
   const currentStoreLabel = `Current store: ${currentStore?.name ?? "Unknown"}`
 
   const primaryAction = (label: React.ReactNode, onClick: () => void, options: { autoFocus?: boolean; disabled?: boolean; keys?: string } = {}) => (
-    <Button
+    <PrimaryButton
       autoFocus={options.autoFocus}
-      className="gap-2 rounded-[0.5rem] pr-1.5 pl-3"
       disabled={submitting || options.disabled}
+      keys={options.keys}
       onClick={onClick}
       type="button"
     >
       {label}
-      <CommandKbd aria-hidden="true" inverted>{options.keys ?? "↵"}</CommandKbd>
-    </Button>
+    </PrimaryButton>
   )
 
   const cancelAction = (onClick: () => void) => (
-    <Button
-      className="mr-1 gap-2 rounded-[0.5rem] bg-background pr-1.5 pl-3 text-foreground ring-1 ring-foreground/10 hover:bg-muted dark:bg-input/30 dark:hover:bg-input/50"
-      disabled={submitting}
-      onClick={onClick}
-      type="button"
-      variant="ghost"
-    >
-      Cancel
-      <CommandKbd aria-hidden="true" muted>esc</CommandKbd>
-    </Button>
+    <CancelButton disabled={submitting} onClick={onClick} type="button" />
   )
 
   /** A question or notice with an icon tile, used by the confirmation screens. */
@@ -975,8 +1065,8 @@ export function CommandPalette({
             <div className="mx-1.5 mt-0.5 mb-1.5 flex items-center gap-2.5 rounded-[0.625rem] bg-muted py-2.5 pr-2.5 pl-3" role="status">
               <Spinner aria-hidden="true" className="text-foreground/70" role="presentation" />
               <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate font-medium">Switching to {activeSwitch.storeName}</span>
-                <span className="truncate text-xs leading-4 text-muted-foreground">{SWITCH_STAGE_LABELS[activeSwitch.stage] ?? activeSwitch.stage}</span>
+                <span className="truncate font-medium">{activeSwitch.stage === "paused" ? "Needs attention" : `Switching to ${activeSwitch.storeName}`}</span>
+                <span className="truncate text-xs leading-4 text-muted-foreground">{activeSwitch.attentionMessage ?? SWITCH_STAGE_LABELS[activeSwitch.stage] ?? activeSwitch.stage}</span>
               </div>
               <button
                 className="h-7 shrink-0 rounded-[0.375rem] bg-background px-2.5 text-xs leading-4 font-medium text-foreground ring-1 ring-foreground/10 transition-colors hover:bg-muted disabled:opacity-50"
@@ -1039,48 +1129,38 @@ export function CommandPalette({
           </CommandFooter>
         </> : mode === "unlock" ? <>
           <CommandHeader backDisabled={submitting} onBack={() => { setMode("accounts"); setError(null) }} parent="Switch store" title="Unlock" />
-          <form autoComplete="off" className="flex flex-col gap-2.5 px-3 pt-3 pb-3" onSubmit={(event) => event.preventDefault()}>
-            <Label className="text-xs leading-4 font-medium text-muted-foreground" htmlFor="s4e-spotlight-vault-unlock">
-              Master password
-            </Label>
-            <Input
-              autoFocus
-              aria-describedby={error ? "unlock-error" : undefined}
-              aria-invalid={Boolean(error)}
-              autoComplete="new-password"
-              className="h-10 rounded-[0.625rem] px-3"
-              data-1p-ignore="true"
-              data-lpignore="true"
-              data-bwignore="true"
-              data-form-type="other"
-              disabled={submitting}
-              id="s4e-spotlight-vault-unlock"
-              name="s4e-spotlight-vault-unlock"
-              type="password"
-              value={masterPassword}
-              onChange={(event) => { setMasterPassword(event.target.value); setError(null) }}
-              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void unlockAndStart() } }}
-            />
-            <p className="m-0 text-xs leading-4 text-muted-foreground">Unlock to switch to {selectedStore?.name}.</p>
-          </form>
+          <p className="m-0 px-4 py-5 text-sm text-muted-foreground">Unlock in Accounts to switch to {selectedStore?.name}. Your store switch will continue automatically.</p>
           {errorAlert("unlock-error")}
-          <CommandFooter action end={primaryAction(submitting ? "Unlocking…" : "Unlock and switch", () => void unlockAndStart())}>
-            <CommandHint keys={["esc"]}>{masterPassword ? "Clear" : "Back"}</CommandHint>
+          <CommandFooter action end={primaryAction(submitting ? "Opening Accounts…" : "Unlock accounts", () => void unlockAndStart(), { autoFocus: true })}>
+            <CommandHint keys={["esc"]}>Back</CommandHint>
           </CommandFooter>
         </> : mode === "confirm-ids" ? <>
           <CommandHeader backDisabled={submitting} onBack={() => { setMode(confirmBackMode); setError(null) }} parent={inputMode.title} title="Confirm" />
           {notice(
-            identifierMode === "shipment-ids" ? Truck
+            inputMode.action === "scrape" ? FileJson
+              : identifierMode === "shipment-ids" ? Truck
               : identifierMode === "sku-ids" ? Package
               : identifierMode === "removal-order-ids" ? PackageMinus
               : FolderOpen,
-            `Open ${pendingIds.length} ${inputMode.noun} tabs in the background?`,
-            "Opening this many tabs can slow the browser for a few seconds.",
+            inputMode.action === "scrape"
+              ? `Scrape ${pendingIds.length} cases?`
+              : `Open ${pendingIds.length} ${inputMode.noun} tabs in the background?`,
+            inputMode.action === "scrape"
+              ? "Each case is downloaded with every reply and date."
+              : "Opening this many tabs can slow the browser for a few seconds.",
           )}
           {errorAlert()}
           <CommandFooter action end={<>
             {cancelAction(() => setMode(confirmBackMode))}
-            {primaryAction(submitting ? "Opening…" : `Open ${pendingIds.length} tabs`, () => void runIdentifiers(pendingIds), { autoFocus: true })}
+            {primaryAction(
+              submitting
+                ? identifierSubmittingLabel(inputMode.action)
+                : inputMode.action === "scrape"
+                  ? `Scrape ${pendingIds.length} cases`
+                  : `Open ${pendingIds.length} tabs`,
+              () => void runIdentifiers(pendingIds),
+              { autoFocus: true },
+            )}
           </>} />
         </> : mode === "report-options" ? <>
           <CommandHeader
@@ -1173,7 +1253,16 @@ export function CommandPalette({
           </>}>
             <CommandHint keys={["esc"]}>{submitting ? "Stop and go back" : "Back"}</CommandHint>
           </CommandFooter>
-        </> : mode === "report-login" ? <>
+        </> : mode === "switching" || mode === "switch-done" ? (
+          <SwitchScreen
+            doneStoreName={mode === "switch-done" ? switchedStoreName ?? currentStore?.name ?? "the selected store" : undefined}
+            onCancel={onCancelAccountSwitch}
+            onClose={close}
+            onEnded={() => void openAccounts()}
+            onGetAccountsStatus={onGetAccountsStatus}
+            onShowSignIn={onFocusAccountSwitch}
+          />
+        ) : mode === "report-login" ? <>
           <CommandHeader backDisabled={submitting} onBack={returnToCommands} parent="Commands" title="Generate reports" />
           {notice(
             Building2,
@@ -1246,7 +1335,9 @@ export function CommandPalette({
           <CommandFooter
             action
             end={primaryAction(
-              submitting ? "Opening…" : openIdsLabel(currentIds.length, inputMode.noun),
+              submitting
+                ? identifierSubmittingLabel(inputMode.action)
+                : identifierActionLabel(inputMode.action, currentIds.length, inputMode.noun),
               submitIdentifiers,
               { disabled: currentIds.length === 0 },
             )}

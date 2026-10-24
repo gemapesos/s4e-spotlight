@@ -4,6 +4,7 @@ import {
   fetchFeedbackReport,
   fetchShippingQueueReport,
   fetchStrandedReport,
+  scrapeSellerCentralCases,
   fetchSuppressedReport,
   fetchUnfulfillableReport,
   prepareReports,
@@ -69,7 +70,7 @@ describe("Generate Reports Seller Central preflight", () => {
     expect(query).toHaveBeenCalledWith({ url: SELLER_CENTRAL_TAB_URL_PATTERN })
     expect(update).not.toHaveBeenCalled()
     expect(focusWindow).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_SESSION_STATUS" })
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_SESSION_STATUS" }, { frameId: 0 })
     expect(create).not.toHaveBeenCalled()
   })
 
@@ -85,7 +86,7 @@ describe("Generate Reports Seller Central preflight", () => {
     expect(sendMessage).toHaveBeenCalledWith(22, {
       type: "REPORTS_FETCH_STRANDED",
       runId: expect.stringMatching(/^report-/),
-    })
+    }, { frameId: 0 })
   })
 
   it("opens Seller Central when no matching tab exists", async () => {
@@ -123,7 +124,7 @@ describe("Generate Reports Seller Central preflight", () => {
       loggedInToStore: false,
       sellerCentralTabId: 22,
     })
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_SESSION_STATUS" })
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_SESSION_STATUS" }, { frameId: 0 })
     expect(sendMessage).not.toHaveBeenCalledWith(22, expect.objectContaining({ type: "OPEN_PALETTE" }))
   })
 
@@ -190,7 +191,7 @@ describe("Generate Reports unfulfillable fetch", () => {
 
     await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings, nextRemovalOrderId: null })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_UNFULFILLABLE" }))
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_UNFULFILLABLE" }), { frameId: 0 })
   })
 
   it("waits for the Seller Central tab to finish loading before fetching", async () => {
@@ -204,7 +205,7 @@ describe("Generate Reports unfulfillable fetch", () => {
 
     await expect(fetchUnfulfillableReport(sender)).resolves.toEqual({ ok: true, listings: [], nextRemovalOrderId: null })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_UNFULFILLABLE" }))
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_UNFULFILLABLE" }), { frameId: 0 })
   })
 })
 
@@ -251,7 +252,7 @@ describe("Generate Reports feedback fetch", () => {
 
     await expect(fetchFeedbackReport(sender)).resolves.toEqual({ ok: true, feedbacks })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_FEEDBACK" }))
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_FEEDBACK" }), { frameId: 0 })
   })
 })
 
@@ -298,7 +299,7 @@ describe("Generate Reports stranded fetch", () => {
 
     await expect(fetchStrandedReport(sender)).resolves.toEqual({ ok: true, listings })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_STRANDED" }))
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_STRANDED" }), { frameId: 0 })
   })
 })
 
@@ -345,7 +346,7 @@ describe("Generate Reports suppressed fetch", () => {
 
     await expect(fetchSuppressedReport(sender)).resolves.toEqual({ ok: true, listings })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_SUPPRESSED" }))
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_SUPPRESSED" }), { frameId: 0 })
   })
 })
 
@@ -392,7 +393,7 @@ describe("Generate Reports shipping queue fetch", () => {
 
     await expect(fetchShippingQueueReport(sender)).resolves.toEqual({ ok: true, shipments })
     expect(update).not.toHaveBeenCalled()
-    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_SHIPPING_QUEUE" }))
+    expect(sendMessage).toHaveBeenCalledWith(22, expect.objectContaining({ type: "REPORTS_FETCH_SHIPPING_QUEUE" }), { frameId: 0 })
   })
 })
 
@@ -462,5 +463,57 @@ describe("Generate Reports parallel fetches", () => {
     sendMessage.mockClear()
     await relayReportProgress({ type: "REPORTS_PROGRESS", source: "shippingQueue", status: "active" })
     expect(sendMessage).toHaveBeenCalledWith(7, { type: "REPORTS_PROGRESS", source: "shippingQueue", status: "active" })
+  })
+})
+
+describe("Scrape case Seller Central preflight", () => {
+  const update = vi.fn(async () => ({}))
+  const query = vi.fn(async (): Promise<chrome.tabs.Tab[]> => [])
+  const get = vi.fn(async (): Promise<chrome.tabs.Tab> => ({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab))
+  const sendMessage = vi.fn(async (): Promise<Record<string, unknown>> => ({ ok: true, loggedInToStore: true, settled: true }))
+
+  beforeEach(() => {
+    update.mockReset(); update.mockResolvedValue({})
+    query.mockReset(); query.mockResolvedValue([{ id: 22, windowId: 4, lastAccessed: 100 } as chrome.tabs.Tab])
+    get.mockReset(); get.mockResolvedValue({ id: 22, status: "complete", url: SELLER_CENTRAL_HOME_URL } as chrome.tabs.Tab)
+    sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, loggedInToStore: true, settled: true })
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create: vi.fn(),
+        update,
+        query,
+        get,
+        sendMessage,
+        onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
+      },
+      windows: { update: vi.fn() },
+      storage: { local: { get: vi.fn(async () => ({})) } },
+    })
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("stops when the Seller Central tab is not signed in", async () => {
+    sendMessage.mockResolvedValue({ ok: true, loggedInToStore: false, settled: true })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(scrapeSellerCentralCases(["22420938051"], sender)).rejects.toThrow(
+      "Sign in to Seller Central, then try again.",
+    )
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "REPORTS_SESSION_STATUS" }, { frameId: 0 })
+    expect(sendMessage).not.toHaveBeenCalledWith(22, expect.objectContaining({ type: "SCRAPE_CASES" }), { frameId: 0 })
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it("asks the signed-in tab for the case file", async () => {
+    const file = { scrapedAt: "2026-10-22T11:01:00.000Z", timeZone: "Asia/Manila", cases: [{ caseId: "22420938051" }] }
+    sendMessage
+      .mockResolvedValueOnce({ ok: true, loggedInToStore: true, settled: true })
+      .mockResolvedValueOnce({ ok: true, file })
+    const sender = { id: 7, windowId: 4 } as chrome.tabs.Tab
+
+    await expect(scrapeSellerCentralCases(["22420938051", "not-an-id"], sender)).resolves.toEqual({ ok: true, file })
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "SCRAPE_CASES", caseIds: ["22420938051"] }, { frameId: 0 })
+    expect(update).not.toHaveBeenCalled()
   })
 })

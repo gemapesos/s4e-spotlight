@@ -1,6 +1,7 @@
 export const SETTINGS_STORAGE_KEY = "s4e-settings";
 export const FEATURE_IDS = [
 	"open-case-ids",
+	"scrape-case",
 	"open-shipment-ids",
 	"search-skus",
 	"time-out",
@@ -11,6 +12,10 @@ export const FEATURES = [
 	{
 		id: "open-case-ids",
 		label: "Open case IDs"
+	},
+	{
+		id: "scrape-case",
+		label: "Scrape case"
 	},
 	{
 		id: "open-shipment-ids",
@@ -30,11 +35,12 @@ export const FEATURES = [
 	},
 	{
 		id: "accounts",
-		label: "Accounts"
+		label: "Switch store"
 	}
 ];
 export const DEFAULT_ENABLED_FEATURES = {
 	"open-case-ids": true,
+	"scrape-case": true,
 	"open-shipment-ids": true,
 	"search-skus": true,
 	"time-out": true,

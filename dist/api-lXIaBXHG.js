@@ -1,0 +1,1 @@
+async function e(e){let t=await chrome.runtime.sendMessage(e);if(!t?.ok)throw Error(t?.error??`The extension did not respond.`);return t}export{e as t};

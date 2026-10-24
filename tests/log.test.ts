@@ -82,6 +82,25 @@ describe("logger", () => {
 })
 
 describe("log entry validation", () => {
+  it("redacts legacy persisted entries when diagnostics reads them", async () => {
+    const storage = memoryStorage({ [LOGS_STORAGE_KEY]: [{ t: 1, level: "info", ctx: "background", event: "legacy", data: { password: "legacy-fixture-password" } }] })
+    const store = createLogStore(storage.area)
+    const entries = await store.read()
+    expect(entries[0].data).toEqual({ password: "[REDACTED]" })
+  })
+  it("redacts nested secrets before writing to any sink or producing a preview", () => {
+    const entries = captureLogs()
+    createLogger("background").info("fixture", {
+      masterPassword: "fixture-master", credential: { password: "fixture-password", otpAuthUri: "otpauth://totp/Test?secret=FIXTURE" },
+      values: [{ share_password: "fixture-share" }], count: 4,
+    })
+    expect(JSON.stringify(entries)).not.toMatch(/fixture-master|fixture-password|fixture-share|otpauth:\/\//u)
+    expect(entries[0].data).toMatchObject({ masterPassword: "[REDACTED]", count: 4 })
+    const big = sanitizeLogEntries([{ t: 1, level: "info", ctx: "content", event: "fixture", data: { password: "must-not-appear", text: "x".repeat(5000) } }])
+    expect(big[0].data).toMatchObject({ truncated: true })
+    expect(JSON.stringify(big)).not.toContain("must-not-appear")
+  })
+
   it("keeps valid entries, drops malformed ones, and truncates oversized data", () => {
     const entries = sanitizeLogEntries([
       { t: 1, level: "info", ctx: "palette", event: "report.run", ms: 20, data: { ok: true } },

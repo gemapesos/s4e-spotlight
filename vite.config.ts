@@ -31,6 +31,7 @@ const SCRIPT_SOURCES = {
   stranded: "src/lib/stranded.ts",
   suppressed: "src/lib/suppressed.ts",
   shippingQueue: "src/lib/shippingQueue.ts",
+  viewCase: "src/lib/viewCase.ts",
   content: "src/content.tsx",
 } as const
 
@@ -53,6 +54,7 @@ const CLASSIC_SCRIPTS: Record<string, readonly ScriptName[]> = {
     "stranded",
     "suppressed",
     "shippingQueue",
+    "viewCase",
     "content",
   ],
   "account-automation.js": ["log", "sellerCentralSession", "accountAutomation"],
