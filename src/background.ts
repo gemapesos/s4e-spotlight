@@ -1677,7 +1677,11 @@ function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
 /** Cookies that identify the browser rather than the session; keeping them avoids new-device checks. */
 /** Browser identity and solved-CAPTCHA cookies; keeping them avoids new-device checks and repeat CAPTCHAs. */
 const SIGN_OUT_KEPT_COOKIES = new Set(["ubid-main", "session-id", "session-id-time", "i18n-prefs", "lc-main", "sp-cdn", "x-amz-captcha-1", "x-amz-captcha-2"])
-/** The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc. */
+/**
+ * The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc.
+ * Sign-in also restored the session from cookies Seller Central never sends, such as sso-cd-state on
+ * .account.amazon.com, so sign-out deletes every Amazon cookie, not just these.
+ */
 const SESSION_COOKIES = ["at-main", "sess-at-main", "sst-main", "x-main", "session-token", "sso-state-main", "__Host-mselc"]
 /** Every cookie the sign-in flow sends lives under one of these; /ap/ adds signin-sso-state-us. */
 const SELLER_CENTRAL_COOKIE_URLS = [SELLER_CENTRAL_HOME_URL, "https://sellercentral.amazon.com/ap/signin"]
@@ -1711,15 +1715,14 @@ async function signOutWithoutPages(jobId: string): Promise<void> {
 async function clearSessionWithoutPages(job: ActiveJob): Promise<boolean> {
   const startedAt = Date.now()
   try {
-    const { before, deleted, left } = await withTabDebugger(job.tabId, async (target) => {
+    const { deleted, left } = await withTabDebugger(job.tabId, async (target) => {
       const before = await amazonCookies(target)
       const deleted = before.filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name))
       await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", { name, domain, path })))
       const left = (await amazonCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name))
-      return { before, deleted, left }
+      return { deleted, left }
     })
     assertSwitchOperationCurrent()
-    logJar(job, "signOut-before", describeJar(before))
     jobLog(job).info("account.switch.signedOut", {
       ...jobContext(job),
       deleted: deleted.length,

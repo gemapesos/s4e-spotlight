@@ -1726,7 +1726,11 @@ const SIGN_OUT_KEPT_COOKIES = new Set([
 	"x-amz-captcha-1",
 	"x-amz-captcha-2"
 ]);
-/** The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc. */
+/**
+* The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc.
+* Sign-in also restored the session from cookies Seller Central never sends, such as sso-cd-state on
+* .account.amazon.com, so sign-out deletes every Amazon cookie, not just these.
+*/
 const SESSION_COOKIES = [
 	"at-main",
 	"sess-at-main",
@@ -1766,7 +1770,7 @@ async function signOutWithoutPages(jobId) {
 async function clearSessionWithoutPages(job) {
 	const startedAt = Date.now();
 	try {
-		const { before, deleted, left } = await withTabDebugger(job.tabId, async (target) => {
+		const { deleted, left } = await withTabDebugger(job.tabId, async (target) => {
 			const before = await amazonCookies(target);
 			const deleted = before.filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
 			await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", {
@@ -1776,13 +1780,11 @@ async function clearSessionWithoutPages(job) {
 			})));
 			const left = (await amazonCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
 			return {
-				before,
 				deleted,
 				left
 			};
 		});
 		assertSwitchOperationCurrent();
-		logJar(job, "signOut-before", describeJar(before));
 		jobLog(job).info("account.switch.signedOut", {
 			...jobContext(job),
 			deleted: deleted.length,
