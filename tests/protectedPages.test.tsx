@@ -105,7 +105,7 @@ describe("protected extension pages", () => {
     const manifest = JSON.parse(readFileSync("public/manifest.json", "utf8"))
     const resources = manifest.web_accessible_resources.flatMap((entry: { resources: string[] }) => entry.resources)
     expect(resources.sort()).toEqual(["geist-latin-wght-normal.woff2", "geist-mono-latin-wght-normal.woff2", "palette-app.js"].sort())
-    expect(manifest.permissions).toEqual(["storage", "debugger"])
+    expect(manifest.permissions).toEqual(["storage", "debugger", "cookies"])
     expect(manifest.externally_connectable).toBeUndefined()
   })
 })
