@@ -354,7 +354,8 @@ describe("Accounts background workflow", () => {
     let jar = [
       cookie("at-main", ".amazon.com"), cookie("ubid-main", ".amazon.com"), cookie("x-amz-captcha-1", "sellercentral.amazon.com"),
       cookie("__Host-mselc", "sellercentral.amazon.com"), cookie("signin-sso-state-us", ".amazon.com", "/ap/"),
-      cookie("x-www", "www.amazon.com"), cookie("other-site", ".example.test"),
+      cookie("sso-cd-state", ".account.amazon.com"), cookie("x-www", "www.amazon.com"), cookie("aws-creds", "signin.aws.amazon.com"),
+      cookie("other-site", ".example.test"),
     ]
     debuggerSendCommand.mockImplementation(async (_target, method, params) => {
       if (method === "Network.getAllCookies") return { cookies: jar }
@@ -372,9 +373,10 @@ describe("Accounts background workflow", () => {
     await createActiveJob()
 
     expect(fetch).not.toHaveBeenCalled()
-    // Amazon session cookies on any host are invisible to chrome.cookies, so the debugger deletes them;
-    // other sites' cookies and browser identity stay.
-    expect(deletedNames()).toEqual(["at-main", "__Host-mselc", "signin-sso-state-us", "x-www"])
+    // Amazon session cookies are invisible to chrome.cookies, so the debugger deletes them on amazon.com,
+    // Seller Central and Amazon's single sign-on. Other Amazon sites, other sites and browser identity keep
+    // theirs, and what stays there does not count as a surviving session.
+    expect(deletedNames()).toEqual(["at-main", "__Host-mselc", "signin-sso-state-us", "sso-cd-state"])
     expect(debuggerDetach).toHaveBeenCalledWith({ tabId: 91 })
     expect(update).not.toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(update).toHaveBeenCalledExactlyOnceWith(91, { url: STORE_SIGN_IN_URL })
