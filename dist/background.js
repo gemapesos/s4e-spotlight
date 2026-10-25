@@ -1714,7 +1714,6 @@ function advanceLogoutToSignIn(job) {
 	}
 	return exit;
 }
-/** Cookies that identify the browser rather than the session; keeping them avoids new-device checks. */
 /** Browser identity and solved-CAPTCHA cookies; keeping them avoids new-device checks and repeat CAPTCHAs. */
 const SIGN_OUT_KEPT_COOKIES = new Set([
 	"ubid-main",
@@ -1729,7 +1728,7 @@ const SIGN_OUT_KEPT_COOKIES = new Set([
 /**
 * The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc.
 * Sign-in also restored the session from cookies Seller Central never sends, such as sso-cd-state on
-* .account.amazon.com, so sign-out deletes every Amazon cookie, not just these.
+* .account.amazon.com, so sign-out deletes every cookie on the sign-in hosts, not just these.
 */
 const SESSION_COOKIES = [
 	"at-main",
@@ -1740,6 +1739,12 @@ const SESSION_COOKIES = [
 	"sso-state-main",
 	"__Host-mselc"
 ];
+/**
+* Sites besides amazon.com itself whose cookies can restore a sign-in: Seller Central, and Amazon's
+* single sign-on (its sso-cd-state did, live). Other Amazon sites keep their cookies, so a switch does
+* not sign the user out of them.
+*/
+const SIGN_IN_COOKIE_SITES = ["sellercentral.amazon.com", "account.amazon.com"];
 /** Every cookie the sign-in flow sends lives under one of these; /ap/ adds signin-sso-state-us. */
 const SELLER_CENTRAL_COOKIE_URLS = [SELLER_CENTRAL_HOME_URL, "https://sellercentral.amazon.com/ap/signin"];
 /**
@@ -1770,24 +1775,27 @@ async function signOutWithoutPages(jobId) {
 async function clearSessionWithoutPages(job) {
 	const startedAt = Date.now();
 	try {
-		const { deleted, left } = await withTabDebugger(job.tabId, async (target) => {
+		const { deleted, left, untouched } = await withTabDebugger(job.tabId, async (target) => {
 			const before = await amazonCookies(target);
-			const deleted = before.filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+			const deleted = before.filter(isSignOutCookie);
 			await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", {
 				name,
 				domain,
 				path
 			})));
-			const left = (await amazonCookies(target)).filter((cookie) => !SIGN_OUT_KEPT_COOKIES.has(cookie.name));
+			const left = (await amazonCookies(target)).filter(isSignOutCookie);
 			return {
 				deleted,
-				left
+				left,
+				untouched: before.filter((cookie) => !onSignInHost(cookie))
 			};
 		});
 		assertSwitchOperationCurrent();
 		jobLog(job).info("account.switch.signedOut", {
 			...jobContext(job),
 			deleted: deleted.length,
+			// Other Amazon sites, by host only: their cookies stay, so the user stays signed in there.
+			untouchedHosts: [...new Set(untouched.map(cookieHost))].sort(),
 			// Session cookies that ignored deletion; any means the sign-out page must finish the job.
 			left: describeJar(left),
 			sessionLeft: SESSION_COOKIES.filter((name) => left.some((cookie) => cookie.name === name)),
@@ -1810,8 +1818,8 @@ async function clearSessionWithoutPages(job) {
 	}
 }
 /**
-* Every Amazon cookie in the tab's profile, on any host or path: Seller Central's sign-in can be
-* restored by cookies it does not itself send. Falls back to what Seller Central sends.
+* Every Amazon cookie in the tab's profile, on any host or path, so diagnostics also show the sites
+* sign-out leaves alone. Falls back to what Seller Central sends.
 */
 async function amazonCookies(target) {
 	let all;
@@ -1820,7 +1828,20 @@ async function amazonCookies(target) {
 	} catch {
 		all = (await chrome.debugger.sendCommand(target, "Network.getCookies", { urls: SELLER_CENTRAL_COOKIE_URLS }))?.cookies ?? [];
 	}
-	return all.filter((cookie) => /(?:^|\.)amazon\.com$/u.test(cookie.domain.replace(/^\./u, "")));
+	return all.filter((cookie) => /(?:^|\.)amazon\.com$/u.test(cookieHost(cookie)));
+}
+/** The site a cookie belongs to, without a domain cookie's leading dot. */
+function cookieHost(cookie) {
+	return cookie.domain.replace(/^\./u, "");
+}
+/** On amazon.com itself or a sign-in site, where a cookie can restore the old session. */
+function onSignInHost(cookie) {
+	const host = cookieHost(cookie);
+	return host === "amazon.com" || SIGN_IN_COOKIE_SITES.some((site) => host === site || host.endsWith(`.${site}`));
+}
+/** Sign-out deletes every cookie on the sign-in hosts except browser identity and solved CAPTCHAs. */
+function isSignOutCookie(cookie) {
+	return onSignInHost(cookie) && !SIGN_OUT_KEPT_COOKIES.has(cookie.name);
 }
 /** Reuses the switch's debugger session, or attaches just for `action`, so its debugging bar only flashes. */
 async function withTabDebugger(tabId, action) {
