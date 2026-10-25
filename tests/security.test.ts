@@ -279,6 +279,16 @@ describe("security boundaries", () => {
     expect(initialized).toEqual({ ok: true, mode: "cases", caseIds: ["11111111111"] })
   })
 
+  it("opens a new window unfocused and focuses it once the page has loaded", async () => {
+    openWorkspaceAsTab200()
+    await handleResultsMessage({ type: "RESULTS_OPEN", mode: "reports" }, contentSender)
+    // Opening focused on about:blank would leave focus in the location bar.
+    expect(chrome.windows.create).toHaveBeenCalledWith(expect.objectContaining({ type: "popup", url: "about:blank", focused: false }))
+    const pageUrl = (update.mock.calls.find(([id]) => id === 200)?.[1] as { url: string }).url
+    expect(pageUrl).toMatch(/results\.html\?launch=/)
+    await vi.waitFor(() => expect(chrome.windows.update).toHaveBeenCalledWith(50, { focused: true }))
+  })
+
   it("opens Scrape case on an empty Cases tab, but never with more than 50 IDs", async () => {
     session.workspaceWindow = { windowId: 1, tabId: 200 }
     await handleResultsMessage({ type: "RESULTS_OPEN", mode: "cases" }, contentSender)

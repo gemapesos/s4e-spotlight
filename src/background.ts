@@ -671,6 +671,7 @@ function serializeResultControl<T>(action: () => Promise<T>): Promise<T> {
 const WORKSPACE_WINDOW_KEY = "workspaceWindow"
 const WORKSPACE_WIDTH = 440
 const WORKSPACE_HEIGHT = 680
+const WORKSPACE_LOAD_TIMEOUT_MS = 5_000
 type WorkspaceMode = "reports" | "cases" | "accounts"
 interface WorkspaceLaunch {
   tabId: number
@@ -733,10 +734,13 @@ async function openWorkspace(
     await chrome.windows.update(existing.windowId, { focused: true })
     return { tabId: existing.tabId, created: false }
   }
+  // A window that opens focused on about:blank puts focus in its location bar, and navigating it
+  // with chrome.tabs.update never moves focus to the page, so no field in it can take typing.
+  // Open it unfocused and focus it once the page has loaded.
   const created = await chrome.windows.create({
     type: "popup",
     url: "about:blank",
-    focused: true,
+    focused: false,
     width: WORKSPACE_WIDTH,
     height: WORKSPACE_HEIGHT,
     ...(await workspacePosition(source)),
@@ -748,6 +752,11 @@ async function openWorkspace(
   await commit?.(tabId, true)
   // Initial navigation must not race RESULTS_INIT or revoke the launch handoff.
   await chrome.tabs.update(tabId, { url: pageUrl })
+  // Show the window even if the load wait times out, rather than leaving it behind.
+  void waitForTabCompleteMatching(tabId, (url) => url === pageUrl, WORKSPACE_LOAD_TIMEOUT_MS)
+    .catch(() => undefined)
+    .then(() => chrome.windows.update(windowId, { focused: true }))
+    .catch(() => undefined)
   return { tabId, created: true }
 }
 
