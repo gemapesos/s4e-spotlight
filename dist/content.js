@@ -380,6 +380,11 @@ function formatUtcDateTime(date) {
 	const day = `${twoDigits(date.getUTCDate())}-${MONTH_ABBREVIATIONS[date.getUTCMonth()]}-${date.getUTCFullYear()}`;
 	return `${day} ${twoDigits(date.getUTCHours())}:${twoDigits(date.getUTCMinutes())}:${twoDigits(date.getUTCSeconds())}`;
 }
+/** dd-Mmm-yyyy HH:mm:ss in local time, such as 14-Aug-2026 17:05:00. */
+function formatLocalDateTime(date) {
+	const day = formatDayMonthYear(date);
+	return `${day} ${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}:${twoDigits(date.getSeconds())}`;
+}
 
 function isPaletteShortcut(event) {
 	const isSlash = event.code === "Slash" || event.key === "/";
@@ -763,7 +768,7 @@ async function mapWithConcurrency(items, limit, mapper) {
 	return results;
 }
 function removalStatusLabel(code) {
-	if (!code || !(code in REMOVAL_STATUS_BY_CODE)) return REMOVAL_STATUS_UNKNOWN;
+	if (!code || !Object.hasOwn(REMOVAL_STATUS_BY_CODE, code)) return REMOVAL_STATUS_UNKNOWN;
 	return REMOVAL_STATUS_BY_CODE[code];
 }
 function removalStatusFromLineItem(item) {
@@ -1153,11 +1158,11 @@ function decodeHtmlEntities(value) {
 	return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity) => {
 		if (entity.startsWith("#x") || entity.startsWith("#X")) {
 			const code = Number.parseInt(entity.slice(2), 16);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return code <= 1114111 ? String.fromCodePoint(code) : match;
 		}
 		if (entity.startsWith("#")) {
 			const code = Number.parseInt(entity.slice(1), 10);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return code <= 1114111 ? String.fromCodePoint(code) : match;
 		}
 		return HTML_NAMED_ENTITIES[entity] ?? match;
 	});
@@ -2976,12 +2981,20 @@ function getShipmentLastUpdatedMs(shipment) {
 	const parsed = Date.parse(String(value));
 	return Number.isFinite(parsed) ? parsed : null;
 }
-function formatShippingQueueDate(value) {
+function formatShippingQueueDateWith(value, format) {
 	if (value == null || value === "") return "";
 	const ms = typeof value === "number" ? value : Number(value);
 	const date = Number.isFinite(ms) ? new Date(ms) : new Date(String(value));
 	if (Number.isNaN(date.getTime())) return String(value);
-	return formatUtcDateTime(date);
+	return format(date);
+}
+/** UTC, for Amazon's day-bound values (ship windows run 00:00:00Z to 23:59:59Z) and fields named UTC. */
+function formatShippingQueueDate(value) {
+	return formatShippingQueueDateWith(value, formatUtcDateTime);
+}
+/** Local time, for event timestamps Seller Central shows in the browser's time zone, such as Created Date. */
+function formatShippingQueueLocalDate(value) {
+	return formatShippingQueueDateWith(value, formatLocalDateTime);
 }
 /** Amazon reports "no estimate" as 0; show those as blank rather than 01-Jan-1970. */
 function formatEligibilityDate(value) {
@@ -3225,8 +3238,8 @@ function shipmentListCells(shipment) {
 		shippingQueueCell(shipment.destinationFC),
 		shippingQueueCell(shipment.fcAddress),
 		shippingQueueCell(shipment.shipFromAddressId),
-		formatShippingQueueDate(shipment.createdDate),
-		formatShippingQueueDate(shipment.lastUpdatedDate),
+		formatShippingQueueLocalDate(shipment.createdDate),
+		formatShippingQueueLocalDate(shipment.lastUpdatedDate),
 		shippingQueueNumericCell(shipment.mskus),
 		shippingQueueNumericCell(shipment.shippedQuantity),
 		shippingQueueNumericCell(shipment.receivedQuantity),
@@ -3246,7 +3259,7 @@ function shipmentListCells(shipment) {
 		formatShippingQueueDate(shipment.needByDate),
 		shippingQueueCell(shipment.reasonCode),
 		shippingQueueYesNo(shipment.finalized),
-		formatShippingQueueDate(shipment.finalizedDate),
+		formatShippingQueueLocalDate(shipment.finalizedDate),
 		formatShippingQueueDate(shipment.estimatedFinalizedDateUTC),
 		formatShippingQueueDate(shipment.formerEstimatedFinalizedDateUTC),
 		shippingQueueYesNo(shipment.blocked),
@@ -3275,7 +3288,7 @@ function shipmentDetailCells(shipment) {
 		shippingQueueCell(inquiry?.inquiryStatus),
 		shippingQueueCell(inquiry?.inquiryText),
 		shippingQueueCell(inquiry?.caseId),
-		formatShippingQueueDate(inquiry?.caseCreationDate),
+		formatShippingQueueLocalDate(inquiry?.caseCreationDate),
 		shippingQueueCell(inquiry?.caseCreatedBy),
 		shippingQueueYesNo(details.hasDiscrepancy),
 		shippingQueueCell(details.retailDomainName),
@@ -3308,8 +3321,8 @@ function shipmentItemCells(item) {
 		shippingQueueNumericCell(item.totalDeniedQuantity),
 		shippingQueueNumericCell(item.totalVirtuallyAdjustedQuantity),
 		shippingQueueNumericCell(item.otherReceivedQuantity),
-		formatShippingQueueDate(item.otherReceiveStartDate),
-		formatShippingQueueDate(item.otherReceiveEndDate),
+		formatShippingQueueLocalDate(item.otherReceiveStartDate),
+		formatShippingQueueLocalDate(item.otherReceiveEndDate),
 		shippingQueueFormatComplexField(item.iarAutoReconciliations),
 		shippingQueueNumericCell(item.totalDiscrepancyQuantity),
 		shippingQueueCell(item.ineligibilityReason),
@@ -4068,11 +4081,11 @@ function decodeCaseHtml(value) {
 	return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity) => {
 		if (entity.startsWith("#x") || entity.startsWith("#X")) {
 			const code = Number.parseInt(entity.slice(2), 16);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return code <= 1114111 ? String.fromCodePoint(code) : match;
 		}
 		if (entity.startsWith("#")) {
 			const code = Number.parseInt(entity.slice(1), 10);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return code <= 1114111 ? String.fromCodePoint(code) : match;
 		}
 		return CASE_HTML_ENTITIES[entity] ?? match;
 	});

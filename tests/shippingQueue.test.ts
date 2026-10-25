@@ -9,6 +9,7 @@ import {
   calculateShippingQueueCutoffDate,
   fetchShippingQueueShipments,
   formatShippingQueueDate,
+  formatShippingQueueLocalDate,
   getShipmentLastUpdatedMs,
   parseShipmentDetails,
   parseShippingQueueResponse,
@@ -358,6 +359,14 @@ describe("shippingQueue helpers", () => {
     expect(formatShippingQueueDate("not-a-date")).toBe("not-a-date")
   })
 
+  it("formats event timestamps in local time, as Seller Central shows them", () => {
+    // Tests run in Asia/Manila (UTC+8): 2026-01-30T18:00:00Z is already 31-Jan there.
+    expect(formatShippingQueueLocalDate(Date.UTC(2026, 0, 30, 18, 0, 0))).toBe("31-Jan-2026 02:00:00")
+    expect(formatShippingQueueLocalDate("1790695510000")).toBe("29-Sep-2026 23:25:10")
+    expect(formatShippingQueueLocalDate(null)).toBe("")
+    expect(formatShippingQueueLocalDate("not-a-date")).toBe("not-a-date")
+  })
+
   it("handles numeric cells and preservation of numbers", () => {
     expect(shippingQueueNumericCell(0)).toBe(0)
     expect(shippingQueueNumericCell(26)).toBe(26)
@@ -497,8 +506,8 @@ describe("shippingQueue sheet generation", () => {
     expect(row[3]).toBe("CLOSED")
     expect(row[4]).toBe("HGR6")
     expect(row[5]).toBe("US")
-    expect(row[7]).toBe("29-Sep-2026 15:25:10")
-    expect(row[8]).toBe("09-Oct-2026 16:33:39")
+    expect(row[7]).toBe("29-Sep-2026 23:25:10")
+    expect(row[8]).toBe("10-Oct-2026 00:33:39")
     expect(row[9]).toBe(9)
     expect(row[10]).toBe(26)
     expect(row[11]).toBe(24)
@@ -550,7 +559,7 @@ describe("shippingQueue sheet generation", () => {
     expect(first[column("Denied Quantity")]).toBe(5)
     expect(first[column("Virtually Adjusted Quantity")]).toBe(6)
     expect(first[column("Other Received Quantity")]).toBe(7)
-    expect(first[column("Other Receive Start Date")]).toBe("29-Sep-2026 15:25:10")
+    expect(first[column("Other Receive Start Date")]).toBe("29-Sep-2026 23:25:10")
     expect(first[column("IAR Auto Reconciliations")]).toBe('[{"id":"iar-1"}]')
     expect(first[column("Item Discrepancy Quantity")]).toBe(-1)
     expect(first[column("Item Case ID")]).toBe("1234567")

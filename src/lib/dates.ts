@@ -27,3 +27,9 @@ export function formatUtcDateTime(date: Date): string {
   const day = `${twoDigits(date.getUTCDate())}-${MONTH_ABBREVIATIONS[date.getUTCMonth()]}-${date.getUTCFullYear()}`
   return `${day} ${twoDigits(date.getUTCHours())}:${twoDigits(date.getUTCMinutes())}:${twoDigits(date.getUTCSeconds())}`
 }
+
+/** dd-Mmm-yyyy HH:mm:ss in local time, such as 14-Aug-2026 17:05:00. */
+export function formatLocalDateTime(date: Date): string {
+  const day = formatDayMonthYear(date)
+  return `${day} ${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}:${twoDigits(date.getSeconds())}`
+}

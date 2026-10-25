@@ -1,4 +1,4 @@
-import { formatUtcDateTime } from "./dates"
+import { formatLocalDateTime, formatUtcDateTime } from "./dates"
 import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 
@@ -293,12 +293,22 @@ export function getShipmentLastUpdatedMs(shipment: ShippingQueueShipment): numbe
   return Number.isFinite(parsed) ? parsed : null
 }
 
-export function formatShippingQueueDate(value: DateValue): string {
+function formatShippingQueueDateWith(value: DateValue, format: (date: Date) => string): string {
   if (value == null || value === "") return ""
   const ms = typeof value === "number" ? value : Number(value)
   const date = Number.isFinite(ms) ? new Date(ms) : new Date(String(value))
   if (Number.isNaN(date.getTime())) return String(value)
-  return formatUtcDateTime(date)
+  return format(date)
+}
+
+/** UTC, for Amazon's day-bound values (ship windows run 00:00:00Z to 23:59:59Z) and fields named UTC. */
+export function formatShippingQueueDate(value: DateValue): string {
+  return formatShippingQueueDateWith(value, formatUtcDateTime)
+}
+
+/** Local time, for event timestamps Seller Central shows in the browser's time zone, such as Created Date. */
+export function formatShippingQueueLocalDate(value: DateValue): string {
+  return formatShippingQueueDateWith(value, formatLocalDateTime)
 }
 
 /** Amazon reports "no estimate" as 0; show those as blank rather than 01-Jan-1970. */
@@ -583,8 +593,8 @@ function shipmentListCells(shipment: ShippingQueueShipment): Array<string | numb
     shippingQueueCell(shipment.destinationFC),
     shippingQueueCell(shipment.fcAddress),
     shippingQueueCell(shipment.shipFromAddressId),
-    formatShippingQueueDate(shipment.createdDate),
-    formatShippingQueueDate(shipment.lastUpdatedDate),
+    formatShippingQueueLocalDate(shipment.createdDate),
+    formatShippingQueueLocalDate(shipment.lastUpdatedDate),
     shippingQueueNumericCell(shipment.mskus),
     shippingQueueNumericCell(shipment.shippedQuantity),
     shippingQueueNumericCell(shipment.receivedQuantity),
@@ -604,7 +614,7 @@ function shipmentListCells(shipment: ShippingQueueShipment): Array<string | numb
     formatShippingQueueDate(shipment.needByDate),
     shippingQueueCell(shipment.reasonCode),
     shippingQueueYesNo(shipment.finalized),
-    formatShippingQueueDate(shipment.finalizedDate),
+    formatShippingQueueLocalDate(shipment.finalizedDate),
     formatShippingQueueDate(shipment.estimatedFinalizedDateUTC),
     formatShippingQueueDate(shipment.formerEstimatedFinalizedDateUTC),
     shippingQueueYesNo(shipment.blocked),
@@ -634,7 +644,7 @@ function shipmentDetailCells(shipment: ShippingQueueShipment): Array<string | nu
     shippingQueueCell(inquiry?.inquiryStatus),
     shippingQueueCell(inquiry?.inquiryText),
     shippingQueueCell(inquiry?.caseId),
-    formatShippingQueueDate(inquiry?.caseCreationDate),
+    formatShippingQueueLocalDate(inquiry?.caseCreationDate),
     shippingQueueCell(inquiry?.caseCreatedBy),
     shippingQueueYesNo(details.hasDiscrepancy),
     shippingQueueCell(details.retailDomainName),
@@ -668,8 +678,8 @@ function shipmentItemCells(item: ShipmentDiscrepancyItem | undefined): Array<str
     shippingQueueNumericCell(item.totalDeniedQuantity),
     shippingQueueNumericCell(item.totalVirtuallyAdjustedQuantity),
     shippingQueueNumericCell(item.otherReceivedQuantity),
-    formatShippingQueueDate(item.otherReceiveStartDate),
-    formatShippingQueueDate(item.otherReceiveEndDate),
+    formatShippingQueueLocalDate(item.otherReceiveStartDate),
+    formatShippingQueueLocalDate(item.otherReceiveEndDate),
     shippingQueueFormatComplexField(item.iarAutoReconciliations),
     shippingQueueNumericCell(item.totalDiscrepancyQuantity),
     shippingQueueCell(item.ineligibilityReason),

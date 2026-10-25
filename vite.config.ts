@@ -148,6 +148,9 @@ function extensionScriptsPlugin(): Plugin {
   }
 }
 
+// Tests run east of UTC so local-time and UTC formatting land on different days. Test workers inherit this.
+if (process.env.VITEST) process.env.TZ = "Asia/Manila"
+
 export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss(), extensionScriptsPlugin()],
   resolve: {

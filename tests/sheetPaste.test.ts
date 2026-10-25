@@ -289,7 +289,8 @@ describe("sheet paste workbook", () => {
       shipments: [{
         shipmentId: "FBA123456789",
         shipmentStatus: "CLOSED",
-        createdDate: "2026-08-14T00:00:00.000Z",
+        // 13-Aug in UTC but 14-Aug in the local time zone Seller Central shows.
+        createdDate: "2026-08-13T18:00:00.000Z",
         listingsIncomplete: true,
         details: {
           ineligibilityReason: "NOT_ALL_SHIPPED",

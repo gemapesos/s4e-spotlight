@@ -255,7 +255,7 @@ describe("report workbook", () => {
     expect(shippingQueue).toContain("Quantity Discrepancy")
     expect(shippingQueue).toContain("FBA19RKC646S")
     expect(shippingQueue).toContain("HGR6")
-    expect(shippingQueue).toContain("29-Sep-2026 15:25:10")
+    expect(shippingQueue).toContain("29-Sep-2026 23:25:10")
     // Shipped quantity: 26 (numeric), received quantity: 24 (numeric), discrepancy: -2 (numeric)
     expect(shippingQueue).toContain("<v>26</v>")
     expect(shippingQueue).toContain("<v>24</v>")

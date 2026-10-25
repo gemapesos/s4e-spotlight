@@ -3,7 +3,7 @@ import { FEEDBACK_SHEET_HEADERS, feedbackSheetRows, type SellerFeedback } from "
 import type { ReportSource } from "./reportProgress"
 import { reportIncludes, sanitizeStoreName } from "./reports"
 import {
-  formatShippingQueueDate,
+  formatShippingQueueLocalDate,
   oldestShipmentsFirst,
   requiredDocumentLabel,
   shippingQueueLineStatus,
@@ -329,7 +329,7 @@ function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconcil
       if (!SHIPPING_PASTE_STATUSES.has(status)) continue
       const caseId = item.caseId?.trim() || NOT_APPLICABLE
       const sku = item.merchantSKU?.trim() || NOT_APPLICABLE
-      const shipmentDate = duplicate ? "" : toSheetDateText(formatShippingQueueDate(shipment.createdDate))
+      const shipmentDate = duplicate ? "" : toSheetDateText(formatShippingQueueLocalDate(shipment.createdDate))
       const shipmentIdCell = duplicate ? "" : shipmentId
       // A line without its own shipment date and ID is not reconciled separately.
       const lineReconciliationDate = shipmentDate === "" && shipmentIdCell === "" ? "" : reconciliationDate
