@@ -4518,7 +4518,7 @@ function handleContentMessage(message, sender, sendResponse, load = loadPalette)
 		return true;
 	}
 	if (record.type === "OPEN_PALETTE") {
-		const mode = record.mode === "report-login" || record.mode === "switching" ? record.mode : undefined;
+		const mode = record.mode === "sign-in" || record.mode === "switching" ? record.mode : undefined;
 		void load().then((palette) => {
 			palette.setOpen(true, mode);
 		}).then(() => sendResponse({ ok: true }), (error) => sendResponse({

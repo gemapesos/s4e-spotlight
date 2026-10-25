@@ -317,6 +317,11 @@ describe("recovery inventories mapping", () => {
       unsellableIneligibleQuantity: 1,
       unsellableIneligibleQuantities: [{ quantity: 1, unfulfillableErrorCode: "NotARealCode" }],
     })).toEqual([{ label: REMOVAL_STATUS_UNKNOWN, quantity: 1 }])
+    expect(removalStatusFromLineItem({
+      totalUnsellableQuantity: 2,
+      unsellableIneligibleQuantity: 2,
+      unsellableIneligibleQuantities: [{ quantity: 2, unfulfillableErrorCode: "constructor" }],
+    })).toEqual([{ label: REMOVAL_STATUS_UNKNOWN, quantity: 2 }])
   })
 
   it("parses lineItems and merges onto listings by MSKU and FNSKU", () => {

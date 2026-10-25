@@ -409,7 +409,7 @@ export async function mapWithConcurrency<T, R>(
 }
 
 function removalStatusLabel(code: string | null | undefined): string {
-  if (!code || !(code in REMOVAL_STATUS_BY_CODE)) return REMOVAL_STATUS_UNKNOWN
+  if (!code || !Object.hasOwn(REMOVAL_STATUS_BY_CODE, code)) return REMOVAL_STATUS_UNKNOWN
   return REMOVAL_STATUS_BY_CODE[code as keyof typeof REMOVAL_STATUS_BY_CODE]
 }
 

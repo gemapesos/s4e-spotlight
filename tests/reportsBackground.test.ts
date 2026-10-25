@@ -144,7 +144,7 @@ describe("Generate Reports Seller Central preflight", () => {
     })
     expect(update).toHaveBeenCalledWith(22, { active: true })
     expect(focusWindow).toHaveBeenCalledWith(4, { focused: true })
-    expect(sendMessage).toHaveBeenCalledWith(22, { type: "OPEN_PALETTE", mode: "report-login" })
+    expect(sendMessage).toHaveBeenCalledWith(22, { type: "OPEN_PALETTE", mode: "sign-in" })
   })
 })
 

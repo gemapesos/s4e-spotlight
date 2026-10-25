@@ -98,11 +98,11 @@ function decodeCaseHtml(value: string): string {
   return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity: string) => {
     if (entity.startsWith("#x") || entity.startsWith("#X")) {
       const code = Number.parseInt(entity.slice(2), 16)
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match
+      return code <= 0x10ffff ? String.fromCodePoint(code) : match
     }
     if (entity.startsWith("#")) {
       const code = Number.parseInt(entity.slice(1), 10)
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match
+      return code <= 0x10ffff ? String.fromCodePoint(code) : match
     }
     return CASE_HTML_ENTITIES[entity] ?? match
   })

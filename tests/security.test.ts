@@ -23,6 +23,11 @@ function area(values: Record<string, unknown>) {
   }
 }
 
+/** The next popup window Chrome creates holds tab 200, the Results sender's tab. */
+function openWorkspaceAsTab200() {
+  ;(chrome.windows.create as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 50, tabs: [{ id: 200, windowId: 50 }] })
+}
+
 describe("security boundaries", () => {
   const local: Record<string, unknown> = {}
   const session: Record<string, unknown> = {}
@@ -67,7 +72,7 @@ describe("security boundaries", () => {
         onUpdated: { addListener: vi.fn((listener) => tabUpdatedListeners.add(listener)), removeListener: vi.fn((listener) => tabUpdatedListeners.delete(listener)) },
       },
       windows: {
-        update: vi.fn(), create: vi.fn(async () => ({ id: 40, tabs: [{ id: 91, windowId: 40 }] })),
+        update: vi.fn(async () => undefined), create: vi.fn(async () => ({ id: 40, tabs: [{ id: 91, windowId: 40 }] })),
         get: vi.fn(async (id: number) => ({ id, type: "normal", incognito: false })),
         getLastFocused: vi.fn(async () => ({ id: 1, type: "normal", incognito: false })),
       },
@@ -184,34 +189,47 @@ describe("security boundaries", () => {
     expect(local[VAULT_STORAGE_KEY]).toBeDefined()
   })
 
-  it("opens secure unlock and resumes the selected store exactly once", async () => {
+  it("opens unlock in the workspace window and resumes the selected store exactly once", async () => {
+    openWorkspaceAsTab200()
     await handleAccountsMessage({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId: "store" }, contentSender)
-    const pending = session.accountsUnlockResume as { id: string; accountsTabId: number }
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ url: "about:blank" }))
-    expect(update).toHaveBeenCalledWith(200, { url: `${origin}options.html?resume=${pending.id}` })
-    await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 999 } as chrome.tabs.Tab })).rejects.toThrow(/expired/)
-    await handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 200 } as chrome.tabs.Tab })
+    const pending = session.accountsUnlockResume as { id: string; accountsTabId: number; closeAccounts: boolean }
+    expect(pending).toMatchObject({ accountsTabId: 200, closeAccounts: true })
+    expect(chrome.windows.create).toHaveBeenCalledWith(expect.objectContaining({ type: "popup", url: "about:blank" }))
+    const launchKey = Object.keys(session).find((key) => key.startsWith("resultsLaunch:"))!
+    expect(session[launchKey]).toMatchObject({ tabId: 200, mode: "accounts", resumeId: pending.id, storeName: "Fixture" })
+    expect(update).toHaveBeenCalledWith(200, { url: `${origin}results.html?launch=${launchKey.slice("resultsLaunch:".length)}` })
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...resultsSender, tab: { id: 999 } as chrome.tabs.Tab })).rejects.toThrow(/expired/)
+    await handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, resultsSender)
     expect(sendMessage).toHaveBeenCalledWith(7, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: "source-document" })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "store", sourceTabId: 7 })
     // The page the store was chosen on follows the switch, as if the vault had been unlocked.
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(7, { type: "OPEN_PALETTE", mode: "switching" }, { documentId: "source-document" }))
-    // The Accounts tab opened just for the unlock does not linger once the switch is underway.
+    // The window opened just for the unlock does not linger once the switch is underway.
     expect(chrome.tabs.remove).toHaveBeenCalledWith(200)
-    await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, { ...optionsSender, tab: { id: 200 } as chrome.tabs.Tab })).rejects.toThrow(/expired/)
+    // The page the store was chosen on comes back to the front, not the sign-in window.
+    await vi.waitFor(() => expect(chrome.windows.update).toHaveBeenLastCalledWith(1, { focused: true }))
+    expect(chrome.windows.create).toHaveBeenLastCalledWith(expect.objectContaining({ type: "normal", focused: false }))
+    await expect(handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, resultsSender)).rejects.toThrow(/expired/)
   })
 
-  it("opens Accounts in the background and activates it only once it has loaded", async () => {
-    // A foreground about:blank tab leaves focus in the omnibox instead of the master password field.
-    get.mockImplementation(async (id: number) => ({ id, windowId: 1, status: "loading", url: extensionTabUrls.get(id) }))
-    const requesting = handleAccountsMessage({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId: "store" }, contentSender)
-    await vi.waitFor(() => expect(tabUpdatedListeners.size).toBe(1))
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ active: false, url: "about:blank" }))
-    expect(update).not.toHaveBeenCalledWith(200, { active: true })
-    const accountsUrl = extensionTabUrls.get(200)!
-    for (const listener of [...tabUpdatedListeners]) listener(200, { status: "complete" }, { id: 200, url: accountsUrl } as chrome.tabs.Tab)
-    await requesting
-    expect(update.mock.calls.map(([, changes]) => changes)).toEqual([{ url: accountsUrl }, { active: true }])
-    expect(tabUpdatedListeners.size).toBe(0)
+  it("keeps an already open window after its unlock resumes a switch", async () => {
+    session.workspaceWindow = { windowId: 1, tabId: 200 }
+    await handleAccountsMessage({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId: "store" }, contentSender)
+    const pending = session.accountsUnlockResume as { id: string; closeAccounts: boolean }
+    expect(pending.closeAccounts).toBe(false)
+    expect(sendMessage).toHaveBeenCalledWith(200, expect.objectContaining({ type: "RESULTS_SHOW" }))
+    await handleAccountsMessage({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id }, resultsSender)
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(200)
+  })
+
+  it("lets the window unlock and lock, but never read or change the vault", async () => {
+    await handleAccountsMessage({ type: "ACCOUNTS_LOCK" }, resultsSender)
+    expect(session[SESSION_KEY_STORAGE_KEY]).toBeUndefined()
+    await handleAccountsMessage({ type: "ACCOUNTS_UNLOCK", masterPassword: "fixture-master-password" }, resultsSender)
+    expect(session[SESSION_KEY_STORAGE_KEY]).toBeDefined()
+    for (const type of ["ACCOUNTS_GET_VAULT", "ACCOUNTS_SAVE_VAULT", "ACCOUNTS_EXPORT_SHARE", "ACCOUNTS_CHANGE_MASTER_PASSWORD", "ACCOUNTS_RESET"]) {
+      await expect(handleAccountsMessage({ type, vault, masterPassword: "fixture-master-password" }, resultsSender)).rejects.toThrow(/Accounts page/)
+    }
   })
 
   it.each([
@@ -246,20 +264,42 @@ describe("security boundaries", () => {
     expect(query).not.toHaveBeenCalled()
   })
 
-  it("commits the case handoff before Results loads and keeps it through initial navigation", async () => {
+  it("commits the case handoff before the window loads and keeps it through initial navigation", async () => {
+    openWorkspaceAsTab200()
     let initialized: Record<string, unknown> | undefined
     update.mockImplementation(async (id: number, changes: { url?: string }) => {
       const launchId = new URL(changes.url!).searchParams.get("launch")
       await revokeResultsForTab(id)
       initialized = await handleResultsMessage({ type: "RESULTS_INIT", launchId }, resultsSender)
-      return { id, windowId: 1 }
+      return { id, windowId: 50 }
     })
     await handleResultsMessage({ type: "RESULTS_OPEN", mode: "cases", caseIds: ["11111111111"] }, contentSender)
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ url: "about:blank" }))
+    expect(chrome.windows.create).toHaveBeenCalledWith(expect.objectContaining({ type: "popup", url: "about:blank", width: 440 }))
+    expect(create).not.toHaveBeenCalled()
     expect(initialized).toEqual({ ok: true, mode: "cases", caseIds: ["11111111111"] })
   })
 
+  it("opens Scrape case on an empty Cases tab, but never with more than 50 IDs", async () => {
+    session.workspaceWindow = { windowId: 1, tabId: 200 }
+    await handleResultsMessage({ type: "RESULTS_OPEN", mode: "cases" }, contentSender)
+    const launchId = (sendMessage.mock.calls.find(([, message]) => message.type === "RESULTS_SHOW")?.[1] as { launchId: string }).launchId
+    expect(session[`resultsLaunch:${launchId}`]).toMatchObject({ tabId: 200, mode: "cases", caseIds: [] })
+    const tooMany = Array.from({ length: 51 }, (_, index) => String(30_000_000_000 + index))
+    await expect(handleResultsMessage({ type: "RESULTS_OPEN", mode: "cases", caseIds: tooMany }, contentSender)).rejects.toThrow(/50/)
+  })
+
+  it("reuses the open window and lets the page show the new launch itself", async () => {
+    session.workspaceWindow = { windowId: 1, tabId: 200 }
+    await handleResultsMessage({ type: "RESULTS_OPEN", mode: "reports" }, contentSender)
+    const launchId = (sendMessage.mock.calls.find(([, message]) => message.type === "RESULTS_SHOW")?.[1] as { launchId: string }).launchId
+    expect(session[`resultsLaunch:${launchId}`]).toMatchObject({ tabId: 200, mode: "reports" })
+    expect(chrome.windows.create).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+    expect(chrome.windows.update).toHaveBeenCalledWith(1, { focused: true })
+  })
+
   it("revokes runs on navigation and removes launch handoffs when their tab closes", async () => {
+    openWorkspaceAsTab200()
     await handleResultsMessage({ type: "RESULTS_OPEN", mode: "reports" }, contentSender)
     const launchKey = Object.keys(session).find((key) => key.startsWith("resultsLaunch:"))!
     const { runId } = await handleResultsMessage({ type: "REPORTS_PREPARE", sections: ["stranded"] }, resultsSender)

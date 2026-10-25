@@ -57,7 +57,7 @@ interface SwitchProgressState {
   paused: boolean
 }
 
-function switchProgress(active: ActiveSwitchSummary): SwitchProgressState {
+export function switchProgress(active: ActiveSwitchSummary): SwitchProgressState {
   const paused = active.stage === "paused"
   const stage = paused ? active.resumeStage : active.stage
   const steps = active.signIn ? SIGN_IN_STEPS : STORE_ONLY_STEPS
@@ -154,7 +154,7 @@ function useAction() {
   return { busy, error, run }
 }
 
-function CheckBubble({ className }: { className?: string }) {
+export function CheckBubble({ className }: { className?: string }) {
   return (
     <span aria-hidden="true" className={cn("flex size-4 animate-check-in items-center justify-center rounded-full bg-primary text-primary-foreground", className)}>
       <CheckIcon className="size-2.5" strokeWidth={3.5} />
@@ -170,7 +170,7 @@ function stepIcon(status: StepStatus) {
 }
 
 /** The step rows, laid out like the report section rows. */
-function SwitchSteps({ steps, compact = false }: { steps: SwitchProgressState["steps"]; compact?: boolean }) {
+export function SwitchSteps({ steps, compact = false }: { steps: SwitchProgressState["steps"]; compact?: boolean }) {
   return (
     <div className="flex flex-col" role="list">
       {steps.map((step) => {

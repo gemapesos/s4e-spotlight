@@ -34,14 +34,14 @@ describe("content script report messages", () => {
     const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
     expect(handleContentMessage(
-      { type: "OPEN_PALETTE", mode: "report-login" },
+      { type: "OPEN_PALETTE", mode: "sign-in" },
       backgroundSender,
       sendResponse,
       load,
     )).toBe(true)
 
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true }))
-    expect(setOpen).toHaveBeenCalledWith(true, "report-login")
+    expect(setOpen).toHaveBeenCalledWith(true, "sign-in")
   })
 
   it("shows the finished store switch on a page that was already loaded", async () => {

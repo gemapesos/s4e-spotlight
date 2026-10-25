@@ -249,6 +249,8 @@ const VAULT_ADMIN_TYPES = new Set([
 	"ACCOUNTS_RESET",
 	"ACCOUNTS_RESUME_SWITCH"
 ]);
+/** The workspace window may take the master password and resume a switch; editing stays on Accounts. */
+const WORKSPACE_VAULT_TYPES = new Set(["ACCOUNTS_UNLOCK", "ACCOUNTS_RESUME_SWITCH"]);
 let vaultOperations = Promise.resolve();
 let vaultGeneration = 0;
 let operationGeneration = 0;
@@ -283,38 +285,34 @@ function isPageSender(sender, page) {
 }
 async function requestAccountUnlock(storeId, sender) {
 	const source = requireSenderTab(sender.tab);
-	if (!sender.documentId || sender.frameId !== 0 || typeof storeId !== "string") throw new Error("Open unlock from the store picker.");
+	const sourceDocumentId = sender.documentId;
+	if (!sourceDocumentId || sender.frameId !== 0 || typeof storeId !== "string") throw new Error("Open unlock from the store picker.");
 	const stored = await chrome.storage.local.get(STORE_INDEX_KEY);
 	const stores = stored[STORE_INDEX_KEY] ?? [];
-	if (!stores.some((store) => store.id === storeId)) throw new Error("The selected store no longer exists.");
+	const store = stores.find((item) => item.id === storeId);
+	if (!store) throw new Error("The selected store no longer exists.");
 	const id = crypto.randomUUID();
-	// Opening a foreground tab on about:blank makes Chrome focus the omnibox and keep it focused
-	// after Accounts loads, so the master password field never gets focus. Open it in the
-	// background and activate it once Accounts is showing.
-	const tab = await chrome.tabs.create({
-		active: false,
-		windowId: source.windowId,
-		openerTabId: source.id,
-		url: "about:blank"
-	});
-	if (tab.id === undefined) throw new Error("Chrome could not open Accounts.");
-	assertVaultOperationCurrent();
-	const pending = {
-		id,
-		storeId,
-		sourceTabId: source.id,
-		sourceDocumentId: sender.documentId,
-		accountsTabId: tab.id,
-		startedAt: Date.now()
-	};
-	await chrome.storage.session.set({ [UNLOCK_RESUME_KEY]: pending });
-	// Commit the handoff before Accounts can load and try to consume it.
-	assertVaultOperationCurrent();
-	const accountsUrl = `${chrome.runtime.getURL("options.html")}?resume=${encodeURIComponent(id)}`;
-	await chrome.tabs.update(tab.id, { url: accountsUrl });
-	// Show the tab even if the load wait times out, rather than leaving Accounts hidden.
-	await waitForTabCompleteMatching(tab.id, (url) => url === accountsUrl).catch(() => undefined);
-	await chrome.tabs.update(tab.id, { active: true });
+	// The master password is typed in the workspace window, an extension page no website can read.
+	await serializeWorkspace(() => openWorkspace({
+		mode: "accounts",
+		caseIds: [],
+		resumeId: id,
+		storeName: store.name
+	}, source, async (tabId, created) => {
+		assertVaultOperationCurrent();
+		const pending = {
+			id,
+			storeId,
+			sourceTabId: source.id,
+			sourceDocumentId,
+			accountsTabId: tabId,
+			closeAccounts: created,
+			startedAt: Date.now()
+		};
+		await chrome.storage.session.set({ [UNLOCK_RESUME_KEY]: pending });
+		// Commit the handoff before the window can load and try to consume it.
+		assertVaultOperationCurrent();
+	}));
 	return { ok: true };
 }
 async function resumeAccountSwitch(id, sender) {
@@ -337,8 +335,13 @@ async function resumeAccountSwitch(id, sender) {
 	});
 	if (result.ok) {
 		void showSwitchingPalette(source.id, pending.sourceDocumentId);
-		// Accounts was opened only to unlock for this switch; close it now that the store page has focus.
-		void chrome.tabs.remove(pending.accountsTabId).catch(() => undefined);
+		// A window opened only for this unlock closes; one already open for other work stays, and
+		// follows the switch on its Accounts tab. Either way the page
+		// the switch was chosen on comes back to the front, not the sign-in window behind it.
+		void (async () => {
+			if (pending.closeAccounts) await chrome.tabs.remove(pending.accountsTabId).catch(() => undefined);
+			if (source.windowId !== undefined) await chrome.windows.update(source.windowId, { focused: true }).catch(() => undefined);
+		})();
 	}
 	return result.ok ? {
 		...result,
@@ -358,10 +361,14 @@ async function showSwitchingPalette(tabId, documentId) {
 export async function handleAccountsMessage(message, sender) {
 	if (!isOwnSender(sender)) throw new Error("Unauthorized extension message.");
 	const type = String(message.type);
-	if (VAULT_ADMIN_TYPES.has(type) && !isPageSender(sender, "options.html")) {
+	if (VAULT_ADMIN_TYPES.has(type) && !isPageSender(sender, "options.html") && !(WORKSPACE_VAULT_TYPES.has(type) && isPageSender(sender, "results.html"))) {
 		throw new Error("This vault operation is only available on the Accounts page.");
 	}
-	if (type === "ACCOUNTS_LOCK" && !isPageSender(sender, "options.html") && !isPageSender(sender, "popup.html")) {
+	if (type === "ACCOUNTS_LOCK" && ![
+		"options.html",
+		"popup.html",
+		"results.html"
+	].some((page) => isPageSender(sender, page))) {
 		throw new Error("Lock accounts from an extension page.");
 	}
 	if (type === "ACCOUNTS_STATUS" || type === "ACCOUNT_AUTOMATION_GET_JOB" || type === "ACCOUNTS_OPEN_OPTIONS" || type === "ACCOUNTS_SWITCH_NOTICE" || type === "ACCOUNTS_SWITCH_NOTICE_DISMISS") {
@@ -534,6 +541,97 @@ function serializeResultControl(action) {
 	resultControls = result.catch(() => undefined);
 	return result;
 }
+/**
+* The workspace window is results.html opened as a small Chrome popup window. Reports, case
+* scrapes and unlocking run there, away from web pages; one window is reused for every launch.
+*/
+const WORKSPACE_WINDOW_KEY = "workspaceWindow";
+const WORKSPACE_WIDTH = 440;
+const WORKSPACE_HEIGHT = 680;
+let workspaceOpening = Promise.resolve();
+function serializeWorkspace(action) {
+	const result = workspaceOpening.catch(() => undefined).then(action);
+	workspaceOpening = result.catch(() => undefined);
+	return result;
+}
+async function openWorkspaceWindowRecord() {
+	const stored = (await chrome.storage.session.get(WORKSPACE_WINDOW_KEY))[WORKSPACE_WINDOW_KEY];
+	if (!stored) return undefined;
+	try {
+		const tab = await chrome.tabs.get(stored.tabId);
+		if (tab.windowId === stored.windowId) return stored;
+	} catch {}
+	await chrome.storage.session.remove(WORKSPACE_WINDOW_KEY);
+	return undefined;
+}
+/** Centers the new window over the one it was opened from. */
+async function workspacePosition(source) {
+	if (source?.windowId === undefined) return {};
+	try {
+		const window = await chrome.windows.get(source.windowId);
+		if (window.left === undefined || window.top === undefined || window.width === undefined) return {};
+		return {
+			left: Math.round(window.left + Math.max(0, (window.width - WORKSPACE_WIDTH) / 2)),
+			top: Math.round(window.top + 72)
+		};
+	} catch {
+		return {};
+	}
+}
+/**
+* Shows a launch in the workspace window, reusing an open one. `commit` runs with the window's tab
+* before the page can ask for the launch, so a handoff that names that tab is already stored.
+*/
+async function openWorkspace(launch, source, commit) {
+	const launchId = crypto.randomUUID();
+	const launchRecord = (tabId) => ({ [`${RESULTS_LAUNCH_PREFIX}${launchId}`]: {
+		...launch,
+		tabId,
+		startedAt: Date.now()
+	} });
+	const pageUrl = `${chrome.runtime.getURL("results.html")}?launch=${launchId}`;
+	const existing = await openWorkspaceWindowRecord();
+	if (existing) {
+		await chrome.storage.session.set(launchRecord(existing.tabId));
+		await commit?.(existing.tabId, false);
+		// The open page switches to the launch itself, keeping any run in its other tabs.
+		const shown = await chrome.tabs.sendMessage(existing.tabId, {
+			type: "RESULTS_SHOW",
+			launchId
+		}).catch(() => undefined);
+		if (!shown?.ok) await chrome.tabs.update(existing.tabId, { url: pageUrl });
+		await chrome.windows.update(existing.windowId, { focused: true });
+		return {
+			tabId: existing.tabId,
+			created: false
+		};
+	}
+	const created = await chrome.windows.create({
+		type: "popup",
+		url: "about:blank",
+		focused: true,
+		width: WORKSPACE_WIDTH,
+		height: WORKSPACE_HEIGHT,
+		...await workspacePosition(source)
+	});
+	const windowId = created?.id;
+	const tabId = created?.tabs?.[0]?.id ?? (windowId === undefined ? undefined : (await chrome.tabs.query({ windowId }))[0]?.id);
+	if (windowId === undefined || tabId === undefined) throw new Error("Chrome could not open the S4E Spotlight window.");
+	await chrome.storage.session.set({
+		...launchRecord(tabId),
+		[WORKSPACE_WINDOW_KEY]: {
+			windowId,
+			tabId
+		}
+	});
+	await commit?.(tabId, true);
+	// Initial navigation must not race RESULTS_INIT or revoke the launch handoff.
+	await chrome.tabs.update(tabId, { url: pageUrl });
+	return {
+		tabId,
+		created: true
+	};
+}
 async function readResultsRun(id) {
 	if (typeof id !== "string" || !/^[a-f\d-]{36}$/iu.test(id)) return undefined;
 	const key = `${RESULTS_RUN_PREFIX}${id}`;
@@ -590,25 +688,13 @@ export async function handleResultsMessage(message, sender) {
 	const type = String(message.type);
 	if (type === "RESULTS_OPEN") {
 		const source = requireSenderTab(sender.tab);
-		const mode = message.mode === "cases" ? "cases" : "reports";
-		const caseIds = normalizeCaseIds(message.caseIds);
-		if (mode === "cases" && (caseIds.length === 0 || caseIds.length > MAX_BULK_IDS)) throw new Error("Choose between 1 and 50 case IDs.");
-		const launchId = crypto.randomUUID();
-		const tab = await chrome.tabs.create({
-			active: true,
-			openerTabId: source.id,
-			windowId: source.windowId,
-			url: "about:blank"
-		});
-		if (tab.id === undefined) throw new Error("Chrome could not open Results.");
-		await chrome.storage.session.set({ [`${RESULTS_LAUNCH_PREFIX}${launchId}`]: {
-			tabId: tab.id,
+		const mode = message.mode === "cases" ? "cases" : message.mode === "accounts" ? "accounts" : "reports";
+		const caseIds = mode === "cases" ? normalizeCaseIds(message.caseIds) : [];
+		if (caseIds.length > MAX_BULK_IDS) throw new Error("Choose no more than 50 case IDs.");
+		await serializeWorkspace(() => openWorkspace({
 			mode,
-			caseIds,
-			startedAt: Date.now()
-		} });
-		// Initial navigation must not race RESULTS_INIT or revoke the launch handoff.
-		await chrome.tabs.update(tab.id, { url: `${chrome.runtime.getURL("results.html")}?launch=${launchId}` });
+			caseIds
+		}, source));
 		return { ok: true };
 	}
 	if (!isPageSender(sender, "results.html") || !sender.documentId || sender.tab?.id === undefined) {
@@ -622,11 +708,15 @@ export async function handleResultsMessage(message, sender) {
 		};
 		const key = `${RESULTS_LAUNCH_PREFIX}${message.launchId}`;
 		const launch = (await chrome.storage.session.get(key))[key];
-		if (!launch || launch.tabId !== sender.tab.id || Date.now() - launch.startedAt >= RESULTS_RUN_TTL_MS) throw new Error("This Results page has expired. Open it again from the palette.");
+		if (!launch || launch.tabId !== sender.tab.id || Date.now() - launch.startedAt >= RESULTS_RUN_TTL_MS) throw new Error("This window has expired. Open it again from the palette.");
 		return {
 			ok: true,
 			mode: launch.mode,
-			caseIds: launch.caseIds
+			caseIds: launch.caseIds,
+			...launch.resumeId ? {
+				resumeId: launch.resumeId,
+				storeName: launch.storeName ?? "the selected store"
+			} : {}
 		};
 	}
 	if (type === "RESULTS_OPEN_SELLER") return focusOrOpenSellerCentralTab(sender.tab);
@@ -864,8 +954,9 @@ export async function scrapeSellerCentralCases(caseIds, senderTab, authorizedTab
 		throw error;
 	}
 }
-export async function probeSellerCentralSession(tabId) {
-	const deadline = Date.now() + SESSION_PROBE_TIMEOUT_MS;
+/** Polls a tab's content script until it reports a settled session, or the time runs out. */
+async function pollSellerCentralSession(tabId, timeoutMs) {
+	const deadline = Date.now() + timeoutMs;
 	let last;
 	while (Date.now() < deadline) {
 		try {
@@ -875,17 +966,41 @@ export async function probeSellerCentralSession(tabId) {
 					loggedInToStore: response.loggedInToStore,
 					settled: Boolean(response.settled)
 				};
-				if (last.settled) return last.loggedInToStore;
+				if (last.settled) return last;
 			}
 		} catch {}
 		await sleep(SESSION_PROBE_INTERVAL_MS);
 	}
+	return last;
+}
+export async function probeSellerCentralSession(tabId) {
+	const last = await pollSellerCentralSession(tabId, SESSION_PROBE_TIMEOUT_MS);
 	if (!last) throw new Error("Couldn’t confirm the Seller Central session.");
-	log.warn("report.sessionUnsettled", {
+	if (!last.settled) log.warn("report.sessionUnsettled", {
 		tabId,
 		loggedInToStore: last.loggedInToStore
 	});
 	return last.loggedInToStore;
+}
+const SESSION_CHECK_TIMEOUT_MS = 3e3;
+const SESSION_CHECK_MAX_TABS = 5;
+/**
+* Whether Seller Central is signed in, read from the tabs already open; it never opens one.
+* Tabs share cookies, so one signed-in tab is enough, and a stale sign-in page alone isn't trusted over it.
+*/
+export async function checkSellerCentralSession(senderTab) {
+	// A switch signs out on purpose; its own screens cover that time.
+	if (await getActiveJob()) return "unknown";
+	const tabs = (await chrome.tabs.query({ url: SELLER_CENTRAL_TAB_URL_PATTERN })).filter((tab) => tab.id !== undefined && Boolean(tab.incognito) === Boolean(senderTab?.incognito)).sort((a, b) => Number(b.id === senderTab?.id) - Number(a.id === senderTab?.id) || (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)).slice(0, SESSION_CHECK_MAX_TABS);
+	const states = await Promise.all(tabs.map((tab) => pollSellerCentralSession(tab.id, SESSION_CHECK_TIMEOUT_MS)));
+	const settled = states.filter((state) => state?.settled);
+	const session = settled.some((state) => state.loggedInToStore) ? "signed-in" : settled.length ? "signed-out" : "unknown";
+	log.info("session.check", {
+		session,
+		tabs: tabs.length,
+		settled: settled.length
+	});
+	return session;
 }
 export async function prepareReports(senderTab) {
 	const runId = createLogRunId("report");
@@ -931,7 +1046,7 @@ export async function prepareReports(senderTab) {
 		if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
 		const prompt = await chrome.tabs.sendMessage(tabId, {
 			type: "OPEN_PALETTE",
-			mode: "report-login"
+			mode: "sign-in"
 		});
 		if (!prompt?.ok) throw new Error(prompt?.error ?? "Couldn’t open the command palette on Seller Central.");
 		return {
@@ -2095,6 +2210,15 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 		if (type === "REPORTS_PROGRESS") {
 			void storageReady.then(() => relayAuthorizedReportProgress(record, sender)).then(sendResponse, () => sendResponse({ ok: true }));
 			return true;
+		}
+		if (type === "SELLER_CENTRAL_SESSION") {
+			return respond(type, storageReady.then(() => checkSellerCentralSession(sender.tab)).then((session) => ({
+				ok: true,
+				session
+			})), sendResponse, "Couldn’t check Seller Central.");
+		}
+		if (type === "SELLER_CENTRAL_OPEN") {
+			return respond(type, focusOrOpenSellerCentralTab(sender.tab), sendResponse, "Couldn’t open Seller Central.");
 		}
 		if (!type.startsWith("ACCOUNT")) return undefined;
 		return respond(type, storageReady.then(() => handleAccountsMessage(record, sender)), sendResponse, "Account operation failed.");

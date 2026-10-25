@@ -22,7 +22,7 @@ const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated."
 const PALETTE_UNSUPPORTED_PAGE = "The command palette can’t open on this page."
 const contentLog = createLogger("content")
 
-export type PaletteOpenMode = "commands" | "report-login" | "switching"
+export type PaletteOpenMode = "commands" | "sign-in" | "switching"
 
 interface MountedPalette {
   setOpen: (open: boolean, mode?: PaletteOpenMode) => void
@@ -252,7 +252,7 @@ export function handleContentMessage(
     return true
   }
   if (record.type === "OPEN_PALETTE") {
-    const mode = record.mode === "report-login" || record.mode === "switching" ? record.mode : undefined
+    const mode = record.mode === "sign-in" || record.mode === "switching" ? record.mode : undefined
     void load()
       .then((palette) => {
         palette.setOpen(true, mode)

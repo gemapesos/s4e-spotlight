@@ -53,3 +53,6 @@ export function sellerCentralSessionStatus(
   // A fully loaded page with no store shell and no login form is signed out; don't wait out the probe.
   return { loggedInToStore: false, settled: readyState === "complete" }
 }
+
+/** What an open Seller Central tab shows; "unknown" when no tab can answer quickly. */
+export type SellerCentralSessionState = "signed-in" | "signed-out" | "unknown"

@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { OptionsApp } from "../src/options/OptionsApp"
-import { ResultsApp } from "../src/results/ResultsApp"
+import { WorkspaceApp } from "../src/results/WorkspaceApp"
 import { SESSION_KEY_STORAGE_KEY } from "../src/lib/accounts"
 
 const vault = { version: 1, stores: [], credentials: [{ id: "credential", domain: "fixture@example.test", password: "fixture-secret", otpAuthUri: "otpauth://totp/Fixture?secret=JBSWY3DPEHPK3PXP" }] }
@@ -52,24 +52,29 @@ describe("protected extension pages", () => {
     expect(screen.queryByLabelText("Password for fixture@example.test")).not.toBeInTheDocument()
   })
 
-  it("resumes a requested switch after Accounts unlocks", async () => {
-    window.history.replaceState(null, "", "/?resume=fixture-resume")
+  it("unlocks in the workspace window and resumes the palette's switch exactly once", async () => {
+    window.history.replaceState(null, "", "/?launch=fixture-launch")
     let unlocked = false
-    const sendMessage = vi.fn(async (message: { type: string }) => {
-      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "RESULTS_INIT") return { ok: true, mode: "accounts", caseIds: [], resumeId: "fixture-resume", storeName: "JMG Outdoors" }
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked, stores: [], currentStore: null }
       if (message.type === "ACCOUNTS_UNLOCK") unlocked = true
-      return { ok: true, vault }
+      return { ok: true }
     })
-    vi.stubGlobal("chrome", { runtime: { sendMessage } })
-    render(<OptionsApp />)
+    vi.stubGlobal("chrome", { runtime: { sendMessage, onMessage: { addListener: vi.fn(), removeListener: vi.fn() } } })
+    render(<WorkspaceApp />)
     const user = userEvent.setup()
-    await user.type(await screen.findByLabelText("Master password"), "fixture-master-password")
-    await user.click(screen.getByRole("button", { name: "Unlock" }))
+    expect(await screen.findByText("JMG Outdoors")).toBeVisible()
+    expect(sendMessage).toHaveBeenCalledWith({ type: "RESULTS_INIT", launchId: "fixture-launch" })
+    await user.type(screen.getByLabelText("Master password"), "fixture-master-password")
+    await user.click(screen.getByRole("button", { name: "Unlock and switch" }))
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: "fixture-resume" }))
-    expect(sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNTS_RESUME_SWITCH")).toHaveLength(1)
+    const types = sendMessage.mock.calls.map(([message]) => message.type)
+    expect(types.indexOf("ACCOUNTS_UNLOCK")).toBeLessThan(types.indexOf("ACCOUNTS_RESUME_SWITCH"))
+    expect(types.filter((type) => type === "ACCOUNTS_RESUME_SWITCH")).toHaveLength(1)
   })
 
-  it("selects and confirms reports once in Results, with the run id on every source request", async () => {
+  it("selects and confirms reports once in the window, with the run id on every source request", async () => {
     const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
       if (message.type === "RESULTS_INIT") return { ok: true, mode: "reports", caseIds: [] }
       if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: true, stores: [], currentStore: null }
@@ -77,11 +82,11 @@ describe("protected extension pages", () => {
       return { ok: true, listings: [], feedbacks: [], shipments: [] }
     })
     vi.stubGlobal("chrome", { runtime: { sendMessage, onMessage: { addListener: vi.fn(), removeListener: vi.fn() } } })
-    render(<ResultsApp />)
+    render(<WorkspaceApp />)
     const user = userEvent.setup()
     const generate = await screen.findByRole("button", { name: "Generate report" })
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REPORTS_PREPARE" }))
-    await user.click(screen.getByRole("option", { name: "Seller Feedback" }))
+    await user.click(screen.getByRole("checkbox", { name: "Seller Feedback" }))
     await user.click(generate)
     expect(await screen.findByRole("button", { name: "Download" })).toBeEnabled()
     expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_PREPARE", sections: ["unfulfillable", "stranded", "suppressed", "shippingQueue"] })
@@ -91,10 +96,10 @@ describe("protected extension pages", () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: "RESULTS_FINISH", runId: "fixture-run" })
   })
 
-  it("carries case IDs into Results and waits for confirmation", async () => {
+  it("carries case IDs into the window and waits for confirmation", async () => {
     const sendMessage = vi.fn(async (message: Record<string, unknown>) => message.type === "RESULTS_INIT" ? { ok: true, mode: "cases", caseIds: ["11111111111", "22222222222"] } : { ok: true, initialized: true, unlocked: false, stores: [] })
     vi.stubGlobal("chrome", { runtime: { sendMessage, onMessage: { addListener: vi.fn(), removeListener: vi.fn() } } })
-    render(<ResultsApp />)
+    render(<WorkspaceApp />)
     expect(await screen.findByRole("textbox", { name: "Case IDs" })).toHaveValue("11111111111\n22222222222")
     expect(screen.getByRole("button", { name: "Scrape 2 cases" })).toBeEnabled()
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REPORTS_PREPARE" }))

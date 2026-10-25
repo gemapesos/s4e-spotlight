@@ -26,8 +26,8 @@ import {
   type ExtensionSettings,
 } from "./lib/settings"
 import type { SellerFeedback } from "./lib/feedback"
-import { caseScrapeFailure, downloadCaseScrape, type ScrapeCasesFile } from "./lib/viewCase"
 import { isPaletteShortcut } from "./lib/shortcut"
+import type { SellerCentralSessionState } from "./lib/sellerCentralSession"
 import {
   isReportProgressMessage,
   REPORT_SOURCES,
@@ -260,25 +260,10 @@ export async function openCaseIds(caseIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_CASE_IDS", caseIds } satisfies OpenCaseIdsMessage)
 }
 
-export async function scrapeCaseIds(caseIds: string[], targetDocument: Document = document): Promise<void> {
-  void targetDocument
-  await requestBackground({ type: "RESULTS_OPEN", mode: "cases", caseIds })
+export async function openCases(): Promise<void> {
+  await requestBackground({ type: "RESULTS_OPEN", mode: "cases" })
 }
 
-/** Runs only in the extension Results document; the background verifies its sender and run. */
-export async function scrapeProtectedCaseIds(caseIds: string[], runId: string, targetDocument: Document = document): Promise<void> {
-  const response = await requestBackground<{ file: ScrapeCasesFile }>({
-    type: "SCRAPE_CASES",
-    caseIds,
-    runId,
-  })
-  const file = response.file
-  if (!file || !Array.isArray(file.cases)) throw new Error("Couldn’t scrape cases. Please try again.")
-  const failure = caseScrapeFailure(file)
-  if (file.cases.length === 0) throw new Error(failure ?? "Couldn’t scrape cases. Please try again.")
-  downloadCaseScrape(file, caseIds, targetDocument)
-  if (failure) throw new Error(failure)
-}
 export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SHIPMENT_IDS", shipmentIds } satisfies OpenShipmentIdsMessage)
 }
@@ -304,6 +289,19 @@ export async function getAccountsStatus(): Promise<AccountsStatus> {
 }
 export async function unlockAccounts(storeId: string): Promise<void> {
   await requestBackground({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId })
+}
+/** Reads the session from open Seller Central tabs; "unknown" never blocks a command. */
+export async function checkSellerCentralSession(): Promise<SellerCentralSessionState> {
+  try {
+    const { session } = await requestBackground<{ session?: unknown }>({ type: "SELLER_CENTRAL_SESSION" })
+    return session === "signed-in" || session === "signed-out" ? session : "unknown"
+  } catch (error) {
+    paletteLog.warn("session.checkFailed", { error: describeError(error) })
+    return "unknown"
+  }
+}
+export async function openSellerCentral(): Promise<void> {
+  await requestBackground({ type: "SELLER_CENTRAL_OPEN" })
 }
 export async function openReports(): Promise<void> {
   await requestBackground({ type: "RESULTS_OPEN", mode: "reports" })
@@ -578,7 +576,7 @@ export function mountCommandPalette({
           open={isOpen}
           onOpenCaseIds={openCaseIds}
           onOpenReports={openReports}
-          onScrapeCases={(ids) => scrapeCaseIds(ids, targetDocument)}
+          onOpenCases={openCases}
           onOpenShipmentIds={openShipmentIds}
           onOpenRemovalOrderIds={openRemovalOrderIds}
           onOpenSkuIds={openSkuIds}
@@ -590,6 +588,8 @@ export function mountCommandPalette({
           onCancelAccountSwitch={cancelAccountSwitch}
           onManageAccounts={manageAccounts}
           onOpenTimeOut={openTimeOut}
+          onCheckSession={checkSellerCentralSession}
+          onOpenSellerCentral={openSellerCentral}
           onOpenChange={setOpen}
           switchedStoreName={switchedStoreName}
         />
@@ -649,6 +649,7 @@ export function mountCommandPalette({
     if (nextOpen) {
       // The palette takes over showing the switch; a fresh card follows when it closes.
       switchCard = null
+      if (mode !== "switch-done") switchedStoreName = undefined
       previousFocus = getDeepActiveElement(targetDocument)
       applyPaletteRemScale(host, targetDocument)
       // Reopened during the close animation: the page is still locked.
@@ -656,10 +657,8 @@ export function mountCommandPalette({
       else unlockDocumentScroll = lockDocumentScroll(targetDocument)
     } else {
       unlockAfterRadixScrollLock()
-      if (switchedStoreName !== undefined) {
-        switchedStoreName = undefined
-        void dismissSwitchNotice().catch(() => undefined)
-      }
+      // The name stays until the next opening so the closing palette doesn't change its text.
+      if (switchedStoreName !== undefined) void dismissSwitchNotice().catch(() => undefined)
     }
     isOpen = nextOpen
     host.setAttribute(PALETTE_OPEN_ATTRIBUTE, String(nextOpen))

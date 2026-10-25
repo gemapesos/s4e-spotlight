@@ -206,7 +206,6 @@ function DestructiveButton({ className, ...props }: React.ComponentProps<typeof 
 
 export function OptionsApp() {
   const stateVersion = React.useRef(0)
-  const resumeStarted = React.useRef(false)
   const [page, setPage] = React.useState<Page>("loading")
   const [busy, setBusy] = React.useState(false)
   const [vault, setVault] = React.useState<AccountVault | null>(null)
@@ -275,16 +274,6 @@ export function OptionsApp() {
         if (version !== stateVersion.current) return
         setVault(response.vault)
         setPage("editor")
-        const resumeId = new URLSearchParams(window.location.search).get("resume")
-        if (resumeId && !resumeStarted.current) {
-          resumeStarted.current = true
-          try {
-            await api({ type: "ACCOUNTS_RESUME_SWITCH", resumeId })
-            showNotice("Continuing your store switch…")
-          } catch (error) {
-            showNotice(errorMessage(error, "Select the store again from the palette."), true)
-          }
-        }
       }
     } catch (error) {
       if (version === stateVersion.current) showNotice(errorMessage(error, "Could not load accounts."), true)
