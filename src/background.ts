@@ -54,14 +54,18 @@ const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
 const OPENID_SPEC = "http://specs.openid.net/auth/2.0"
 export const TIME_OUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1E7gfUVzy47vboZHOJ6xd8Jwx-1N6oewaVggrtI7G4yw/edit?gid=0#gid=0"
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx"
-export const SIGN_IN_URL = `https://sellercentral.amazon.com/ap/signin?${new URLSearchParams({
-  "openid.return_to": "https://sellercentral.amazon.com/",
-  "openid.identity": `${OPENID_SPEC}/identifier_select`,
-  "openid.assoc_handle": "amzn_sw_signup_us",
-  "openid.mode": "checkid_setup",
-  "openid.claimed_id": `${OPENID_SPEC}/identifier_select`,
-  "openid.ns": OPENID_SPEC,
-})}`
+/** Amazon's sign-in, returning to `returnTo` (a Seller Central URL) once signed in. */
+export function signInUrlFor(returnTo = "https://sellercentral.amazon.com/"): string {
+  return `https://sellercentral.amazon.com/ap/signin?${new URLSearchParams({
+    "openid.return_to": returnTo,
+    "openid.identity": `${OPENID_SPEC}/identifier_select`,
+    "openid.assoc_handle": "amzn_sw_signup_us",
+    "openid.mode": "checkid_setup",
+    "openid.claimed_id": `${OPENID_SPEC}/identifier_select`,
+    "openid.ns": OPENID_SPEC,
+  })}`
+}
+export const SIGN_IN_URL = signInUrlFor()
 export const SELLER_CENTRAL_HOME_URL = "https://sellercentral.amazon.com/"
 export const SELLER_CENTRAL_TAB_URL_PATTERN = "https://sellercentral.amazon.com/*"
 
@@ -314,8 +318,16 @@ interface ActiveJob {
   storeNavigationDocumentId?: string
   resumeStage?: ActiveJob["stage"]
   attentionMessage?: string
+  /** TOTP time step of the last code issued, so a retry never repeats a rejected code. */
+  otpCounter?: number
+  otpAttempts?: number
+  /** Signed out by dropping cookies; if Amazon still knows the old session, use its sign-out page. */
+  cookieSignOut?: boolean
+  /** The still-signed-in page that triggered the fallback; it must not skip the sign-out it started. */
+  signOutFallbackFrom?: string
 }
 
+const MAX_OTP_CODES = 2
 const AUTOMATION_CLICK_ACTIONS = new Set(["continue", "password-submit", "otp-submit"])
 let startSwitchLock: Promise<void> = Promise.resolve()
 let sellerCentralTabLock: Promise<void> = Promise.resolve()
@@ -1114,6 +1126,21 @@ async function switchDestinationWindow(job: ActiveJob): Promise<number | undefin
   return windows.find((window) => window.id !== job.helperWindowId && Boolean(window.incognito) === Boolean(job.incognito))?.id
 }
 
+/**
+ * Sign-in is shared, so the user's own Seller Central tab can load the store directly: the store
+ * loads once instead of in the helper and then again in their tab. Their tab keeps its place and is
+ * not activated. Returns false, keeping the helper's tab, when no Seller Central tab is open.
+ */
+async function moveJobToUserTab(job: ActiveJob): Promise<boolean> {
+  if (!job.ownsTab) return false // already in the user's tab, e.g. signing in again there
+  const userTabId = await reusableSellerCentralTab(job)
+  assertSwitchOperationCurrent()
+  if (userTabId === undefined) return false
+  job.tabId = userTabId
+  job.ownsTab = false
+  return true
+}
+
 /** Finish only after the saved store URL has produced a new, loaded, signed-in document. */
 async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
   if ((job.resumeStage ?? job.stage) !== "store" || sender.documentId === job.storeNavigationDocumentId) {
@@ -1129,10 +1156,10 @@ async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.Messag
   assertSwitchOperationCurrent()
   if (!session?.ok || !session.loggedInToStore || !session.settled) return { ok: true, waitMs: 500 }
 
-  // Sign-in is shared, so the user's own tab can simply load the store. It keeps its place, and
-  // neither it nor its window is activated: the user may be working elsewhere.
+  // A store loaded in the user's own tab is already where it belongs. Otherwise reload their tab in
+  // place: it keeps its place, and neither it nor its window is activated.
   const { store } = await getJobRecords(job)
-  let finalTabId = await reusableSellerCentralTab(job)
+  let finalTabId = job.ownsTab ? await reusableSellerCentralTab(job) : undefined
   assertSwitchOperationCurrent()
   if (finalTabId !== undefined) {
     // Recheck the store document before reloading or closing any of the user's tabs.
@@ -1145,7 +1172,7 @@ async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.Messag
     }
   }
   if (finalTabId === undefined) {
-    const destination = await switchDestinationWindow(job)
+    const destination = job.ownsTab ? await switchDestinationWindow(job) : undefined
     assertSwitchOperationCurrent()
     if (destination !== undefined && destination !== tab.windowId) {
       // Moving its only tab closes the helper window. A moved tab is not activated.
@@ -1160,7 +1187,7 @@ async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.Messag
   assertSwitchOperationCurrent()
   await setCurrentStoreId(job.storeId)
   await setActiveJob(undefined)
-  jobLog(job).info("account.switch.complete", { store: store.name, ms: Date.now() - job.startedAt, tab: finalTabId === job.tabId ? "helper" : "reloaded" })
+  jobLog(job).info("account.switch.complete", { store: store.name, ms: Date.now() - job.startedAt, tab: !job.ownsTab ? "user" : finalTabId === job.tabId ? "helper" : "reloaded" })
   if (finalTabId === job.tabId) void confirmSwitchDone(job.tabId, store.name, sender.documentId)
   else try { await chrome.tabs.remove(job.tabId) } catch { /* closing its only tab closes the helper window */ }
   return { ok: true }
@@ -1197,6 +1224,8 @@ async function getActiveJob(): Promise<ActiveJob | undefined> {
 }
 async function setActiveJob(job?: ActiveJob): Promise<void> {
   assertSwitchOperationCurrent()
+  // Clicks happen only while signing in; detach once the job ends, pauses for the user, or moves tabs.
+  if (!job || job.tabId !== debuggerTabId || job.stage === "paused" || job.stage === "store") await detachSwitchDebugger()
   if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job })
   else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
 }
@@ -1238,25 +1267,42 @@ async function getJobRecords(job: ActiveJob): Promise<{ store: StoreRecord; cred
   return { store, credential }
 }
 
+/** The login tab the debugger stays attached to between clicks; attaching costs a round trip per step. */
+let debuggerTabId: number | undefined
+
 async function withJobDebugger<T>(
   job: ActiveJob,
   action: (target: chrome.debugger.Debuggee) => Promise<T>,
 ): Promise<T> {
   const target = { tabId: job.tabId }
-  let attached = false
   try {
     assertSwitchOperationCurrent()
     const tab = await chrome.tabs.get(job.tabId)
     if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com" || !new URL(tab.url).pathname.startsWith("/ap/")) throw new Error("The login tab has navigated away.")
-    await chrome.debugger.attach(target, "1.3")
-    attached = true
+    if (debuggerTabId !== job.tabId) {
+      await detachSwitchDebugger()
+      try {
+        await chrome.debugger.attach(target, "1.3")
+      } catch (error) {
+        // A restarted service worker forgets a session Chrome still holds for this tab.
+        if (!String((error as Error)?.message ?? error).includes("already attached")) throw error
+      }
+      debuggerTabId = job.tabId
+    }
     assertSwitchOperationCurrent()
     return await action(target)
-  } finally {
-    if (attached) {
-      try { await chrome.debugger.detach(target) } catch { /* already detached */ }
-    }
+  } catch (error) {
+    await detachSwitchDebugger()
+    throw error
   }
+}
+
+/** Ends the switch's debugging session, and with it Chrome's debugging bar. */
+async function detachSwitchDebugger(): Promise<void> {
+  const tabId = debuggerTabId
+  if (tabId === undefined) return
+  debuggerTabId = undefined
+  try { await chrome.debugger.detach({ tabId }) } catch { /* already detached */ }
 }
 
 function requireMasterPassword(value: unknown): string {
@@ -1279,31 +1325,36 @@ async function startSignInSwitch(store: StoreRecord, sender: chrome.runtime.Mess
   let tabId: number | undefined
   try {
     assertSwitchOperationCurrent()
-    const helper = await chrome.windows.create({ url: "about:blank", type: "normal", focused: false, incognito })
-    helperWindowId = helper?.id
-    if (helperWindowId === undefined) throw new Error("Chrome did not create the sign-in window.")
-    tabId = helper?.tabs?.[0]?.id ?? (await chrome.tabs.query({ windowId: helperWindowId }))[0]?.id
-    if (tabId === undefined) throw new Error("Chrome did not create the login tab.")
     const job: ActiveJob = {
       id: crypto.randomUUID(),
-      tabId,
+      tabId: -1,
       storeId: store.id,
       storeName: store.name,
       stage: sameCredential ? "store" : "logout",
       startedAt: Date.now(),
       ownsTab: true,
-      helperWindowId,
       returnWindowId: original.id,
       ...(sender.tab?.id === undefined ? {} : { sourceTabId: sender.tab.id }),
       incognito,
       signIn: !sameCredential,
     }
+    // Without sign-in there is nothing to hide: load the store once, in the user's own tab.
+    if (!sameCredential || !await moveJobToUserTab(job)) {
+      const helper = await chrome.windows.create({ url: "about:blank", type: "normal", focused: false, incognito })
+      helperWindowId = helper?.id
+      if (helperWindowId === undefined) throw new Error("Chrome did not create the sign-in window.")
+      tabId = helper?.tabs?.[0]?.id ?? (await chrome.tabs.query({ windowId: helperWindowId }))[0]?.id
+      if (tabId === undefined) throw new Error("Chrome did not create the login tab.")
+      job.tabId = tabId
+      job.helperWindowId = helperWindowId
+    }
     await setActiveJob(job)
     await chrome.storage.session.remove(SWITCH_NOTICE_KEY)
     if (!sameCredential) await setCurrentStoreId(undefined)
     assertSwitchOperationCurrent()
-    await chrome.tabs.update(tabId, { url: sameCredential ? store.storeUrl : LOGOUT_URL })
-    jobLog(job).info("account.switch.start", { store: store.name, path: sameCredential ? "same-credential" : "sign-in", tab: "helper-window" })
+    if (sameCredential) await chrome.tabs.update(job.tabId, { url: store.storeUrl })
+    else void queueVaultOperation(() => signOutWithoutPages(job.id)).catch((error) => jobLog(job).warn("account.switch.signOutFailed", { error: describeError(error) }))
+    jobLog(job).info("account.switch.start", { store: store.name, path: sameCredential ? "same-credential" : "sign-in", tab: job.ownsTab ? "helper-window" : "user" })
     return { ok: true, jobId: job.id }
   } catch (error) {
     if (tabId !== undefined) try { await chrome.tabs.remove(tabId) } catch { /* best effort */ }
@@ -1522,14 +1573,20 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
         return { ok: true, value: credential.password }
       }
       if (message.kind === "otp") {
-        const parsed = parseOtpAuthUri(credential.otpAuthUri)
-        const remaining = parsed.period - (Math.floor(Date.now() / 1000) % parsed.period)
-        if (remaining <= 5) {
-          jobLog(job).info("account.switch.otpWait", { waitMs: (remaining + 1) * 1000 })
-          return { ok: true, waitMs: (remaining + 1) * 1000 }
+        // Submit at once, even late in a time step: RFC 6238 verifiers accept the previous step.
+        // A rejected code is retried once with a later step's code, never the same one.
+        const attempts = job.otpAttempts ?? 0
+        if (attempts >= MAX_OTP_CODES || (message.retry === true && attempts === 0)) {
+          throw new Error("Amazon rejected the verification code. Check the saved authenticator key or this computer's clock.")
         }
+        const { period } = parseOtpAuthUri(credential.otpAuthUri)
+        const current = Math.floor(Date.now() / 1000 / period)
+        const counter = job.otpCounter === undefined ? current : Math.max(current, job.otpCounter + 1)
+        if (message.retry === true) jobLog(job).warn("account.switch.otpRetry", { ...jobContext(job), stepsAhead: counter - current })
+        job.otpCounter = counter
+        job.otpAttempts = attempts + 1
         await setJobStage(job, "otp")
-        return { ok: true, value: await generateTotp(credential.otpAuthUri) }
+        return { ok: true, value: await generateTotp(credential.otpAuthUri, counter * period * 1000) }
       }
       throw new Error("Unknown credential stage.")
     }
@@ -1565,17 +1622,13 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
     }
     case "ACCOUNT_AUTOMATION_LEAVE_LOGOUT": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      if ((job.resumeStage ?? job.stage) !== "logout") return { ok: true }
+      if ((job.resumeStage ?? job.stage) !== "logout" || sender.url === job.signOutFallbackFrom) return { ok: true }
       await advanceLogoutToSignIn(job)
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_COMPLETE": {
       const job = await assertWorkflowSender(sender, message.jobId)
-      if ((job.resumeStage ?? job.stage) === "store") return { ok: true }
-      const { store } = await getJobRecords(job)
-      job.storeNavigationDocumentId = sender.documentId
-      await setJobStage(job, "store")
-      await chrome.tabs.update(job.tabId, { url: store.storeUrl })
+      await openStoreAfterSignIn(job, sender.url, sender.documentId)
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_STORE_READY": {
@@ -1587,8 +1640,9 @@ async function handleAccountsMessageNow(message: Record<string, unknown>, sender
       if ((job.resumeStage ?? job.stage) !== "store" || !new URL(sender.url!).pathname.startsWith("/ap/")) throw new Error("Unexpected sign-in step.")
       await setCurrentStoreId(undefined)
       job.signIn = true
+      job.otpAttempts = 0
       await setJobStage(job, "signin")
-      await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
+      await chrome.tabs.update(job.tabId, { url: signInUrlFor((await getJobRecords(job)).store.storeUrl) })
       return { ok: true }
     }
     case "ACCOUNT_AUTOMATION_ERROR": {
@@ -1609,8 +1663,10 @@ function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
   let exit = logoutExits.get(job.id)
   if (!exit) {
     exit = (async () => {
+      const { store } = await getJobRecords(job)
       await setJobStage(job, "signin")
-      await chrome.tabs.update(job.tabId, { url: SIGN_IN_URL })
+      // Returning straight to the store skips loading Seller Central's home page after sign-in.
+      await chrome.tabs.update(job.tabId, { url: signInUrlFor(store.storeUrl) })
     })()
     exit.catch(() => logoutExits.delete(job.id))
     logoutExits.set(job.id, exit)
@@ -1618,24 +1674,251 @@ function advanceLogoutToSignIn(job: ActiveJob): Promise<void> {
   return exit
 }
 
+/** Browser identity and solved-CAPTCHA cookies; keeping them avoids new-device checks and repeat CAPTCHAs. */
+const SIGN_OUT_KEPT_COOKIES = new Set(["ubid-main", "session-id", "session-id-time", "i18n-prefs", "lc-main", "sp-cdn", "x-amz-captcha-1", "x-amz-captcha-2"])
+/**
+ * The cookies that keep Amazon signed in (seen live on 2026-10-25); all on .amazon.com except __Host-mselc.
+ * Sign-in also restored the session from cookies Seller Central never sends, such as sso-cd-state on
+ * .account.amazon.com, so sign-out deletes every cookie on the sign-in hosts, not just these.
+ */
+const SESSION_COOKIES = ["at-main", "sess-at-main", "sst-main", "x-main", "session-token", "sso-state-main", "__Host-mselc"]
+/**
+ * Sites besides amazon.com itself whose cookies can restore a sign-in: Seller Central, and Amazon's
+ * single sign-on (its sso-cd-state did, live). Other Amazon sites keep their cookies, so a switch does
+ * not sign the user out of them.
+ */
+const SIGN_IN_COOKIE_SITES = ["sellercentral.amazon.com", "account.amazon.com"]
+/** Every cookie the sign-in flow sends lives under one of these; /ap/ adds signin-sso-state-us. */
+const SELLER_CENTRAL_COOKIE_URLS = [SELLER_CENTRAL_HOME_URL, "https://sellercentral.amazon.com/ap/signin"]
+
+/**
+ * Signs out without loading Amazon's sign-out pages: drop the session's cookies and open sign-in.
+ * A background sign-out request would also end it on Amazon's side, but live it took over 1.5 s and
+ * its redirects can land on sign-in and race the helper's own sign-in cookies. Falls back to the sign-out page if any of that is unavailable.
+ */
+async function signOutWithoutPages(jobId: string): Promise<void> {
+  const job = await getActiveJob()
+  if (!job || job.id !== jobId || job.stage !== "logout") return
+  try {
+    if (await clearSessionWithoutPages(job)) await advanceLogoutToSignIn(job)
+    else await chrome.tabs.update(job.tabId, { url: LOGOUT_URL })
+  } catch (error) {
+    // The switch never got going: end it rather than leave its helper window behind.
+    if (operationGeneration === vaultGeneration && operationSwitchGeneration === switchGeneration) {
+      await setActiveJob(undefined)
+      await closeOwnedSwitchTab(job)
+    }
+    throw error
+  }
+}
+
+/**
+ * Clears the session through the debugger: chrome.cookies only lists hosts the extension may access,
+ * which hides every .amazon.com session cookie. Returns false, leaving it to the sign-out page, when
+ * that fails or any session cookie survives.
+ */
+async function clearSessionWithoutPages(job: ActiveJob): Promise<boolean> {
+  const startedAt = Date.now()
+  try {
+    const { deleted, left, untouched } = await withTabDebugger(job.tabId, async (target) => {
+      const before = await amazonCookies(target)
+      const deleted = before.filter(isSignOutCookie)
+      await Promise.all(deleted.map(({ name, domain, path }) => chrome.debugger.sendCommand(target, "Network.deleteCookies", { name, domain, path })))
+      const left = (await amazonCookies(target)).filter(isSignOutCookie)
+      return { deleted, left, untouched: before.filter((cookie) => !onSignInHost(cookie)) }
+    })
+    assertSwitchOperationCurrent()
+    jobLog(job).info("account.switch.signedOut", {
+      ...jobContext(job),
+      deleted: deleted.length,
+      // Other Amazon sites, by host only: their cookies stay, so the user stays signed in there.
+      untouchedHosts: [...new Set(untouched.map(cookieHost))].sort(),
+      // Session cookies that ignored deletion; any means the sign-out page must finish the job.
+      left: describeJar(left),
+      sessionLeft: SESSION_COOKIES.filter((name) => left.some((cookie) => cookie.name === name)),
+      ms: Date.now() - startedAt,
+    })
+    if (left.length > 0) return false
+    job.cookieSignOut = true
+    signInTrail = { tabId: job.tabId, hops: [] }
+    return true
+  } catch (error) {
+    assertSwitchOperationCurrent()
+    jobLog(job).warn("account.switch.cookieSignOutUnavailable", { ...jobContext(job), error: describeError(error) })
+    return false
+  }
+}
+
+type JarEntry = { name: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; session?: boolean; sameSite?: string }
+
+/**
+ * Every Amazon cookie in the tab's profile, on any host or path, so diagnostics also show the sites
+ * sign-out leaves alone. Falls back to what Seller Central sends.
+ */
+async function amazonCookies(target: chrome.debugger.Debuggee): Promise<JarEntry[]> {
+  let all: JarEntry[]
+  try {
+    all = ((await chrome.debugger.sendCommand(target, "Network.getAllCookies")) as { cookies?: JarEntry[] } | undefined)?.cookies ?? []
+  } catch {
+    all = ((await chrome.debugger.sendCommand(target, "Network.getCookies", { urls: SELLER_CENTRAL_COOKIE_URLS })) as { cookies?: JarEntry[] } | undefined)?.cookies ?? []
+  }
+  return all.filter((cookie) => /(?:^|\.)amazon\.com$/u.test(cookieHost(cookie)))
+}
+
+/** The site a cookie belongs to, without a domain cookie's leading dot. */
+function cookieHost(cookie: JarEntry): string {
+  return cookie.domain.replace(/^\./u, "")
+}
+
+/** On amazon.com itself or a sign-in site, where a cookie can restore the old session. */
+function onSignInHost(cookie: JarEntry): boolean {
+  const host = cookieHost(cookie)
+  return host === "amazon.com" || SIGN_IN_COOKIE_SITES.some((site) => host === site || host.endsWith(`.${site}`))
+}
+
+/** Sign-out deletes every cookie on the sign-in hosts except browser identity and solved CAPTCHAs. */
+function isSignOutCookie(cookie: JarEntry): boolean {
+  return onSignInHost(cookie) && !SIGN_OUT_KEPT_COOKIES.has(cookie.name)
+}
+
+/** Reuses the switch's debugger session, or attaches just for `action`, so its debugging bar only flashes. */
+async function withTabDebugger<T>(tabId: number, action: (target: chrome.debugger.Debuggee) => Promise<T>): Promise<T> {
+  const target = { tabId }
+  const attachedHere = debuggerTabId !== tabId
+  if (attachedHere) await chrome.debugger.attach(target, "1.3")
+  try {
+    return await action(target)
+  } finally {
+    if (attachedHere) try { await chrome.debugger.detach(target) } catch { /* already detached */ }
+  }
+}
+
+/**
+ * Diagnostics: cookies by name and scope only, never values: name|domain+path|h(ttpOnly)s(ecure)x(session)|sameSite,
+ * plus the expiry of session cookies, which shows whether one was set again after sign-out.
+ */
+function describeJar(entries: JarEntry[]): string[] {
+  return entries.map((entry) => `${entry.name}|${entry.domain}${entry.path}|${entry.httpOnly ? "h" : ""}${entry.secure ? "s" : ""}${entry.session ? "x" : ""}|${entry.sameSite ?? ""}`
+    + (SESSION_COOKIES.includes(entry.name) && entry.expires && entry.expires > 0 ? `|exp=${Math.round(entry.expires)}` : "")).sort()
+}
+
+/** Log entries are size-capped, so long lists go out in parts. */
+function logJar(job: ActiveJob, phase: string, jar: string[]): void {
+  for (let start = 0; start < Math.max(jar.length, 1); start += 25) {
+    jobLog(job).info("account.switch.signOutJar", { phase, part: start / 25 + 1, count: jar.length, entries: jar.slice(start, start + 25) })
+  }
+}
+
+/** Diagnostics: where the sign-in tab went after a cookie sign-out (host and path only), until sign-in is decided. */
+let signInTrail: { tabId: number; hops: string[] } | undefined
+
+function recordSignInHop(tabId: number, value: string | undefined): void {
+  if (!value || signInTrail?.tabId !== tabId || signInTrail.hops.length >= 20) return
+  try {
+    const url = new URL(value)
+    signInTrail.hops.push(`${url.host}${url.pathname}`)
+  } catch { /* not a URL */ }
+}
+
+/** Sign-in went straight back to Seller Central, so Amazon still knows the old session: sign out properly. */
+async function fallBackToSignOutPage(job: ActiveJob, landedUrl: string): Promise<void> {
+  const hops = signInTrail?.tabId === job.tabId ? signInTrail.hops : []
+  signInTrail = undefined
+  jobLog(job).warn("account.switch.cookieSignOutFallback", { ...jobContext(job), landed: new URL(landedUrl).pathname, hops })
+  try {
+    logJar(job, "fallback", describeJar(await withTabDebugger(job.tabId, amazonCookies)))
+  } catch (error) {
+    jobLog(job).warn("account.switch.signOutJarFailed", { error: describeError(error) })
+  }
+  job.cookieSignOut = false
+  job.signOutFallbackFrom = landedUrl
+  logoutExits.delete(job.id)
+  await setJobStage(job, "logout")
+  await chrome.tabs.update(job.tabId, { url: LOGOUT_URL })
+}
+
+/**
+ * Sign-in is done once Amazon redirects back to Seller Central. Load the store once, where it
+ * belongs: in the user's own tab when one is open (closing the helper), else in the helper,
+ * which may already be on it.
+ */
+async function openStoreAfterSignIn(job: ActiveJob, landedUrl?: string, documentId?: string): Promise<void> {
+  if ((job.resumeStage ?? job.stage) === "store") return
+  signInTrail = undefined
+  const { store } = await getJobRecords(job)
+  const helperTabId = job.tabId
+  const handedOff = await moveJobToUserTab(job)
+  const onStore = !handedOff && isStorePage(landedUrl, store.storeUrl)
+  // The document that was showing cannot also confirm a store navigation in the same tab.
+  if (!onStore) job.storeNavigationDocumentId = documentId
+  delete job.cookieSignOut
+  await setJobStage(job, "store")
+  if (!onStore) await chrome.tabs.update(job.tabId, { url: store.storeUrl })
+  // Closing its only tab closes the helper window; the user's tab now carries the switch.
+  if (handedOff) try { await chrome.tabs.remove(helperTabId) } catch { /* already closed */ }
+  jobLog(job).info("account.switch.signedIn", { ...jobContext(job), tab: handedOff ? "user" : onStore ? "landed" : "helper" })
+}
+
+/** Amazon may append its own parameters; the store is open when its path and saved parameters match. */
+function isStorePage(value: string | undefined, storeUrl: string): boolean {
+  if (!value) return false
+  try {
+    const landed = new URL(value)
+    const store = new URL(storeUrl)
+    return landed.origin === store.origin && landed.pathname === store.pathname
+      && [...store.searchParams].every(([key, expected]) => landed.searchParams.get(key) === expected)
+  } catch {
+    return false
+  }
+}
+
+const CREDENTIAL_STAGES = new Set<ActiveJob["stage"]>(["email", "password", "otp"])
+
 async function handleAccountTabUpdatedNow(
   tabId: number,
   changeInfo: { status?: string; url?: string },
   tab: chrome.tabs.Tab,
 ): Promise<void> {
-  if (changeInfo.status !== "complete") return
   const job = await getActiveJob()
-  if (!job || job.tabId !== tabId || job.stage !== "logout") return
+  if (!job || job.tabId !== tabId) return
+  if (job.stage === "logout") {
+    // Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
+    if (isLogoutExitEvent(changeInfo, tab)) await advanceLogoutToSignIn(job)
+    return
+  }
+  const landed = landedSellerCentralPage(changeInfo, tab)
+  if (!landed) return
+  if (job.stage === "signin" && job.cookieSignOut) await fallBackToSignOutPage(job, landed)
+  // Its URL commits before the page loads: hand off now instead of waiting for it to render.
+  else if (CREDENTIAL_STAGES.has(job.stage)) await openStoreAfterSignIn(job, landed)
+}
 
+/** A committed Seller Central page outside sign-in and sign-out. */
+function landedSellerCentralPage(changeInfo: { status?: string; url?: string }, tab: chrome.tabs.Tab): string | undefined {
+  const value = changeInfo.url ?? (changeInfo.status === "complete" ? tab.url : undefined)
+  if (!value) return undefined
+  try {
+    const url = new URL(value)
+    if (url.origin !== "https://sellercentral.amazon.com" || url.pathname.startsWith("/ap/") || url.pathname.startsWith("/sign-out")) return undefined
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Sign-out has finished once its redirect commits an /ap/ page: leave right then instead of loading
+ * Amazon's logout re-auth page. A /sign-out document itself is left once it has loaded.
+ */
+function isLogoutExitEvent(changeInfo: { status?: string; url?: string }, tab: chrome.tabs.Tab): boolean {
+  if (changeInfo.status !== "complete" && changeInfo.status !== "loading" && !changeInfo.url) return false
   const currentUrl = changeInfo.url ?? tab.url
-  if (!currentUrl || currentUrl === "about:blank") return
+  if (!currentUrl || currentUrl === "about:blank") return false
   let url: URL
-  try { url = new URL(currentUrl) } catch { return }
-  if (url.hostname !== "sellercentral.amazon.com") return
-  if (!url.pathname.startsWith("/ap/") && !url.pathname.startsWith("/sign-out")) return
-
-  // Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
-  await advanceLogoutToSignIn(job)
+  try { url = new URL(currentUrl) } catch { return false }
+  if (url.hostname !== "sellercentral.amazon.com") return false
+  if (url.pathname.startsWith("/ap/")) return true
+  return url.pathname.startsWith("/sign-out") && changeInfo.status === "complete"
 }
 
 export async function handleAccountTabUpdated(
@@ -1643,7 +1926,7 @@ export async function handleAccountTabUpdated(
   changeInfo: { status?: string; url?: string },
   tab: chrome.tabs.Tab,
 ): Promise<void> {
-  if (changeInfo.status !== "complete") return
+  if (!isLogoutExitEvent(changeInfo, tab) && !landedSellerCentralPage(changeInfo, tab)) return
   const generation = vaultGeneration
   const switchVersion = switchGeneration
   try {
@@ -1741,7 +2024,12 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     if (!type.startsWith("ACCOUNT")) return undefined
     return respond(type, storageReady.then(() => handleAccountsMessage(record, sender)), sendResponse, "Account operation failed.")
   })
+  // The user can end the session from Chrome's debugging bar; the next click reattaches.
+  chrome.debugger?.onDetach?.addListener((source) => {
+    if (source.tabId === debuggerTabId) debuggerTabId = undefined
+  })
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    recordSignInHop(tabId, changeInfo.url)
     if (changeInfo.status === "loading" || changeInfo.url) void revokeResultsForTab(tabId)
     void handleAccountTabUpdated(tabId, changeInfo, tab).catch(() => log.warn("account.switch.navigationFailed"))
   })
