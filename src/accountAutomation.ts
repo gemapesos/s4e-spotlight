@@ -10,6 +10,7 @@ const RETRY_DELAY_MS = 5_000
 const MAX_ATTEMPTS = 2
 const STEP_TIMEOUT_MS = 90_000
 const CAPTCHA_TEXT_SCAN_INTERVAL_MS = 3_000
+const PAGE_CHANGE_DEBOUNCE_MS = 100
 let lastCaptchaTextScanAt = 0
 let lastCaptchaTextScanResult = false
 let runTimer: number | undefined
@@ -17,6 +18,11 @@ let waitingForLoad = false
 let reportedWaitingPath: string | null = null
 let manualSignIn = false
 let stalledHiddenStage: string | null = null
+let otpRetryRequested = false
+let running = false
+let rerunRequested = false
+let pageObserver: MutationObserver | undefined
+let lastPageSignature = ""
 const automationLog = createLogger("automation")
 
 const EMAIL_INPUT_SELECTORS = ["#ap_email", 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="username"]']
@@ -45,8 +51,67 @@ function scheduleRun(delayMs: number): void {
   if (runTimer !== undefined) window.clearTimeout(runTimer)
   runTimer = window.setTimeout(() => {
     runTimer = undefined
-    void run()
+    void runExclusive()
   }, delayMs)
+}
+
+/** Page changes can request a run mid-step; queue it so a step never fills or submits twice. */
+async function runExclusive(): Promise<void> {
+  if (running) {
+    rerunRequested = true
+    return
+  }
+  running = true
+  try {
+    await run()
+  } finally {
+    running = false
+  }
+  if (rerunRequested) {
+    rerunRequested = false
+    scheduleRun(0)
+  }
+}
+
+/** What the workflow branches on; a change means Amazon moved on and the step should run now. */
+function pageSignature(): string {
+  return [
+    document.readyState,
+    location.pathname,
+    Boolean(input(EMAIL_INPUT_SELECTORS)),
+    Boolean(input(PASSWORD_INPUT_SELECTORS)),
+    Boolean(input(OTP_INPUT_SELECTORS)),
+    Boolean(document.querySelector(CAPTCHA_SELECTOR)),
+    hasAuthError(),
+    hasAuthenticatedSellerUi(),
+  ].join()
+}
+
+/** Reacts to Amazon's page changes instead of waiting out the fallback timers. Only runs during a switch. */
+function watchPage(): void {
+  lastPageSignature = pageSignature()
+  if (pageObserver) return
+  let queued = false
+  pageObserver = new MutationObserver(() => {
+    if (queued) return
+    queued = true
+    window.setTimeout(() => {
+      queued = false
+      if (pageSignature() !== lastPageSignature) scheduleRun(0)
+    }, PAGE_CHANGE_DEBOUNCE_MS)
+  })
+  pageObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden"] })
+  document.addEventListener("readystatechange", onReadyStateChange)
+}
+
+function onReadyStateChange(): void {
+  scheduleRun(0)
+}
+
+function stopWatchingPage(): void {
+  pageObserver?.disconnect()
+  pageObserver = undefined
+  document.removeEventListener("readystatechange", onReadyStateChange)
 }
 
 function setWorkflowStatus(text: string, tone: "normal" | "error" = "normal"): void {
@@ -184,8 +249,10 @@ function markStageSubmitted(stage: string): void {
   scheduleRun(RETRY_DELAY_MS)
 }
 
+const CAPTCHA_SELECTOR = 'iframe[src*="captcha" i], input[name*="captcha" i], #captchacharacters'
+
 function hasCaptcha(): boolean {
-  if (document.querySelector('iframe[src*="captcha" i], input[name*="captcha" i], #captchacharacters')) {
+  if (document.querySelector(CAPTCHA_SELECTOR)) {
     return true
   }
   const now = Date.now()
@@ -230,14 +297,9 @@ function shouldCompleteAuthenticatedSession(stage: string): boolean {
   return stage !== "logout" && stage !== "signin"
 }
 
-async function requestSecret(jobId: string, kind: "email" | "password" | "otp"): Promise<string | null> {
-  const response = await send({ type: "ACCOUNT_AUTOMATION_SECRET", jobId, kind })
+async function requestSecret(jobId: string, kind: "email" | "password" | "otp", retry = false): Promise<string | null> {
+  const response = await send({ type: "ACCOUNT_AUTOMATION_SECRET", jobId, kind, ...(retry ? { retry } : {}) })
   if (!response.ok) throw new Error(response.error ?? "The saved account details are unavailable.")
-  if (response.waitMs) {
-    setWorkflowStatus("Waiting for a fresh verification code…")
-    scheduleRun(response.waitMs)
-    return null
-  }
   return response.value ?? null
 }
 
@@ -273,9 +335,11 @@ async function run(): Promise<void> {
   const response = await send({ type: "ACCOUNT_AUTOMATION_GET_JOB" })
   const job = response.job
   if (!response.ok || !job) {
+    stopWatchingPage()
     clearWorkflowStatus()
     return
   }
+  watchPage()
   const stage = job.resumeStage ?? job.stage
 
   try {
@@ -295,7 +359,11 @@ async function run(): Promise<void> {
         const ready = await send({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id })
         if (!ready.ok) throw new Error(ready.error ?? "Couldn’t finish the store switch.")
         if (ready.waitMs) scheduleRun(ready.waitMs)
-        else clearWorkflowStatus()
+        else {
+          // The user keeps working in this tab; stop reacting to its page changes.
+          stopWatchingPage()
+          clearWorkflowStatus()
+        }
         return
       }
       if (location.pathname.startsWith("/ap/") && (input(EMAIL_INPUT_SELECTORS) || input(PASSWORD_INPUT_SELECTORS) || input(OTP_INPUT_SELECTORS))) {
@@ -315,7 +383,10 @@ async function run(): Promise<void> {
       } else scheduleRun(1500)
       return
     }
-    if (hasAuthError()) {
+    // A rejected verification code gets one retry with a later code; any other rejection stops.
+    const authError = hasAuthError()
+    const otpRetry = authError && !otpRetryRequested && Boolean(input(OTP_INPUT_SELECTORS))
+    if (authError && !otpRetry) {
       await failWorkflow(job.id, "Amazon rejected the login details. Review the page or edit the saved account.")
       return
     }
@@ -365,8 +436,9 @@ async function run(): Promise<void> {
     const otp = input(OTP_INPUT_SELECTORS)
     if (otp) {
       if (!prepareStage("otp", "Amazon’s verification-code button did not advance the login.")) return
-      setWorkflowStatus("Generating and entering a fresh verification code…")
-      const value = await requestSecret(job.id, "otp")
+      setWorkflowStatus(otpRetry ? "Retrying with the next verification code…" : "Generating and entering a fresh verification code…")
+      if (otpRetry) otpRetryRequested = true
+      const value = await requestSecret(job.id, "otp", otpRetry)
       if (!value) return
       fill(otp, value)
       const submit = button(["#auth-signin-button", 'input[type="submit"]', 'button[type="submit"]'], /sign in|submit|continue/iu)
@@ -395,5 +467,20 @@ async function run(): Promise<void> {
   }
 }
 
-if (typeof chrome !== "undefined" && chrome.runtime?.id) setLogSink(forwardLogsToBackground())
-void run()
+/**
+ * The background confirms a login document is still open before releasing credentials. This script
+ * starts at document_end, before content.js (document_idle) can answer, so it answers that check itself.
+ * Other messages are left to content.js: answering them here would win the reply.
+ */
+export function handleResumeCheck(message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void): undefined {
+  if ((message as { type?: unknown } | null)?.type !== "ACCOUNTS_RESUME_CHECK") return undefined
+  if (sender.id !== chrome.runtime.id || sender.tab || (sender.url && sender.url !== chrome.runtime.getURL("background.js"))) return undefined
+  sendResponse({ ok: true })
+  return undefined
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime?.id) {
+  setLogSink(forwardLogsToBackground())
+  chrome.runtime.onMessage?.addListener(handleResumeCheck)
+}
+void runExclusive()
