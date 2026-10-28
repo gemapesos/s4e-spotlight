@@ -2,7 +2,6 @@ import * as React from "react"
 import type { LucideIcon } from "lucide-react"
 import {
   Building2,
-  CircleAlert,
   Clock,
   FileJson,
   FileSpreadsheet,
@@ -10,25 +9,12 @@ import {
   LogIn,
   Package,
   PackageMinus,
-  Settings,
   Truck,
 } from "lucide-react"
 
-import { Alert, AlertDescription } from "@/components/ui/alert"
 import { CancelButton, PrimaryButton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
-import {
-  CommandDialog,
-  CommandEmpty,
-  CommandFooter,
-  CommandGroup,
-  CommandHeader,
-  CommandHint,
-  CommandInput,
-  CommandItem,
-  CommandList,
-  CommandSeparator,
-} from "@/components/ui/command"
+import { CommandDialog, CommandFooter, CommandHeader, CommandHint } from "@/components/ui/command"
 import { Spinner } from "@/components/ui/spinner"
 import { extractCaseIds, findCaseIds } from "@/lib/caseIds"
 import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"
@@ -43,7 +29,12 @@ import {
 import { extractRemovalOrderIds, findRemovalOrderIds } from "@/lib/removalOrderIds"
 import { extractShipmentIds, findShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds, findSkuIds } from "@/lib/skuIds"
-import { SWITCH_STAGE_LABELS, SwitchScreen } from "@/SwitchProgress"
+import { SwitchScreen } from "@/SwitchProgress"
+import { ErrorAlert, Notice } from "@/palette/parts"
+import { AccountsScreen } from "@/palette/screens/AccountsScreen"
+import { CommandsScreen } from "@/palette/screens/CommandsScreen"
+import { IdentifierScreen } from "@/palette/screens/IdentifierScreen"
+import { RemovalSummary } from "@/palette/screens/RemovalSummary"
 import { MAX_BULK_IDS, type AccountsStatus, type AccountStoreSummary, type ActiveSwitchSummary, type BulkRemovalSummary } from "@/shared/messages"
 
 export type PaletteMode =
@@ -63,7 +54,7 @@ export type PaletteMode =
   /** Opened by the extension on the tab a switch reloaded. */
   | "switch-done"
 /** Removal orders have no screen of their own; they're only opened from the Detected row. */
-type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "bulk-removal" | "removal-order-ids"
+export type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "bulk-removal" | "removal-order-ids"
 /** Commands that open or read Seller Central pages, so they need a signed-in store. */
 type SignInCommand = IdentifierMode | "generate-reports" | "scrape-case"
 
@@ -85,9 +76,7 @@ const SCREEN_DEPTH: Record<PaletteMode, number> = {
   "switch-done": 2,
 }
 /** Detected IDs shown as chips under the input; the rest are counted. */
-const MAX_ID_CHIPS = 12
-
-interface InputModeDefinition {
+export interface InputModeDefinition {
   ariaLabel: string
   description: string
   extractIds: (input: string) => string[]
@@ -111,16 +100,6 @@ interface InputModeDefinition {
 
 function isIdentifierInputMode(mode: PaletteMode): mode is Extract<IdentifierMode, PaletteMode> {
   return mode === "case-ids" || mode === "shipment-ids" || mode === "sku-ids" || mode === "bulk-removal"
-}
-
-function identifierActionLabel(count: number, noun: string, verb = "Open"): string {
-  if (count === 0) return verb
-  return `${verb} ${count} ${noun}${count === 1 ? "" : "s"}`
-}
-
-function detectedIdentifierLabel(noun: string, ids: string[]): string {
-  if (ids.length === 1) return `Open ${noun} ${ids[0]}`
-  return `Open ${ids.length} ${noun} IDs`
 }
 
 export interface CommandDefinition {
@@ -739,15 +718,6 @@ export function CommandPalette({
     </span>
   ) : null
 
-  const errorAlert = (id?: string) => error ? (
-    <Alert className="mx-1.5 mb-1.5 w-auto" id={id} variant="destructive">
-      <CircleAlert aria-hidden="true" />
-      <AlertDescription>{error}</AlertDescription>
-    </Alert>
-  ) : null
-
-  const currentStoreLabel = `Current store: ${currentStore?.name ?? "Unknown"}`
-
   const primaryAction = (label: React.ReactNode, onClick: () => void, options: { autoFocus?: boolean; disabled?: boolean } = {}) => (
     <PrimaryButton
       autoFocus={options.autoFocus}
@@ -763,19 +733,6 @@ export function CommandPalette({
     <CancelButton disabled={submitting} onClick={onClick} type="button" />
   )
 
-  /** A question or notice with an icon tile, used by the confirmation screens. */
-  const notice = (Icon: LucideIcon, heading: string, body: React.ReactNode, role: "alert" | "status" = "status") => (
-    <div className="flex gap-3 px-4 py-5" role={role}>
-      <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-[0.5rem] bg-muted text-foreground/80">
-        <Icon className="size-4" />
-      </span>
-      <div className="flex flex-col gap-1">
-        <p className="m-0 text-base leading-6 font-medium">{heading}</p>
-        <p className="m-0 text-sm text-muted-foreground">{body}</p>
-      </div>
-    </div>
-  )
-
   return (
     <div className="palette-scope">
       <CommandDialog
@@ -789,241 +746,60 @@ export function CommandPalette({
         title={title}
       >
         {mode === "commands" ? <>
-          <CommandInput
-            autoFocus
-            aria-label="Search commands"
-            disabled={submitting}
-            onValueChange={(value) => { setCommandSearch(value); setError(null) }}
-            placeholder="Type a command, ID or store…"
-            value={commandSearch}
+          <CommandsScreen
+            accountsEnabled={accountsEnabled}
+            accountsLoaded={accountsLoaded}
+            busy={busy}
+            chooseStore={chooseStore}
+            commandSearch={commandSearch}
+            currentStore={currentStore}
+            detectedCaseIds={detectedCaseIds}
+            detectedRemovalOrderIds={detectedRemovalOrderIds}
+            detectedShipmentIds={detectedShipmentIds}
+            error={error}
+            hasDetectedIds={hasDetectedIds}
+            matchedStores={matchedStores}
+            onCommandSearchChange={(value) => { setCommandSearch(value); setError(null) }}
+            selectCommand={selectCommand}
+            showSkuFallback={showSkuFallback}
+            skuFallbackQuery={skuFallbackQuery}
+            submitIdBatch={submitIdBatch}
+            submitting={submitting}
+            visibleGroups={visibleGroups}
           />
-          <CommandList aria-label="Commands">
-            {hasDetectedIds || showSkuFallback || matchedStores.length > 0 ? null : (
-              <CommandEmpty>No results found.</CommandEmpty>
-            )}
-            {hasDetectedIds ? (
-              <>
-                <CommandGroup forceMount heading="Detected">
-                  {detectedCaseIds.length > 0 ? (
-                    <CommandItem
-                      disabled={submitting}
-                      forceMount
-                      keywords={detectedCaseIds}
-                      onSelect={() => submitIdBatch("case-ids", detectedCaseIds)}
-                      selectedHint="↵"
-                      value={detectedIdentifierLabel("case", detectedCaseIds)}
-                    >
-                      <FolderOpen aria-hidden="true" />
-                      <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("case", detectedCaseIds)}</span>
-                    </CommandItem>
-                  ) : null}
-                  {detectedShipmentIds.length > 0 ? (
-                    <CommandItem
-                      disabled={submitting}
-                      forceMount
-                      keywords={detectedShipmentIds}
-                      onSelect={() => submitIdBatch("shipment-ids", detectedShipmentIds)}
-                      selectedHint="↵"
-                      value={detectedIdentifierLabel("shipment", detectedShipmentIds)}
-                    >
-                      <Truck aria-hidden="true" />
-                      <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("shipment", detectedShipmentIds)}</span>
-                    </CommandItem>
-                  ) : null}
-                  {detectedRemovalOrderIds.length > 0 ? (
-                    <CommandItem
-                      disabled={submitting}
-                      forceMount
-                      keywords={detectedRemovalOrderIds}
-                      onSelect={() => submitIdBatch("removal-order-ids", detectedRemovalOrderIds)}
-                      selectedHint="↵"
-                      value={detectedIdentifierLabel("removal order", detectedRemovalOrderIds)}
-                    >
-                      <PackageMinus aria-hidden="true" />
-                      <span className="min-w-0 flex-1 truncate">{detectedIdentifierLabel("removal order", detectedRemovalOrderIds)}</span>
-                    </CommandItem>
-                  ) : null}
-                </CommandGroup>
-                <CommandSeparator alwaysRender />
-              </>
-            ) : null}
-            {matchedStores.length > 0 ? (
-              <>
-                <CommandGroup forceMount heading="Stores">
-                  {matchedStores.map((store) => (
-                    <CommandItem
-                      key={store.id}
-                      data-checked={currentStore?.id === store.id || undefined}
-                      disabled={submitting}
-                      end={currentStore?.id === store.id ? <CurrentBadge /> : null}
-                      forceMount
-                      keywords={[store.name]}
-                      onSelect={() => void chooseStore(store)}
-                      selectedHint={currentStore?.id === store.id ? undefined : "↵"}
-                      value={`Switch to ${store.name}`}
-                    >
-                      <Building2 aria-hidden="true" />
-                      <span className="min-w-0 flex-1 truncate">{store.name}</span>
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-                <CommandSeparator alwaysRender />
-              </>
-            ) : null}
-            {showSkuFallback ? (
-              <>
-                <CommandGroup forceMount heading="Search">
-                  <CommandItem
-                    disabled={submitting}
-                    forceMount
-                    keywords={[skuFallbackQuery]}
-                    onSelect={() => submitIdBatch("sku-ids", [skuFallbackQuery])}
-                    selectedHint="↵"
-                    value={`Search '${skuFallbackQuery}' as SKU`}
-                  >
-                    <Package aria-hidden="true" />
-                    <span className="min-w-0 flex-1 truncate">Search '{skuFallbackQuery}' as SKU</span>
-                  </CommandItem>
-                </CommandGroup>
-              </>
-            ) : null}
-            {visibleGroups.map((group, index) => (
-              <React.Fragment key={group.heading}>
-                {index ? <CommandSeparator /> : null}
-                <CommandGroup heading={group.heading}>
-                  {group.commands.map((command) => {
-                    const Icon = command.icon
-                    return (
-                      <CommandItem
-                        key={command.id}
-                        disabled={submitting}
-                        external={command.external}
-                        keywords={[...command.keywords]}
-                        onSelect={() => selectCommand(command.id)}
-                        selectedHint={command.external ? undefined : "↵"}
-                        value={command.label}
-                      >
-                        <Icon aria-hidden="true" />
-                        <span className="min-w-0 flex-1 truncate">{command.label}</span>
-                      </CommandItem>
-                    )
-                  })}
-                </CommandGroup>
-              </React.Fragment>
-            ))}
-          </CommandList>
-          {errorAlert()}
-          <CommandFooter
-            end={<>
-              <CommandHint keys={["↑", "↓"]}>Navigate</CommandHint>
-              <CommandHint keys={["↵"]}>Select</CommandHint>
-              <CommandHint keys={["esc"]}>{commandSearch ? "Clear" : "Close"}</CommandHint>
-            </>}
-          >
-            {busy ?? (accountsEnabled && accountsLoaded && currentStore ? (
-              <span aria-label={currentStoreLabel} className="inline-flex min-w-0 items-center gap-1.5" role="status">
-                <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-foreground" />
-                <span className="truncate">{currentStore.name}</span>
-              </span>
-            ) : null)}
-          </CommandFooter>
         </> : mode === "accounts" ? <>
-          <CommandHeader backDisabled={submitting} divider={false} onBack={returnToCommands}>
-            <CommandInput
-              autoFocus
-              aria-label="Search accounts"
-              compact
-              disabled={submitting}
-              onValueChange={(value) => { setAccountSearch(value); setError(null) }}
-              placeholder="Search stores…"
-              value={accountSearch}
-            />
-          </CommandHeader>
-          <p aria-label={currentStoreLabel} className="sr-only" role="status">{currentStoreLabel}</p>
-          {activeSwitch ? (
-            <div className="mx-1.5 mt-0.5 mb-1.5 flex items-center gap-2.5 rounded-[0.625rem] bg-muted py-2.5 pr-2.5 pl-3" role="status">
-              <Spinner aria-hidden="true" className="text-foreground/70" role="presentation" />
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate font-medium">{activeSwitch.stage === "paused" ? "Needs attention" : `Switching to ${activeSwitch.storeName}`}</span>
-                <span className="truncate text-xs leading-4 text-muted-foreground">{activeSwitch.attentionMessage ?? SWITCH_STAGE_LABELS[activeSwitch.stage] ?? activeSwitch.stage}</span>
-              </div>
-              <button
-                className="h-7 shrink-0 rounded-[0.375rem] bg-background px-2.5 text-xs leading-4 font-medium text-foreground ring-1 ring-foreground/10 transition-colors hover:bg-muted disabled:opacity-50"
-                disabled={submitting}
-                onClick={() => void handleSwitchAction("focus")}
-                type="button"
-              >
-                Show sign-in
-              </button>
-              <button
-                className="h-7 shrink-0 rounded-[0.375rem] px-2.5 text-xs leading-4 font-medium text-destructive transition-colors hover:bg-background/60 disabled:opacity-50"
-                disabled={submitting}
-                onClick={() => void handleSwitchAction("cancel")}
-                type="button"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : null}
-          <CommandList aria-label="Accounts" className="pt-0">
-            <CommandEmpty>No matching stores.</CommandEmpty>
-            <CommandGroup heading="Stores">
-              {stores.map((store) => {
-                const current = currentStore?.id === store.id
-                const switching = activeSwitch?.storeId === store.id
-                return (
-                  <CommandItem
-                    key={store.id}
-                    data-checked={current || undefined}
-                    disabled={submitting}
-                    end={current ? <CurrentBadge /> : switching ? <span className="text-xs leading-4 font-normal text-muted-foreground">Switching…</span> : null}
-                    onSelect={() => void chooseStore(store)}
-                    value={store.name}
-                  >
-                    <Building2 aria-hidden="true" />
-                    <span className="min-w-0 flex-1 truncate">{store.name}</span>
-                  </CommandItem>
-                )
-              })}
-              {stores.length === 0 ? (
-                <div className="py-6 text-center text-sm text-muted-foreground">No stores configured.</div>
-              ) : null}
-            </CommandGroup>
-            <CommandSeparator />
-            <CommandGroup>
-              <CommandItem disabled={submitting} external onSelect={() => void manageAccounts()} value="Manage accounts">
-                <Settings aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate">Manage accounts</span>
-              </CommandItem>
-            </CommandGroup>
-          </CommandList>
-          {errorAlert()}
-          <CommandFooter
-            end={<>
-              <CommandHint keys={["↵"]}>Switch</CommandHint>
-              <CommandHint keys={["esc"]}>{accountSearch ? "Clear" : "Back"}</CommandHint>
-            </>}
-          >
-            {busy}
-          </CommandFooter>
+          <AccountsScreen
+            accountSearch={accountSearch}
+            activeSwitch={activeSwitch}
+            busy={busy}
+            chooseStore={chooseStore}
+            currentStore={currentStore}
+            error={error}
+            handleSwitchAction={handleSwitchAction}
+            manageAccounts={manageAccounts}
+            onAccountSearchChange={(value) => { setAccountSearch(value); setError(null) }}
+            returnToCommands={returnToCommands}
+            stores={stores}
+            submitting={submitting}
+          />
         </> : mode === "unlock" ? <>
           <CommandHeader backDisabled={submitting} onBack={() => { setMode("accounts"); setError(null) }} parent="Switch store" title="Unlock" />
           <p className="m-0 px-4 py-5 text-sm text-muted-foreground">Unlock in the S4E Spotlight window, where no web page can read your master password. The switch to {selectedStore?.name} then continues on its own.</p>
-          {errorAlert("unlock-error")}
+          <ErrorAlert error={error} id="unlock-error" />
           <CommandFooter action end={primaryAction(submitting ? "Opening window…" : "Unlock accounts", () => void unlockAndStart(), { autoFocus: true })}>
             <CommandHint keys={["esc"]}>Back</CommandHint>
           </CommandFooter>
         </> : mode === "confirm-ids" ? <>
           <CommandHeader backDisabled={submitting} onBack={() => { setMode(confirmBackMode); setError(null) }} parent={inputMode.title} title="Confirm" />
-          {notice(
-            identifierMode === "shipment-ids" ? Truck
+          <Notice
+            body="Opening this many tabs can slow the browser for a few seconds."
+            heading={`Open ${pendingIds.length} ${inputMode.noun} tabs in the background?`}
+            icon={identifierMode === "shipment-ids" ? Truck
               : identifierMode === "sku-ids" ? Package
               : identifierMode === "removal-order-ids" ? PackageMinus
-              : FolderOpen,
-            `Open ${pendingIds.length} ${inputMode.noun} tabs in the background?`,
-            "Opening this many tabs can slow the browser for a few seconds.",
-          )}
-          {errorAlert()}
+              : FolderOpen}
+          />
+          <ErrorAlert error={error} />
           <CommandFooter action end={<>
             {cancelAction(() => setMode(confirmBackMode))}
             {primaryAction(
@@ -1035,7 +811,7 @@ export function CommandPalette({
         </> : mode === "removal-summary" ? <>
           <CommandHeader backDisabled={submitting} onBack={() => { setMode("bulk-removal"); setError(null) }} parent="Bulk removal" title="Summary" />
           <RemovalSummary summary={removalSummary} />
-          {errorAlert()}
+          <ErrorAlert error={error} />
           <CommandFooter action end={removalSummary?.openedCount
             ? primaryAction(submitting ? "Opening…" : "Go to removal", () => void goToRemoval(), { autoFocus: true })
             : primaryAction("Edit SKUs", () => setMode("bulk-removal"), { autoFocus: true })}>
@@ -1052,15 +828,15 @@ export function CommandPalette({
           />
         ) : mode === "sign-in" ? <>
           <CommandHeader backDisabled={submitting} onBack={leaveSignIn} parent={signInTitle} title="Sign in" />
-          {notice(
-            LogIn,
-            "Sign in to a Seller Central store",
-            accountsEnabled
+          <Notice
+            body={accountsEnabled
               ? `${signInTitle} needs a signed-in store. Switch to one of your stores, or sign in on Seller Central, then try again.`
-              : `${signInTitle} needs a signed-in store. Sign in on Seller Central, then try again.`,
-            "alert",
-          )}
-          {errorAlert()}
+              : `${signInTitle} needs a signed-in store. Sign in on Seller Central, then try again.`}
+            heading="Sign in to a Seller Central store"
+            icon={LogIn}
+            role="alert"
+          />
+          <ErrorAlert error={error} />
           <CommandFooter action end={accountsEnabled ? <>
             <Button
               className="mr-1 rounded-[0.5rem] bg-background px-3 text-foreground ring-1 ring-foreground/10 hover:bg-muted dark:bg-input/30 dark:hover:bg-input/50"
@@ -1076,128 +852,22 @@ export function CommandPalette({
             <CommandHint keys={["esc"]}>Back</CommandHint>
           </CommandFooter>
         </> : <>
-          <CommandHeader backDisabled={submitting} onBack={returnToCommands} parent="Commands" title={inputMode.title} />
-          <div className="flex flex-col gap-2.5 px-3 pt-3 pb-2">
-            <label className="text-xs leading-4 font-medium text-muted-foreground" htmlFor="s4e-spotlight-identifier-input">
-              {inputMode.label}
-            </label>
-            <textarea
-              ref={identifierInputRef}
-              aria-describedby={error ? "identifier-input-error" : "identifier-input-count"}
-              aria-invalid={Boolean(error)}
-              aria-label={inputMode.ariaLabel}
-              className="identifier-input scroll-fade no-scrollbar h-32 w-full resize-none rounded-[0.625rem] border border-input bg-transparent px-3 py-2.5 font-mono text-[0.8125rem] leading-5 text-foreground outline-none placeholder:font-sans placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/35 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:bg-input/30"
-              data-fade-mask={fadeMask}
-              disabled={submitting}
-              id="s4e-spotlight-identifier-input"
-              placeholder={inputMode.placeholder}
-              value={identifierInput}
-              onChange={(event) => { setIdentifierInput(event.target.value); setError(null) }}
-              onScroll={updateFadeMask}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return
-                if (event.shiftKey || event.nativeEvent.isComposing) {
-                  event.stopPropagation()
-                  return
-                }
-                event.preventDefault()
-                event.stopPropagation()
-                submitIdentifiers()
-              }}
-            />
-            {currentIds.length > 0 ? (
-              <ul aria-label={`Detected ${inputMode.unit}s`} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
-                {currentIds.slice(0, MAX_ID_CHIPS).map((id) => (
-                  <li
-                    key={id}
-                    className="inline-flex h-[1.375rem] max-w-full animate-in items-center truncate rounded-full bg-muted px-2 font-mono text-xs leading-4 text-foreground/80 fade-in-0 zoom-in-90 duration-150 motion-reduce:animate-none"
-                  >
-                    {id}
-                  </li>
-                ))}
-                {currentIds.length > MAX_ID_CHIPS ? (
-                  <li className="inline-flex h-[1.375rem] items-center px-2 text-xs leading-4 text-muted-foreground">
-                    +{currentIds.length - MAX_ID_CHIPS} more
-                  </li>
-                ) : null}
-                {duplicateIds > 0 ? (
-                  <li className="inline-flex h-[1.375rem] items-center px-2 text-xs leading-4 text-muted-foreground">
-                    {duplicateIds} duplicate{duplicateIds === 1 ? "" : "s"} ignored
-                  </li>
-                ) : null}
-              </ul>
-            ) : null}
-          </div>
-          {errorAlert("identifier-input-error")}
-          <p aria-live="polite" className="sr-only" id="identifier-input-count">
-            {currentIds.length} unique {inputMode.unit}{currentIds.length === 1 ? "" : "s"}
-          </p>
-          <CommandFooter
-            action
-            end={primaryAction(
-              submitting ? inputMode.busyLabel ?? "Opening…" : identifierActionLabel(currentIds.length, inputMode.noun, inputMode.verb),
-              submitIdentifiers,
-              { disabled: currentIds.length === 0 },
-            )}
-          >
-            <CommandHint keys={["⇧↵"]}>New line</CommandHint>
-            <CommandHint keys={["esc"]}>Clear, then back</CommandHint>
-          </CommandFooter>
+          <IdentifierScreen
+            currentIds={currentIds}
+            duplicateIds={duplicateIds}
+            error={error}
+            fadeMask={fadeMask}
+            identifierInput={identifierInput}
+            identifierInputRef={identifierInputRef}
+            inputMode={inputMode}
+            onIdentifierInputChange={(value) => { setIdentifierInput(value); setError(null) }}
+            returnToCommands={returnToCommands}
+            submitIdentifiers={submitIdentifiers}
+            submitting={submitting}
+            updateFadeMask={updateFadeMask}
+          />
         </>}
       </CommandDialog>
     </div>
-  )
-}
-
-function RemovalSummary({ summary }: { summary: BulkRemovalSummary | null }) {
-  if (!summary) return null
-  const { openedCount, skipped, nextRemovalOrderId, eligibilityUnknown } = summary
-  const Icon = openedCount ? PackageMinus : CircleAlert
-  return (
-    <div className="flex flex-col gap-3 px-4 py-4">
-      <div className="flex gap-3" role={openedCount ? "status" : "alert"}>
-        <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-[0.5rem] bg-muted text-foreground/80">
-          <Icon className="size-4" />
-        </span>
-        <div className="flex flex-col gap-1">
-          <p className="m-0 text-base leading-6 font-medium">
-            {openedCount ? `Opened a removal for ${openedCount} SKU${openedCount === 1 ? "" : "s"}` : "No SKUs can be removed"}
-          </p>
-          <p className="m-0 text-sm text-muted-foreground">
-            {openedCount
-              ? "Choose the method, address and quantities on Amazon’s Create removal order page, then review it."
-              : "Nothing was opened."}
-            {eligibilityUnknown ? " Amazon didn’t confirm eligibility for every SKU; its form checks them again." : null}
-          </p>
-        </div>
-      </div>
-      {nextRemovalOrderId ? (
-        <div className="flex items-center justify-between gap-3 rounded-[0.625rem] bg-muted px-3 py-2">
-          <span className="text-xs leading-4 text-muted-foreground">Next removal order ID</span>
-          <span className="font-mono text-sm font-medium select-all">{nextRemovalOrderId}</span>
-        </div>
-      ) : null}
-      {skipped.length ? (
-        <div className="flex flex-col gap-1.5">
-          <p className="m-0 text-xs leading-4 font-medium text-muted-foreground">Skipped {skipped.length} SKU{skipped.length === 1 ? "" : "s"}</p>
-          <ul aria-label="Skipped SKUs" className="no-scrollbar m-0 flex max-h-36 list-none flex-col gap-1 overflow-y-auto p-0">
-            {skipped.map(({ sku, reason }) => (
-              <li key={sku} className="flex min-w-0 gap-2 text-sm">
-                <span className="shrink-0 font-mono text-foreground/80">{sku}</span>
-                <span className="min-w-0 truncate text-muted-foreground" title={reason}>{reason}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function CurrentBadge() {
-  return (
-    <span className="inline-flex h-5 items-center rounded-full px-2 text-xs leading-4 font-medium text-foreground/70 ring-1 ring-border ring-inset">
-      Current
-    </span>
   )
 }
