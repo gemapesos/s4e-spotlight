@@ -2012,7 +2012,12 @@ async function handleAccountTabUpdatedNow(
   tab: chrome.tabs.Tab,
 ): Promise<void> {
   const job = await getActiveJob()
-  if (!job || job.tabId !== tabId) return
+  // A sign-out or sign-in the extension did not run may change the store, and the URL cannot tell which.
+  if (!job) {
+    if (isLogoutExitEvent(changeInfo, tab)) await setCurrentStoreId(undefined)
+    return
+  }
+  if (job.tabId !== tabId) return
   if (job.stage === "logout") {
     // Always leave Amazon's logout intercept (return_to=sign-out) for the canonical sign-in URL.
     if (isLogoutExitEvent(changeInfo, tab)) await advanceLogoutToSignIn(job)

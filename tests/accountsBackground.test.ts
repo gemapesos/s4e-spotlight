@@ -313,6 +313,17 @@ describe("Accounts background workflow", () => {
     expect(update).toHaveBeenCalledWith(91, { url: STORE_SIGN_IN_URL })
   })
 
+  it("forgets the current store when someone signs out by hand outside a switch", async () => {
+    local[CURRENT_STORE_KEY] = "store"
+
+    await handleAccountTabUpdated(12, { status: "complete" }, { id: 12, url: "https://sellercentral.amazon.com/amazonsell/business" } as chrome.tabs.Tab)
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
+
+    const logout = "https://sellercentral.amazon.com/ap/signin?openid.mode=logout"
+    await handleAccountTabUpdated(12, { status: "loading", url: logout }, { id: 12, url: logout } as chrome.tabs.Tab)
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+  })
+
   it("leaves sign-out as soon as its redirect commits, without loading the logout re-auth page", async () => {
     await createActiveJob()
     update.mockClear()
