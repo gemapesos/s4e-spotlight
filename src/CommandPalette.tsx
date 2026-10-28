@@ -52,6 +52,9 @@ export type PaletteMode =
   | "case-ids"
   | "shipment-ids"
   | "sku-ids"
+  | "bulk-removal"
+  /** What Bulk removal opened and skipped. */
+  | "removal-summary"
   | "confirm-ids"
   | "accounts"
   | "unlock"
@@ -61,7 +64,7 @@ export type PaletteMode =
   /** Opened by the extension on the tab a switch reloaded. */
   | "switch-done"
 /** Removal orders have no screen of their own; they're only opened from the Detected row. */
-type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "removal-order-ids"
+type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "bulk-removal" | "removal-order-ids"
 /** Commands that open or read Seller Central pages, so they need a signed-in store. */
 type SignInCommand = IdentifierMode | "generate-reports" | "scrape-case"
 
@@ -74,7 +77,9 @@ const SCREEN_DEPTH: Record<PaletteMode, number> = {
   "case-ids": 1,
   "shipment-ids": 1,
   "sku-ids": 1,
+  "bulk-removal": 1,
   accounts: 1,
+  "removal-summary": 2,
   "confirm-ids": 2,
   "sign-in": 2,
   unlock: 2,
@@ -97,18 +102,22 @@ interface InputModeDefinition {
   label: string
   noun: string
   placeholder: string
-  submit: (ids: string[]) => Promise<void> | void
+  /** Resolves "stay" when the submit moved to another screen instead of finishing. */
+  submit: (ids: string[]) => Promise<void | "stay"> | void
   title: string
   unit: string
+  /** The action button's verb; defaults to Open. */
+  verb?: string
+  busyLabel?: string
 }
 
 function isIdentifierInputMode(mode: PaletteMode): mode is Extract<IdentifierMode, PaletteMode> {
-  return mode === "case-ids" || mode === "shipment-ids" || mode === "sku-ids"
+  return mode === "case-ids" || mode === "shipment-ids" || mode === "sku-ids" || mode === "bulk-removal"
 }
 
-function identifierActionLabel(count: number, noun: string): string {
-  if (count === 0) return "Open"
-  return `Open ${count} ${noun}${count === 1 ? "" : "s"}`
+function identifierActionLabel(count: number, noun: string, verb = "Open"): string {
+  if (count === 0) return verb
+  return `${verb} ${count} ${noun}${count === 1 ? "" : "s"}`
 }
 
 function detectedIdentifierLabel(noun: string, ids: string[]): string {
@@ -166,6 +175,7 @@ export const commandGroups: ReadonlyArray<{
       { id: "scrape-case", label: "Scrape case", icon: FileJson, keywords: ["case", "cases", "scrape", "json", "export", "replies", "thread"] },
       { id: "open-shipment-ids", label: "Open shipment IDs", icon: Truck, keywords: ["shipment", "shipments", "fba", "inbound", "transfer"] },
       { id: "search-skus", label: "Search SKUs", icon: Package, keywords: ["sku", "skus", "asin", "msku", "listing", "product"] },
+      { id: "bulk-removal", label: "Bulk removal", icon: PackageMinus, keywords: ["removal", "remove", "dispose", "liquidate", "unfulfillable", "sku", "skus", "msku"] },
       { id: "time-out", label: "Open Time Out", icon: Clock, keywords: ["timeout", "time", "sheet", "form", "break"], external: true },
     ],
   },
@@ -178,6 +188,14 @@ export const commandGroups: ReadonlyArray<{
     commands: [{ id: "accounts", label: "Switch store", icon: Building2, keywords: ["account", "store", "stores", "switch", "login"] }],
   },
 ] as const
+
+export interface BulkRemovalSummary {
+  openedCount: number
+  skipped: Array<{ sku: string; reason: string }>
+  nextRemovalOrderId: string | null
+  /** Amazon didn't report eligibility for some SKUs, so they were included unchecked. */
+  eligibilityUnknown: boolean
+}
 
 export interface ReportsPrepareResult {
   loggedInToStore: boolean
@@ -197,6 +215,9 @@ export interface CommandPaletteProps {
   onOpenShipmentIds: (shipmentIds: string[]) => Promise<void> | void
   onOpenRemovalOrderIds?: (removalOrderIds: string[]) => Promise<void> | void
   onOpenSkuIds?: (skuIds: string[]) => Promise<void> | void
+  /** Bulk removal: opens Create removal order in the background with the removable SKUs. */
+  onCreateBulkRemoval?: (skus: string[]) => Promise<BulkRemovalSummary>
+  onFocusBulkRemoval?: () => Promise<void>
   onGetAccountsStatus?: () => Promise<AccountsStatus>
   onUnlockAccounts?: (storeId: string) => Promise<void>
   onStartAccountSwitch?: (storeId: string) => Promise<void>
@@ -225,6 +246,8 @@ export function CommandPalette({
   onOpenShipmentIds,
   onOpenRemovalOrderIds = async () => undefined,
   onOpenSkuIds = async () => undefined,
+  onCreateBulkRemoval = async () => ({ openedCount: 0, skipped: [], nextRemovalOrderId: null, eligibilityUnknown: false }),
+  onFocusBulkRemoval = async () => undefined,
   onGetAccountsStatus = defaultGetAccountsStatus,
   onUnlockAccounts = async () => undefined,
   onStartAccountSwitch = async () => undefined,
@@ -245,6 +268,7 @@ export function CommandPalette({
   const [accountSearch, setAccountSearch] = React.useState("")
   const [identifierInput, setIdentifierInput] = React.useState(initialIdentifierInput)
   const [pendingIds, setPendingIds] = React.useState<string[]>([])
+  const [removalSummary, setRemovalSummary] = React.useState<BulkRemovalSummary | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [submitting, setSubmitting] = React.useState(false)
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
@@ -321,7 +345,27 @@ export function CommandPalette({
       title: "Search SKUs",
       unit: "SKU",
     },
-  }), [onOpenCaseIds, onOpenRemovalOrderIds, onOpenShipmentIds, onOpenSkuIds])
+    "bulk-removal": {
+      ariaLabel: "SKUs to remove",
+      description: "Enter SKUs to open Amazon’s Create removal order page with the removable ones filled in.",
+      extractIds: extractSkuIds,
+      failureError: "Couldn’t create the removal. Please try again.",
+      findIds: findSkuIds,
+      invalidError: "Enter at least one SKU.",
+      label: "Paste the SKUs to remove, one per line",
+      noun: "SKU",
+      placeholder: "Paste SKUs, one per line…",
+      submit: async (skus) => {
+        setRemovalSummary(await onCreateBulkRemoval(skus))
+        setMode("removal-summary")
+        return "stay" as const
+      },
+      title: "Bulk removal",
+      unit: "SKU",
+      verb: "Create removal for",
+      busyLabel: "Checking eligibility…",
+    },
+  }), [onCreateBulkRemoval, onOpenCaseIds, onOpenRemovalOrderIds, onOpenShipmentIds, onOpenSkuIds])
   const inputMode = inputModes[identifierMode]
   const confirmBackMode: PaletteMode = identifierMode === "removal-order-ids" ? "commands" : identifierMode
 
@@ -377,6 +421,7 @@ export function CommandPalette({
       setAccountSearch("")
       setIdentifierInput("")
       setPendingIds([])
+      setRemovalSummary(null)
       setError(null)
       setSubmitting(false)
       setStatusMessage(null)
@@ -452,7 +497,7 @@ export function CommandPalette({
     setError(null)
     setSubmitting(true)
     try {
-      await definition.submit(ids)
+      if (await definition.submit(ids) === "stay") return setSubmitting(false)
       close()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : definition.failureError)
@@ -486,7 +531,8 @@ export function CommandPalette({
     if (ids.length > MAX_BULK_IDS) return setError(`Open no more than ${MAX_BULK_IDS} IDs at a time.`)
     void confirmSignedIn(target, mode).then((signedIn) => {
       if (!signedIn) return
-      if (ids.length > CONFIRM_THRESHOLD) {
+      // Bulk removal opens a single tab, so it needs no confirmation.
+      if (ids.length > CONFIRM_THRESHOLD && target !== "bulk-removal") {
         setSubmitting(false)
         setPendingIds(ids)
         setMode("confirm-ids")
@@ -605,6 +651,11 @@ export function CommandPalette({
       setMode("sku-ids")
       return
     }
+    if (commandId === "bulk-removal") {
+      setIdentifierMode("bulk-removal")
+      setMode("bulk-removal")
+      return
+    }
     if (commandId === "generate-reports") {
       // The window can't do anything signed out, so ask here instead of opening it.
       void confirmSignedIn("generate-reports", "commands").then((signedIn) => {
@@ -633,6 +684,18 @@ export function CommandPalette({
       setError(caught instanceof Error ? caught.message : "Couldn’t update the account switch.")
     } finally { setSubmitting(false) }
   }, [onCancelAccountSwitch, onFocusAccountSwitch])
+
+  const goToRemoval = React.useCallback(async () => {
+    setError(null)
+    setSubmitting(true)
+    try {
+      await onFocusBulkRemoval()
+      close()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Couldn’t open the removal tab.")
+      setSubmitting(false)
+    }
+  }, [close, onFocusBulkRemoval])
 
   const returnToCommands = React.useCallback(() => {
     setMode("commands")
@@ -671,6 +734,7 @@ export function CommandPalette({
       return setMode("commands")
     }
     if (mode === "confirm-ids") return setMode(confirmBackMode)
+    if (mode === "removal-summary") return setMode("bulk-removal")
     if (mode === "sign-in") return leaveSignIn()
     if (mode === "unlock") {
       return setMode("accounts")
@@ -690,6 +754,7 @@ export function CommandPalette({
       description: `Unlock to switch to ${selectedStore?.name ?? "the selected store"}.`,
     },
     "confirm-ids": { title: "Confirm bulk open", description: `Open ${pendingIds.length} ${inputMode.noun} tabs.` },
+    "removal-summary": { title: "Bulk removal", description: "What the removal included and skipped." },
     "sign-in": {
       title: signInTitle,
       description: `Sign in to a Seller Central store to use ${signInTitle}.`,
@@ -1001,6 +1066,15 @@ export function CommandPalette({
               { autoFocus: true },
             )}
           </>} />
+        </> : mode === "removal-summary" ? <>
+          <CommandHeader backDisabled={submitting} onBack={() => { setMode("bulk-removal"); setError(null) }} parent="Bulk removal" title="Summary" />
+          <RemovalSummary summary={removalSummary} />
+          {errorAlert()}
+          <CommandFooter action end={removalSummary?.openedCount
+            ? primaryAction(submitting ? "Opening…" : "Go to removal", () => void goToRemoval(), { autoFocus: true })
+            : primaryAction("Edit SKUs", () => setMode("bulk-removal"), { autoFocus: true })}>
+            <CommandHint keys={["esc"]}>Back</CommandHint>
+          </CommandFooter>
         </> : mode === "switching" || mode === "switch-done" ? (
           <SwitchScreen
             doneStoreName={mode === "switch-done" ? switchedStoreName ?? currentStore?.name ?? "the selected store" : undefined}
@@ -1095,7 +1169,7 @@ export function CommandPalette({
           <CommandFooter
             action
             end={primaryAction(
-              submitting ? "Opening…" : identifierActionLabel(currentIds.length, inputMode.noun),
+              submitting ? inputMode.busyLabel ?? "Opening…" : identifierActionLabel(currentIds.length, inputMode.noun, inputMode.verb),
               submitIdentifiers,
               { disabled: currentIds.length === 0 },
             )}
@@ -1105,6 +1179,51 @@ export function CommandPalette({
           </CommandFooter>
         </>}
       </CommandDialog>
+    </div>
+  )
+}
+
+function RemovalSummary({ summary }: { summary: BulkRemovalSummary | null }) {
+  if (!summary) return null
+  const { openedCount, skipped, nextRemovalOrderId, eligibilityUnknown } = summary
+  const Icon = openedCount ? PackageMinus : CircleAlert
+  return (
+    <div className="flex flex-col gap-3 px-4 py-4">
+      <div className="flex gap-3" role={openedCount ? "status" : "alert"}>
+        <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-[0.5rem] bg-muted text-foreground/80">
+          <Icon className="size-4" />
+        </span>
+        <div className="flex flex-col gap-1">
+          <p className="m-0 text-base leading-6 font-medium">
+            {openedCount ? `Opened a removal for ${openedCount} SKU${openedCount === 1 ? "" : "s"}` : "No SKUs can be removed"}
+          </p>
+          <p className="m-0 text-sm text-muted-foreground">
+            {openedCount
+              ? "Choose the method, address and quantities on Amazon’s Create removal order page, then review it."
+              : "Nothing was opened."}
+            {eligibilityUnknown ? " Amazon didn’t confirm eligibility for every SKU; its form checks them again." : null}
+          </p>
+        </div>
+      </div>
+      {nextRemovalOrderId ? (
+        <div className="flex items-center justify-between gap-3 rounded-[0.625rem] bg-muted px-3 py-2">
+          <span className="text-xs leading-4 text-muted-foreground">Next removal order ID</span>
+          <span className="font-mono text-sm font-medium select-all">{nextRemovalOrderId}</span>
+        </div>
+      ) : null}
+      {skipped.length ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="m-0 text-xs leading-4 font-medium text-muted-foreground">Skipped {skipped.length} SKU{skipped.length === 1 ? "" : "s"}</p>
+          <ul aria-label="Skipped SKUs" className="no-scrollbar m-0 flex max-h-36 list-none flex-col gap-1 overflow-y-auto p-0">
+            {skipped.map(({ sku, reason }) => (
+              <li key={sku} className="flex min-w-0 gap-2 text-sm">
+                <span className="shrink-0 font-mono text-foreground/80">{sku}</span>
+                <span className="min-w-0 truncate text-muted-foreground" title={reason}>{reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   )
 }

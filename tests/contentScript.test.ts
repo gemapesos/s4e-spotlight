@@ -507,3 +507,20 @@ describe("palette host page", () => {
     }))
   })
 })
+
+describe("content script bulk removal", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("only checks SKUs for the background worker, and only on Seller Central", async () => {
+    const fetchImpl = vi.fn()
+    vi.stubGlobal("fetch", fetchImpl)
+    const rejected = vi.fn()
+    expect(handleContentMessage({ type: "BULK_REMOVAL_RESOLVE", skus: ["CC10"] }, { id: "test-extension", tab: { id: 3 } as chrome.tabs.Tab }, rejected)).toBeUndefined()
+    expect(rejected).toHaveBeenCalledWith({ ok: false, error: "Unauthorized extension message." })
+
+    const sendResponse = vi.fn()
+    expect(handleContentMessage({ type: "BULK_REMOVAL_RESOLVE", skus: ["CC10", 4] }, backgroundSender, sendResponse)).toBe(true)
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: "Open Seller Central, then try again." }))
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})

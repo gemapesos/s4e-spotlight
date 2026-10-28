@@ -27,6 +27,7 @@ const SCRIPT_SOURCES = {
   sellerCentralSession: "src/lib/sellerCentralSession.ts",
   accountAutomation: "src/accountAutomation.ts",
   unfulfillable: "src/lib/unfulfillable.ts",
+  bulkRemoval: "src/lib/bulkRemoval.ts",
   feedback: "src/lib/feedback.ts",
   stranded: "src/lib/stranded.ts",
   suppressed: "src/lib/suppressed.ts",
@@ -50,6 +51,7 @@ const CLASSIC_SCRIPTS: Record<string, readonly ScriptName[]> = {
     "shortcut",
     "sellerCentralSession",
     "unfulfillable",
+    "bulkRemoval",
     "feedback",
     "stranded",
     "suppressed",
@@ -66,6 +68,17 @@ const BACKGROUND_MODULES: Record<string, ScriptName> = {
   "lib/accounts.js": "accounts",
   "lib/settings.js": "settings",
   "lib/log.js": "log",
+}
+
+/** Static imports in compiled code, as written (type-only imports are already gone). */
+function staticImports(source: string): string[] {
+  return [...source.matchAll(/^import\s[^;]*?from\s*["']([^"']+)["']/gm)].map((match) => match[1])
+}
+
+/** The module a relative import names, or undefined when it isn't one of SCRIPT_SOURCES. */
+function importedScript(specifier: string): ScriptName | undefined {
+  const base = specifier.split("/").pop()?.replace(/\.(?:js|ts|tsx)$/u, "")
+  return base && Object.hasOwn(SCRIPT_SOURCES, base) ? base as ScriptName : undefined
 }
 
 function stripModuleSyntax(source: string): string {
@@ -115,6 +128,23 @@ function extensionScriptsPlugin(): Plugin {
         }),
       )
       const compiled = Object.fromEntries(entries) as Record<ScriptName, string>
+
+      // Nothing here is bundled, so a module missing from a list fails only when Chrome runs it.
+      for (const [fileName, names] of Object.entries(CLASSIC_SCRIPTS)) {
+        for (const name of names) {
+          for (const specifier of staticImports(compiled[name])) {
+            const imported = importedScript(specifier)
+            if (!imported || !names.includes(imported)) this.error(`${fileName}: ${name} imports “${specifier}”, which is not one of its CLASSIC_SCRIPTS modules.`)
+          }
+        }
+      }
+      const backgroundFiles = new Set(Object.keys(BACKGROUND_MODULES))
+      for (const [fileName, name] of Object.entries(BACKGROUND_MODULES)) {
+        for (const specifier of staticImports(compiled[name])) {
+          const target = resolve("/", fileName, "..", specifier).slice(1)
+          if (!backgroundFiles.has(target)) this.error(`${fileName} imports “${specifier}”, which is not emitted. Add it to BACKGROUND_MODULES.`)
+        }
+      }
 
       const classicScripts = Object.entries(CLASSIC_SCRIPTS).map(([fileName, names]) => {
         const modules = names.map((name) => ({ name, code: stripModuleSyntax(compiled[name]) }))

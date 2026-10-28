@@ -1,3 +1,4 @@
+import { resolveRemovalSkus } from "./lib/bulkRemoval"
 import { fetchNeutralNegativeFeedbacks } from "./lib/feedback"
 import {
   createLogger,
@@ -200,6 +201,20 @@ async function scrapeCasesFromPage(caseIds: readonly string[], runId?: string): 
   } finally { scope.release() }
 }
 
+async function resolveBulkRemovalFromPage(skus: readonly string[]): Promise<Record<string, unknown>> {
+  if (location.origin !== "https://sellercentral.amazon.com") return { ok: false, error: "Open Seller Central, then try again." }
+  const monitor = createRequestMonitor(globalThis.fetch, contentLog)
+  const done = contentLog.time("removal.resolve", { requested: skus.length })
+  try {
+    const resolution = await resolveRemovalSkus(skus, { fetch: monitor.fetch, log: contentLog })
+    done({ removable: resolution.items.length, skipped: resolution.skipped.length, requests: monitor.summary() })
+    return { ok: true, ...resolution }
+  } catch (error) {
+    done({ error: describeError(error), requests: monitor.summary() }, "error")
+    return { ok: false, error: errorMessage(error, "Couldn’t check removal eligibility.") }
+  }
+}
+
 async function runReportFetcher(fetcher: ReportFetcher, runId: string | undefined): Promise<Record<string, unknown>> {
   const log = contentLog.withRun(runId)
   const scope = reportFetchScope(runId)
@@ -227,7 +242,7 @@ export function handleContentMessage(
     sendResponse({ ok: false, error: "Unauthorized extension message." })
     return undefined
   }
-  const record = message as { type?: unknown; mode?: unknown; runId?: unknown; caseIds?: unknown; storeName?: unknown }
+  const record = message as { type?: unknown; mode?: unknown; runId?: unknown; caseIds?: unknown; skus?: unknown; storeName?: unknown }
   if (record.type === "ACCOUNTS_RESUME_CHECK") { sendResponse({ ok: true }); return }
   if (record.type === "ACCOUNTS_SWITCH_DONE") {
     const storeName = typeof record.storeName === "string" ? record.storeName : "the selected store"
@@ -249,6 +264,11 @@ export function handleContentMessage(
       ? record.caseIds.filter((id): id is string => typeof id === "string")
       : []
     void scrapeCasesFromPage(caseIds, typeof record.runId === "string" ? record.runId : undefined).then(sendResponse)
+    return true
+  }
+  if (record.type === "BULK_REMOVAL_RESOLVE") {
+    const skus = Array.isArray(record.skus) ? record.skus.filter((sku): sku is string => typeof sku === "string") : []
+    void resolveBulkRemovalFromPage(skus).then(sendResponse)
     return true
   }
   if (record.type === "OPEN_PALETTE") {

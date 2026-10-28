@@ -52,6 +52,8 @@ const SHIPMENT_URL = "https://sellercentral.amazon.com/fba/inbound-shipment/summ
 const REMOVAL_ORDER_URL = "https://sellercentral.amazon.com/recoveryui/removal-order/detail?sourceRemovalOrderId="
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm="
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
+/** Amazon's Unfulfillable page uses this redirect to open Create removal order with SKUs prefilled. */
+export const BULK_REMOVAL_URL = "https://sellercentral.amazon.com/recovery/requests/redirect/removal-order"
 const OPENID_SPEC = "http://specs.openid.net/auth/2.0"
 export const TIME_OUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1E7gfUVzy47vboZHOJ6xd8Jwx-1N6oewaVggrtI7G4yw/edit?gid=0#gid=0"
 export const LOGOUT_URL = "https://sellercentral.amazon.com/sign-out?ref_=xx_logout_dnav_xx"
@@ -124,6 +126,16 @@ export function buildCaseUrl(id: string): string { return `${CASE_URL}${id}` }
 export function buildShipmentUrl(id: string): string { return `${SHIPMENT_URL}${id}/contents` }
 export function buildRemovalOrderUrl(id: string): string { return `${REMOVAL_ORDER_URL}${encodeURIComponent(id)}` }
 export function buildSkuUrl(id: string): string { return `${SKU_URL}${encodeURIComponent(id)}${SKU_URL_SUFFIX}` }
+export function buildBulkRemovalUrl(items: ReadonlyArray<{ sku: string; asin: string; fnSku: string }>): string {
+  const params = new URLSearchParams()
+  items.forEach((item, index) => {
+    params.append(`mSku.${index}`, item.sku)
+    params.append(`fnSku.${index}`, item.fnSku)
+    params.append(`asin.${index}`, item.asin)
+  })
+  params.append("ref_", "myij_unf_cro_bulk_bktsz_1")
+  return `${BULK_REMOVAL_URL}?${params}`
+}
 export function buildTimeOutFormUrl(date: Date, values: TimeOutFormValues = DEFAULT_TIME_OUT_FORM_VALUES): string {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, "0")
@@ -956,9 +968,13 @@ function isReportFetchType(type: string): type is ReportFetchType {
 
 const CONTENT_SCRIPT_MISSING = /Receiving end does not exist/i
 
-/** Asks the Seller Central tab's content script for one report source, waiting for the script to load. */
-async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: string): Promise<Record<string, unknown>> {
-  const request = REPORT_REQUESTS[type]
+/** Sends a message to the Seller Central tab's content script, waiting for the script to load. */
+async function sendWhenContentScriptReady(
+  tabId: number,
+  message: Record<string, unknown>,
+  fallbackError: string,
+  onWaited: (attempts: number, ms: number) => void,
+): Promise<Record<string, unknown>> {
   const startedAt = Date.now()
   const deadline = startedAt + SESSION_PROBE_TIMEOUT_MS
   let lastError: string | undefined
@@ -966,13 +982,11 @@ async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: str
   while (Date.now() < deadline) {
     attempts += 1
     try {
-      const response = await chrome.tabs.sendMessage(tabId, runId ? { type, runId } : { type }, { frameId: 0 }) as
+      const response = await chrome.tabs.sendMessage(tabId, message, { frameId: 0 }) as
         Record<string, unknown> | undefined
-      if (attempts > 1) {
-        log.withRun(runId).info("report.contentScriptWait", { source: request.source, attempts, ms: Date.now() - startedAt })
-      }
-      if (response?.ok) return { ok: true, ...request.pick(response) }
-      throw new Error(typeof response?.error === "string" ? response.error : request.fallbackError)
+      if (attempts > 1) onWaited(attempts, Date.now() - startedAt)
+      if (response?.ok) return response
+      throw new Error(typeof response?.error === "string" ? response.error : fallbackError)
     } catch (error) {
       const message = errorMessage(error, String(error))
       if (!CONTENT_SCRIPT_MISSING.test(message)) throw error instanceof Error ? error : new Error(message)
@@ -980,7 +994,16 @@ async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: str
     }
     await sleep(SESSION_PROBE_INTERVAL_MS)
   }
-  throw new Error(lastError ?? request.fallbackError)
+  throw new Error(lastError ?? fallbackError)
+}
+
+/** Asks the Seller Central tab's content script for one report source. */
+async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: string): Promise<Record<string, unknown>> {
+  const request = REPORT_REQUESTS[type]
+  const response = await sendWhenContentScriptReady(tabId, runId ? { type, runId } : { type }, request.fallbackError, (attempts, ms) => {
+    log.withRun(runId).info("report.contentScriptWait", { source: request.source, attempts, ms })
+  })
+  return { ok: true, ...request.pick(response) }
 }
 
 async function fetchReportSource(type: ReportFetchType, senderTab?: chrome.tabs.Tab, authorizedTabId?: number, authorizedRunId?: string): Promise<Record<string, unknown>> {
@@ -1075,6 +1098,88 @@ export async function scrapeSellerCentralCases(
       errors: Array.isArray(file.errors) ? file.errors.length : 0,
     })
     return { ok: true, file: response.file }
+  } catch (error) {
+    done({ error: describeError(error) }, "error")
+    throw error
+  }
+}
+
+export interface BulkRemovalResponse {
+  ok: true
+  openedCount: number
+  skipped: Array<{ sku: string; reason: string }>
+  nextRemovalOrderId: string | null
+  eligibilityUnknown: boolean
+}
+
+function asRemovalItems(value: unknown): Array<{ sku: string; asin: string; fnSku: string }> {
+  return asArray(value).filter((item): item is { sku: string; asin: string; fnSku: string } => {
+    if (!item || typeof item !== "object") return false
+    const { sku, asin, fnSku } = item as Record<string, unknown>
+    return typeof sku === "string" && sku.length > 0 && typeof asin === "string" && asin.length > 0
+      && typeof fnSku === "string" && fnSku.length > 0
+  })
+}
+
+function asSkipped(value: unknown): BulkRemovalResponse["skipped"] {
+  return asArray(value).flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return []
+    const { sku, reason } = entry as Record<string, unknown>
+    return typeof sku === "string" && typeof reason === "string" ? [{ sku, reason }] : []
+  })
+}
+
+/** The Create removal order tab each palette tab opened last, so its summary can go to it. */
+const bulkRemovalTabs = new Map<number, number>()
+
+export async function focusBulkRemovalTab(senderTab?: chrome.tabs.Tab): Promise<{ ok: true }> {
+  const tabId = senderTab?.id === undefined ? undefined : bulkRemovalTabs.get(senderTab.id)
+  if (tabId === undefined) throw new Error("The removal tab is no longer open.")
+  try {
+    const tab = await chrome.tabs.update(tabId, { active: true })
+    if (tab?.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+  } catch {
+    bulkRemovalTabs.delete(senderTab!.id!)
+    throw new Error("The removal tab is no longer open.")
+  }
+  return { ok: true }
+}
+
+/**
+ * Checks the SKUs on a signed-in Seller Central tab and opens Create removal order in the
+ * background with the removable ones prefilled. The palette gets back only counts, the skipped
+ * SKUs and the next ID.
+ */
+export async function createBulkRemoval(
+  skus: unknown,
+  senderTab?: chrome.tabs.Tab,
+  createTab: CreateTab = createChromeTab,
+): Promise<BulkRemovalResponse> {
+  const ids = normalizeSkuIds(skus)
+  if (ids.length === 0) throw new Error("Enter at least one SKU.")
+  if (ids.length > MAX_BULK_IDS) throw new Error(`Remove no more than ${MAX_BULK_IDS} SKUs at a time.`)
+  if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
+  const done = log.time("removal.bulk", { requested: ids.length })
+  try {
+    const { tabId } = await ensureSellerCentralTab(senderTab, { focus: false })
+    await waitForTabComplete(tabId)
+    if (!await probeSellerCentralSession(tabId)) throw new Error(CASE_SCRAPE_SIGN_IN_ERROR)
+    const response = await sendWhenContentScriptReady(tabId, { type: "BULK_REMOVAL_RESOLVE", skus: ids }, "Couldn’t check removal eligibility.", () => undefined)
+    const items = asRemovalItems(response.items)
+    const skipped = asSkipped(response.skipped)
+    const nextRemovalOrderId = typeof response.nextRemovalOrderId === "string" && response.nextRemovalOrderId ? response.nextRemovalOrderId : null
+    const eligibilityUnknown = response.eligibilityUnknown === true
+    if (items.length > 0) {
+      const tab = await createTab({
+        url: buildBulkRemovalUrl(items),
+        active: false,
+        ...(senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }),
+        ...(senderTab?.index === undefined ? {} : { index: senderTab.index + 1 }),
+      })
+      if (senderTab?.id !== undefined && tab.id !== undefined) bulkRemovalTabs.set(senderTab.id, tab.id)
+    }
+    done({ opened: items.length, skipped: skipped.length, eligibilityUnknown })
+    return { ok: true, openedCount: items.length, skipped, nextRemovalOrderId, eligibilityUnknown }
   } catch (error) {
     done({ error: describeError(error) }, "error")
     throw error
@@ -2160,6 +2265,16 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     }
     if (type === "SELLER_CENTRAL_SESSION") {
       return respond(type, storageReady.then(() => checkSellerCentralSession(sender.tab)).then((session) => ({ ok: true, session })), sendResponse, "Couldn’t check Seller Central.")
+    }
+    if (type === "CREATE_BULK_REMOVAL") {
+      if (!sender.tab) {
+        sendResponse({ ok: false, error: "Open Bulk removal from the command palette." })
+        return undefined
+      }
+      return respond(type, storageReady.then(() => createBulkRemoval(record.skus, sender.tab)), sendResponse, "Couldn’t create the removal.", true)
+    }
+    if (type === "BULK_REMOVAL_FOCUS") {
+      return respond(type, focusBulkRemovalTab(sender.tab), sendResponse, "Couldn’t open the removal tab.")
     }
     if (type === "SELLER_CENTRAL_OPEN") {
       return respond(type, focusOrOpenSellerCentralTab(sender.tab), sendResponse, "Couldn’t open Seller Central.")

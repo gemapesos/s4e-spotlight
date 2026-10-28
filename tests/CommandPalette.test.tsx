@@ -676,6 +676,58 @@ describe("CommandPalette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 
+  describe("Bulk removal", () => {
+    const summary = {
+      openedCount: 2,
+      skipped: [{ sku: "TYPO", reason: "Not in unfulfillable inventory" }],
+      nextRemovalOrderId: "S4EJM0013",
+      eligibilityUnknown: false,
+    }
+
+    it("sends the pasted SKUs, then shows what was skipped and the next removal order ID", async () => {
+      const user = userEvent.setup()
+      const onCreateBulkRemoval = vi.fn().mockResolvedValue(summary)
+      const onFocusBulkRemoval = vi.fn().mockResolvedValue(undefined)
+      const { onOpenChange } = renderPalette(true, undefined, undefined, undefined, undefined, undefined, { onCreateBulkRemoval, onFocusBulkRemoval })
+
+      await user.click(screen.getByRole("option", { name: /Bulk removal/ }))
+      const input = screen.getByRole("textbox", { name: "SKUs to remove" })
+      // More than the bulk-open threshold: a single tab needs no confirmation.
+      fireEvent.change(input, { target: { value: Array.from({ length: 12 }, (_, index) => `SKU-${index}`).join("\n") } })
+      expect(screen.getByRole("button", { name: "Create removal for 12 SKUs" })).toBeEnabled()
+      await user.keyboard("{Enter}")
+
+      expect(onCreateBulkRemoval).toHaveBeenCalledWith(Array.from({ length: 12 }, (_, index) => `SKU-${index}`))
+      expect(await screen.findByText("Opened a removal for 2 SKUs")).toBeVisible()
+      expect(screen.getByText("S4EJM0013")).toBeVisible()
+      expect(screen.getByRole("list", { name: "Skipped SKUs" })).toHaveTextContent("TYPONot in unfulfillable inventory")
+      expect(onOpenChange).not.toHaveBeenCalled()
+
+      await user.click(screen.getByRole("button", { name: "Go to removal" }))
+      expect(onFocusBulkRemoval).toHaveBeenCalledOnce()
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+
+    it("goes back to the SKUs when nothing could be removed", async () => {
+      const user = userEvent.setup()
+      const onCreateBulkRemoval = vi.fn().mockResolvedValue({ ...summary, openedCount: 0, nextRemovalOrderId: null })
+      renderPalette(true, undefined, undefined, undefined, undefined, undefined, { onCreateBulkRemoval })
+
+      await user.click(screen.getByRole("option", { name: /Bulk removal/ }))
+      fireEvent.change(screen.getByRole("textbox", { name: "SKUs to remove" }), { target: { value: "TYPO" } })
+      await user.keyboard("{Enter}")
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("No SKUs can be removed")
+      await user.click(screen.getByRole("button", { name: "Edit SKUs" }))
+      expect(screen.getByRole("textbox", { name: "SKUs to remove" })).toHaveValue("TYPO")
+    })
+
+    it("is hidden when turned off", () => {
+      renderPalette(true, undefined, undefined, undefined, undefined, { ...DEFAULT_ENABLED_FEATURES, "bulk-removal": false })
+      expect(screen.queryByRole("option", { name: /Bulk removal/ })).toBeNull()
+    })
+  })
+
   it("keeps invalid SKU input open with a specific error", async () => {
     const user = userEvent.setup()
     const openSkuIds = vi.fn<(skuIds: string[]) => Promise<void>>().mockResolvedValue()

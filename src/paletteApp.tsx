@@ -3,7 +3,7 @@ import { createPortal } from "react-dom"
 import { createRoot, type Root } from "react-dom/client"
 
 import styles from "./styles.css?inline"
-import { CommandPalette, type AccountsStatus, type PaletteMode, type ReportsPrepareResult } from "./CommandPalette"
+import { CommandPalette, type AccountsStatus, type BulkRemovalSummary, type PaletteMode, type ReportsPrepareResult } from "./CommandPalette"
 import { SwitchStatusCard } from "./SwitchProgress"
 import { applyPrefersColorScheme } from "./lib/colorScheme"
 import {
@@ -272,6 +272,18 @@ export async function openRemovalOrderIds(removalOrderIds: string[]): Promise<vo
 }
 export async function openSkuIds(skuIds: string[]): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_SKU_IDS", skuIds } satisfies OpenSkuIdsMessage)
+}
+export async function createBulkRemoval(skus: string[]): Promise<BulkRemovalSummary> {
+  const response = await requestBackground<BulkRemovalSummary>({ type: "CREATE_BULK_REMOVAL", skus })
+  return {
+    openedCount: response.openedCount,
+    skipped: response.skipped,
+    nextRemovalOrderId: response.nextRemovalOrderId,
+    eligibilityUnknown: response.eligibilityUnknown,
+  }
+}
+export async function focusBulkRemoval(): Promise<void> {
+  await requestBackground({ type: "BULK_REMOVAL_FOCUS" })
 }
 export async function openTimeOut(): Promise<void> {
   await requestBackground<OpenIdsResponse>({ type: "OPEN_TIME_OUT" } satisfies OpenTimeOutMessage)
@@ -580,6 +592,8 @@ export function mountCommandPalette({
           onOpenShipmentIds={openShipmentIds}
           onOpenRemovalOrderIds={openRemovalOrderIds}
           onOpenSkuIds={openSkuIds}
+          onCreateBulkRemoval={createBulkRemoval}
+          onFocusBulkRemoval={focusBulkRemoval}
           onGetAccountsStatus={getAccountsStatus}
           onUnlockAccounts={unlockAccounts}
           onStartAccountSwitch={startAccountSwitch}

@@ -1,7 +1,7 @@
 import * as React from "react"
 
 import type { LucideIcon } from "lucide-react"
-import { Building2, Clock, Download, FileJson, FileSpreadsheet, FolderOpen, Package, Truck } from "lucide-react"
+import { Building2, Clock, Download, FileJson, FileSpreadsheet, FolderOpen, Package, PackageMinus, Truck } from "lucide-react"
 
 import { KeyHint, PanelFooter } from "@/components/panel"
 import { Button } from "@/components/ui/button"
@@ -40,6 +40,7 @@ const FEATURE_ICONS: Record<FeatureId, LucideIcon> = {
   "scrape-case": FileJson,
   "open-shipment-ids": Truck,
   "search-skus": Package,
+  "bulk-removal": PackageMinus,
   "time-out": Clock,
   "generate-reports": FileSpreadsheet,
   accounts: Building2,

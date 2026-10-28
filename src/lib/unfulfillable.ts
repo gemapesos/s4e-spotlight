@@ -209,7 +209,7 @@ export interface RecoveryLineItem {
   } | null> | null
 }
 
-interface ListingsPage {
+export interface ListingsPage {
   listings: UnfulfillableListing[]
   count: number
   /** Rows Amazon returned, including unreadable ones; the next page starts after them. */
@@ -497,7 +497,7 @@ export function parseListingsPage(payload: unknown): ListingsPage {
 }
 
 /** Offset pagination, as Manage Inventory uses; omit `from` to request Amazon's default first page. */
-function listingsVariables(from?: number): Record<string, unknown> {
+export function listingsVariables(from?: number): Record<string, unknown> {
   return {
     usecase: "INVENTORY_UNFULFILLABLE",
     sortRequest: { key: "QUANTITY_UNFULFILLABLE", order: "DESCENDING" },
@@ -511,10 +511,11 @@ function listingKey(listing: UnfulfillableListing): string {
   return pair ? skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku) : JSON.stringify(listing.coreListingFields ?? listing)
 }
 
-async function postListingsPage(
+export async function postListingsPage(
   fetchImpl: typeof globalThis.fetch,
   token: string,
   from?: number,
+  extraVariables: Record<string, unknown> = {},
 ): Promise<ListingsPage> {
   const response = await fetchImpl(UNFULFILLABLE_GQL_URL, {
     method: "POST",
@@ -526,7 +527,7 @@ async function postListingsPage(
     },
     body: JSON.stringify({
       operationName: "GetListingsV2",
-      variables: listingsVariables(from),
+      variables: { ...listingsVariables(from), ...extraVariables },
       query: GET_LISTINGS_V2_QUERY,
     }),
   })
@@ -542,7 +543,7 @@ async function postListingsPage(
   return parseListingsPage(payload)
 }
 
-async function postInventoriesBatch(
+export async function postInventoriesBatch(
   fetchImpl: typeof globalThis.fetch,
   token: string | undefined,
   pairs: Array<{ merchantSku: string; fulfillmentNetworkSku: string }>,
