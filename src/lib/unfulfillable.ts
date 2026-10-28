@@ -1,8 +1,8 @@
 import { describeError, errorMessage, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 import { quantityCell, textCell } from "@/shared/format"
+import { fetchAntiCsrfTokenFromInventory, graphqlMessages, isInvalidPaginationInput, postInventoryGraphql, readAntiCsrfToken } from "@/sellerCentral/inventoryGraphql"
 
-export const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql"
 export const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories"
 const REMOVAL_ORDER_REPORT_COLUMNS = [
   "completed_qty",
@@ -32,7 +32,6 @@ export const REMOVAL_ORDER_REPORT_URL = `https://sellercentral.amazon.com/report
 ])}`
 
 const REMOVAL_ORDER_ID_PATTERN = /S4E[A-Z]{2}\d{4}/
-export const INVENTORY_MANAGE_URL = "https://sellercentral.amazon.com/myinventory/inventory"
 export const UNFULFILLABLE_PAGE_SIZE = 250
 export const UNFULFILLABLE_MAX_PAGES = 40
 export const UNFULFILLABLE_INVENTORIES_BATCH_SIZE = 50
@@ -225,56 +224,6 @@ export interface FetchUnfulfillableListingsOptions {
   log?: Logger
 }
 
-export function readAntiCsrfToken(root: ParentNode = document, cookie = typeof document !== "undefined" ? document.cookie : ""): string | undefined {
-  const meta = "querySelector" in root ? root.querySelector('meta[name="anti-csrftoken-a2z"]') : null
-  const fromMeta = meta?.getAttribute("content")?.trim()
-  if (fromMeta) return fromMeta
-
-  const match = cookie.match(/(?:^|;\s*)anti-csrftoken-a2z=([^;]+)/)
-  if (!match) return undefined
-  try {
-    return decodeURIComponent(match[1].trim())
-  } catch {
-    return match[1].trim()
-  }
-}
-
-export function readAntiCsrfTokenFromHtml(html: string): string | undefined {
-  const named = html.match(/<meta\b[^>]*\bname=["']anti-csrftoken-a2z["'][^>]*\bcontent=["']([^"']+)["'][^>]*>/i)
-  if (named?.[1]) return named[1].trim()
-  const contentFirst = html.match(/<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']anti-csrftoken-a2z["'][^>]*>/i)
-  return contentFirst?.[1]?.trim()
-}
-
-async function requestInventoryAntiCsrfToken(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
-  const response = await fetchImpl(INVENTORY_MANAGE_URL, {
-    method: "GET",
-    credentials: "include",
-    headers: { accept: "text/html" },
-  })
-  if (!response.ok) return undefined
-  let html = ""
-  try {
-    html = await response.text()
-  } catch {
-    return undefined
-  }
-  return readAntiCsrfTokenFromHtml(html)
-}
-
-let inventoryAntiCsrfTokenRequest: Promise<string | undefined> | null = null
-
-/**
- * Reads the token from Manage Inventory's HTML when the current page has none. That page is
- * large, so reports that start at the same time share one request.
- */
-export function fetchAntiCsrfTokenFromInventory(fetchImpl: typeof globalThis.fetch): Promise<string | undefined> {
-  inventoryAntiCsrfTokenRequest ??= requestInventoryAntiCsrfToken(fetchImpl).finally(() => {
-    inventoryAntiCsrfTokenRequest = null
-  })
-  return inventoryAntiCsrfTokenRequest
-}
-
 export function formatListingStatus(status: string | null | undefined): string {
   if (!status) return ""
   return status
@@ -349,22 +298,6 @@ export function unfulfillableSheetRows(listings: readonly UnfulfillableListing[]
   return [...unfulfillableSheetNotes(listings), [...UNFULFILLABLE_SHEET_HEADERS], ...listings.map(unfulfillableSheetRow)]
 }
 
-export function graphqlMessages(payload: unknown): string[] {
-  if (!payload || typeof payload !== "object" || !("errors" in payload)) return []
-  const errors = (payload as { errors?: unknown }).errors
-  if (!Array.isArray(errors)) return []
-  return errors
-    .map((error) => {
-      if (!error || typeof error !== "object" || !("message" in error)) return ""
-      return String((error as { message?: unknown }).message ?? "")
-    })
-    .filter(Boolean)
-}
-
-export function isInvalidPaginationInput(messages: readonly string[]): boolean {
-  return messages.some((message) => /paginationinput/i.test(message) && /not defined|undefined|unknown field/i.test(message))
-}
-
 export function listingSkuPair(listing: UnfulfillableListing): { merchantSku: string; fulfillmentNetworkSku: string } | undefined {
   const merchantSku = listing.coreListingFields?.sku?.trim()
   const fulfillmentNetworkSku = listing.coreListingFields?.fnSku?.trim()
@@ -380,25 +313,6 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
   const batches: T[][] = []
   for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size))
   return batches
-}
-
-/** Maps items with at most `limit` calls in flight, starting the next as soon as one finishes. */
-export async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  mapper: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const worker = async () => {
-    while (next < items.length) {
-      const index = next
-      next += 1
-      results[index] = await mapper(items[index], index)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker))
-  return results
 }
 
 function removalStatusLabel(code: string | null | undefined): string {
@@ -510,29 +424,11 @@ export async function postListingsPage(
   from?: number,
   extraVariables: Record<string, unknown> = {},
 ): Promise<ListingsPage> {
-  const response = await fetchImpl(UNFULFILLABLE_GQL_URL, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      accept: "application/graphql-response+json, application/json",
-      "content-type": "application/json",
-      "anti-csrftoken-a2z": token,
-    },
-    body: JSON.stringify({
-      operationName: "GetListingsV2",
-      variables: { ...listingsVariables(from), ...extraVariables },
-      query: GET_LISTINGS_V2_QUERY,
-    }),
-  })
-
-  if (!response.ok) throw new Error(`Couldn’t load unfulfillable inventory (${response.status}).`)
-
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new Error("Couldn’t load unfulfillable inventory.")
-  }
+  const payload = await postInventoryGraphql(fetchImpl, token, {
+    operationName: "GetListingsV2",
+    variables: { ...listingsVariables(from), ...extraVariables },
+    query: GET_LISTINGS_V2_QUERY,
+    }, "Couldn’t load unfulfillable inventory")
   return parseListingsPage(payload)
 }
 

@@ -2,6 +2,7 @@ import { formatLocalDateTime, formatUtcDateTime } from "./dates"
 import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 import { numberCell, textCell, yesNo } from "@/shared/format"
+import { sleep as defaultSleep } from "@/shared/async"
 
 export const SHIPPING_QUEUE_URL = "https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments"
 export const SHIPPING_QUEUE_REFERRER = "https://sellercentral.amazon.com/manage/shipments?ref=sc_shipments"
@@ -839,13 +840,26 @@ export function requiredDocumentLabel(
 }
 
 const DAY_MS = 86_400_000
-const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-
 class SessionInterrupted extends Error {
   constructor() {
     super("Shipment details session interrupted.")
     this.name = "SessionInterrupted"
   }
+}
+
+/** Requests one of the shipping queue's JSON endpoints the way its own page does. */
+function getShippingQueueApi(fetchImpl: typeof globalThis.fetch, url: string, referrer: string, signal?: AbortSignal): Promise<Response> {
+  return fetchImpl(url, {
+    method: "GET",
+    mode: "cors",
+    credentials: "include",
+    referrer,
+    signal,
+    headers: {
+      accept: "*/*",
+      "accept-language": "en-US,en;q=0.9",
+    },
+  })
 }
 
 function isSessionResponse(response: Response): boolean {
@@ -859,17 +873,7 @@ async function fetchShippingQueuePage(
   url: string,
   signal?: AbortSignal,
 ): Promise<ShippingQueueShipment[]> {
-  const response = await fetchImpl(url, {
-    method: "GET",
-    mode: "cors",
-    credentials: "include",
-    referrer: SHIPPING_QUEUE_REFERRER,
-    signal,
-    headers: {
-      accept: "*/*",
-      "accept-language": "en-US,en;q=0.9",
-    },
-  })
+  const response = await getShippingQueueApi(fetchImpl, url, SHIPPING_QUEUE_REFERRER, signal)
   if (!response.ok) throw new Error(`Couldn’t load shipping queue (${response.status}).`)
 
   let payload: unknown
@@ -893,16 +897,7 @@ async function fetchShipmentDetails(
 
     let response: Response
     try {
-      response = await fetchImpl(shipmentDetailsUrl(shipmentId), {
-        method: "GET",
-        mode: "cors",
-        credentials: "include",
-        referrer: buildShipmentClaimUrl(shipmentId),
-        headers: {
-          accept: "*/*",
-          "accept-language": "en-US,en;q=0.9",
-        },
-      })
+      response = await getShippingQueueApi(fetchImpl, shipmentDetailsUrl(shipmentId), buildShipmentClaimUrl(shipmentId))
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
       continue
@@ -941,16 +936,7 @@ async function fetchDiscrepancyItems(
     if (attempt > 1) await sleep(SHIPMENT_DETAILS_RETRY_DELAY_MS * (attempt - 1))
     let response: Response
     try {
-      response = await fetchImpl(shipmentDiscrepanciesUrl(shipmentId, index), {
-        method: "GET",
-        mode: "cors",
-        credentials: "include",
-        referrer: buildShipmentClaimUrl(shipmentId),
-        headers: {
-          accept: "*/*",
-          "accept-language": "en-US,en;q=0.9",
-        },
-      })
+      response = await getShippingQueueApi(fetchImpl, shipmentDiscrepanciesUrl(shipmentId, index), buildShipmentClaimUrl(shipmentId))
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
       continue
@@ -1009,16 +995,7 @@ async function fetchShipmentDocumentTypes(
   shipmentId: string,
 ): Promise<Pick<ShippingQueueShipment, "documentTypes" | "documentsFetchFailed">> {
   try {
-    const response = await fetchImpl(shipmentDocumentsUrl(shipmentId), {
-      method: "GET",
-      mode: "cors",
-      credentials: "include",
-      referrer: buildShipmentClaimUrl(shipmentId),
-      headers: {
-        accept: "*/*",
-        "accept-language": "en-US,en;q=0.9",
-      },
-    })
+    const response = await getShippingQueueApi(fetchImpl, shipmentDocumentsUrl(shipmentId), buildShipmentClaimUrl(shipmentId))
     if (!response.ok || isSessionResponse(response)) return { documentsFetchFailed: true }
     let payload: unknown
     try {

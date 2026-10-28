@@ -1,16 +1,10 @@
 import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
-import {
-  fetchAntiCsrfTokenFromInventory,
-  formatListingStatus,
-  graphqlMessages,
-  mapWithConcurrency,
-  readAntiCsrfToken,
-  UNFULFILLABLE_GQL_URL,
-} from "./unfulfillable"
+import { formatListingStatus } from "./unfulfillable"
+import { fetchAntiCsrfTokenFromInventory, graphqlMessages, postInventoryGraphql, readAntiCsrfToken } from "@/sellerCentral/inventoryGraphql"
+import { mapWithConcurrency } from "@/shared/async"
 import { numberCell, quantityCell, textCell, yesNo } from "@/shared/format"
 
-export const SUPPRESSED_GQL_URL = UNFULFILLABLE_GQL_URL
 export const SUPPRESSED_PAGE_SIZE = 250
 /**
  * Listings arrive sorted by available quantity and the scan stops at the first one out of stock,
@@ -1164,29 +1158,11 @@ async function postSuppressedListingsPage(
   from: number,
   size: number,
 ): Promise<ListingsPage> {
-  const response = await fetchImpl(SUPPRESSED_GQL_URL, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      accept: "application/graphql-response+json, application/json",
-      "content-type": "application/json",
-      "anti-csrftoken-a2z": token,
-    },
-    body: JSON.stringify({
-      operationName: "getListingsV2",
-      variables: suppressedListingsVariables(from, size),
-      query: GET_SUPPRESSED_LISTINGS_QUERY,
-    }),
-  })
-
-  if (!response.ok) throw new Error(`Couldn’t load search-suppressed inventory (${response.status}).`)
-
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new Error("Couldn’t load search-suppressed inventory.")
-  }
+  const payload = await postInventoryGraphql(fetchImpl, token, {
+    operationName: "getListingsV2",
+    variables: suppressedListingsVariables(from, size),
+    query: GET_SUPPRESSED_LISTINGS_QUERY,
+    }, "Couldn’t load search-suppressed inventory")
 
   return parseSuppressedListingsPage(payload)
 }
@@ -1196,29 +1172,11 @@ async function postListingIssues(
   token: string,
   sku: string,
 ): Promise<ListingIssue[]> {
-  const response = await fetchImpl(SUPPRESSED_GQL_URL, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      accept: "application/graphql-response+json, application/json",
-      "content-type": "application/json",
-      "anti-csrftoken-a2z": token,
-    },
-    body: JSON.stringify({
-      operationName: "getListingIssuesActionsForSku",
-      variables: { sku, contributorToken: "" },
-      query: GET_LISTING_ISSUES_QUERY,
-    }),
-  })
-
-  if (!response.ok) throw new Error(`Couldn’t load listing suppression reasons (${response.status}).`)
-
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new Error("Couldn’t load listing suppression reasons.")
-  }
+  const payload = await postInventoryGraphql(fetchImpl, token, {
+    operationName: "getListingIssuesActionsForSku",
+    variables: { sku, contributorToken: "" },
+    query: GET_LISTING_ISSUES_QUERY,
+    }, "Couldn’t load listing suppression reasons")
 
   return parseListingIssues(payload)
 }

@@ -2,6 +2,7 @@
 import { createLogger, errorMessage } from "@/lib/log"
 import { type SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { getActiveJob } from "./switch/job"
+import { sleep } from "@/shared/async"
 
 const log = createLogger("background")
 
@@ -23,10 +24,6 @@ export function pickSellerCentralTab(tabs: readonly chrome.tabs.Tab[], preferred
 const TAB_LOAD_TIMEOUT_MS = 30_000
 const SESSION_PROBE_TIMEOUT_MS = 15_000
 const SESSION_PROBE_INTERVAL_MS = 250
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
 
 export async function ensureSellerCentralTab(
   senderTab?: chrome.tabs.Tab,

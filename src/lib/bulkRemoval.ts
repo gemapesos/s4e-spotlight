@@ -1,11 +1,9 @@
 import { describeError, type Logger } from "./log"
 import {
-  fetchAntiCsrfTokenFromInventory,
   fetchNextRemovalOrderId,
   listingSkuPair,
   postInventoriesBatch,
   postListingsPage,
-  readAntiCsrfToken,
   REMOVAL_STATUS_ELIGIBLE,
   removalStatusFromLineItem,
   UNFULFILLABLE_INVENTORIES_BATCH_SIZE,
@@ -14,6 +12,7 @@ import {
   type RecoveryLineItem,
   type UnfulfillableListing,
 } from "./unfulfillable"
+import { fetchAntiCsrfTokenFromInventory, readAntiCsrfToken } from "@/sellerCentral/inventoryGraphql"
 
 export const BULK_REMOVAL_NOT_FOUND = "Not in unfulfillable inventory"
 export const BULK_REMOVAL_NO_UNITS = "No units available for removal"

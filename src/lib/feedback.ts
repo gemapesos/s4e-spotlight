@@ -2,6 +2,7 @@ import { formatUtcDateTime } from "./dates"
 import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
 import { decodeHtmlEntities, textCell, yesNo } from "@/shared/format"
+import { sleep as defaultSleep } from "@/shared/async"
 
 export const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks"
 /** Amazon's largest page; bigger pages fail with HTTP 500. */
@@ -197,8 +198,6 @@ export function feedbacksUrl(cursor = "", ascending = false): string {
   return `${FEEDBACKS_URL}?${params.toString()}`
 }
 
-const feedbackSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-
 async function getFeedbacksPage(
   fetchImpl: typeof globalThis.fetch,
   cursor: string,
@@ -295,7 +294,7 @@ export async function fetchNeutralNegativeFeedbacks(
   options: FetchSellerFeedbacksOptions = {},
 ): Promise<SellerFeedback[]> {
   const fetchImpl = options.fetch ?? globalThis.fetch
-  const sleep = options.sleep ?? feedbackSleep
+  const sleep = options.sleep ?? defaultSleep
   const onProgress = options.onProgress
   const log = options.log
   const maxEntries = options.maxEntries ?? FEEDBACK_MAX_ENTRIES

@@ -2,12 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import {
   GET_LISTINGS_V2_QUERY,
-  INVENTORY_MANAGE_URL,
   REMOVAL_STATUS_BY_CODE,
   REMOVAL_STATUS_ELIGIBLE,
   REMOVAL_STATUS_UNAVAILABLE,
   REMOVAL_STATUS_UNKNOWN,
-  UNFULFILLABLE_GQL_URL,
   UNFULFILLABLE_INVENTORIES_BATCH_SIZE,
   UNFULFILLABLE_INVENTORIES_URL,
   UNFULFILLABLE_LISTINGS_INCOMPLETE_NOTE,
@@ -18,19 +16,17 @@ import {
   fetchUnfulfillableListings,
   formatListingStatus,
   formatRemovalStatus,
-  isInvalidPaginationInput,
   mergeRemovalStatus,
   incrementRemovalOrderId,
   latestRemovalOrderId,
   parseListingsPage,
   parseRecoveryInventories,
-  readAntiCsrfToken,
-  readAntiCsrfTokenFromHtml,
   removalStatusFromLineItem,
   unfulfillableSheetRows,
   type RecoveryLineItem,
   type UnfulfillableListing,
 } from "../src/lib/unfulfillable"
+import { INVENTORY_GQL_URL, INVENTORY_MANAGE_URL, isInvalidPaginationInput, readAntiCsrfToken, readAntiCsrfTokenFromHtml } from "../src/sellerCentral/inventoryGraphql"
 
 const expiredListing: UnfulfillableListing = {
   coreListingFields: {
@@ -371,7 +367,7 @@ describe("fetchUnfulfillableListings", () => {
       { ...mixedListing, removal: [] },
     ])
     expect(fetchImpl).toHaveBeenCalledTimes(3)
-    expect(fetchImpl).toHaveBeenNthCalledWith(1, UNFULFILLABLE_GQL_URL, expect.objectContaining({
+    expect(fetchImpl).toHaveBeenNthCalledWith(1, INVENTORY_GQL_URL, expect.objectContaining({
       method: "POST",
       credentials: "include",
       headers: expect.objectContaining({ "anti-csrftoken-a2z": "csrf-token" }),
@@ -522,7 +518,7 @@ describe("fetchUnfulfillableListings", () => {
       method: "GET",
       credentials: "include",
     }))
-    expect(fetchImpl).toHaveBeenCalledWith(UNFULFILLABLE_GQL_URL, expect.objectContaining({
+    expect(fetchImpl).toHaveBeenCalledWith(INVENTORY_GQL_URL, expect.objectContaining({
       headers: expect.objectContaining({ "anti-csrftoken-a2z": "html-csrf" }),
     }))
   })

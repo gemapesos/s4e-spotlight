@@ -1,11 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { createLogger, setLogSink, type LogEntry } from "../src/lib/log"
-import { INVENTORY_MANAGE_URL } from "../src/lib/unfulfillable"
 import {
   GET_LISTING_ISSUES_QUERY,
   GET_SUPPRESSED_LISTINGS_QUERY,
-  SUPPRESSED_GQL_URL,
   SUPPRESSED_ISSUE_UNAVAILABLE,
   SUPPRESSED_ISSUES_INCOMPLETE_NOTE,
   SUPPRESSED_FIRST_PAGE_SIZE,
@@ -20,6 +18,7 @@ import {
   type ListingIssue,
   type SuppressedListing,
 } from "../src/lib/suppressed"
+import { INVENTORY_GQL_URL, INVENTORY_MANAGE_URL } from "../src/sellerCentral/inventoryGraphql"
 
 const zeroQuantityListing: SuppressedListing = {
   coreListingFields: {
@@ -318,7 +317,7 @@ describe("fetchSuppressedListings", () => {
       { ...secondInStockListing, issues: [missingDescriptionIssue] },
     ])
     expect(fetchImpl).toHaveBeenCalledTimes(4)
-    expect(fetchImpl).toHaveBeenNthCalledWith(1, SUPPRESSED_GQL_URL, expect.objectContaining({
+    expect(fetchImpl).toHaveBeenNthCalledWith(1, INVENTORY_GQL_URL, expect.objectContaining({
       method: "POST",
       credentials: "include",
       headers: expect.objectContaining({ "anti-csrftoken-a2z": "csrf-token" }),
@@ -478,7 +477,7 @@ describe("fetchSuppressedListings", () => {
       method: "GET",
       credentials: "include",
     }))
-    expect(fetchImpl).toHaveBeenCalledWith(SUPPRESSED_GQL_URL, expect.objectContaining({
+    expect(fetchImpl).toHaveBeenCalledWith(INVENTORY_GQL_URL, expect.objectContaining({
       headers: expect.objectContaining({ "anti-csrftoken-a2z": "html-csrf" }),
     }))
   })

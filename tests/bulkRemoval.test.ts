@@ -5,10 +5,10 @@ import { BULK_REMOVAL_NOT_FOUND, resolveRemovalSkus } from "../src/lib/bulkRemov
 import {
   REMOVAL_ORDER_REPORT_URL,
   REMOVAL_STATUS_BY_CODE,
-  UNFULFILLABLE_GQL_URL,
   UNFULFILLABLE_INVENTORIES_URL,
   type RecoveryLineItem,
 } from "../src/lib/unfulfillable"
+import { INVENTORY_GQL_URL } from "../src/sellerCentral/inventoryGraphql"
 
 function listing(sku: string, asin: string, fnSku: string) {
   return { coreListingFields: { sku, asin, fnSku } }
@@ -38,7 +38,7 @@ function fakeFetch(amazon: FakeAmazon) {
       return json({ columnData: amazon.latestOrderId ? [["", amazon.latestOrderId]] : [] })
     }
     const body = JSON.parse(String(init?.body ?? "{}"))
-    if (url === UNFULFILLABLE_GQL_URL) {
+    if (url === INVENTORY_GQL_URL) {
       if (body.variables.multiSKUList) {
         if (amazon.multiSku) return amazon.multiSku(body.variables.multiSKUList)
         throw new Error("unexpected multi-SKU lookup")
@@ -99,7 +99,7 @@ describe("resolveRemovalSkus", () => {
       nextRemovalOrderId: "S4EJM0013",
       eligibilityUnknown: false,
     })
-    const gqlCalls = fetch.mock.calls.filter(([url]) => url === UNFULFILLABLE_GQL_URL)
+    const gqlCalls = fetch.mock.calls.filter(([url]) => url === INVENTORY_GQL_URL)
     expect(gqlCalls).toHaveLength(1)
     expect(JSON.parse(String(gqlCalls[0][1]?.body)).variables.multiSKUList).toEqual(["cc10", "CC20", "TYPO"])
   })
@@ -153,7 +153,7 @@ describe("resolveRemovalSkus", () => {
 
     expect(result.items).toEqual([{ sku: "CC10", asin: "A1", fnSku: "F1", removableUnits: 4 }])
     // The scan stops once every SKU is found.
-    const scanned = fetch.mock.calls.filter(([url, init]) => url === UNFULFILLABLE_GQL_URL && !JSON.parse(String(init?.body)).variables.multiSKUList)
+    const scanned = fetch.mock.calls.filter(([url, init]) => url === INVENTORY_GQL_URL && !JSON.parse(String(init?.body)).variables.multiSKUList)
     expect(scanned).toHaveLength(2)
   })
 })
