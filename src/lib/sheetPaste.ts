@@ -25,13 +25,15 @@ import type { WorkbookCell, WorkbookSheet } from "./xlsxWorkbook"
 
 const JMG_OUTDOORS_STORE = "JMG Outdoors"
 
-type PasteColumn = {
+/** A paste column, copied from the Raw sheet column `source` when it has one. */
+type PasteColumn<Source extends string> = {
   header: string
-  source?: string
+  source?: Source
   date?: boolean
 }
+type UnfulfillableHeader = (typeof UNFULFILLABLE_SHEET_HEADERS)[number]
 
-const UNFULFILLABLE_COLUMNS: readonly PasteColumn[] = [
+const UNFULFILLABLE_COLUMNS: readonly PasteColumn<UnfulfillableHeader>[] = [
   { header: "Date" },
   { header: "MSKU", source: "SKU" },
   { header: "Product Name", source: "Title" },
@@ -49,9 +51,9 @@ const UNFULFILLABLE_COLUMNS: readonly PasteColumn[] = [
   { header: "Additional Notes" },
 ]
 
-const JMG_PRODUCT_COLUMN: PasteColumn = { header: "Product" }
+const JMG_PRODUCT_COLUMN: PasteColumn<UnfulfillableHeader> = { header: "Product" }
 
-const STRANDED_COLUMNS: readonly PasteColumn[] = [
+const STRANDED_COLUMNS: readonly PasteColumn<(typeof STRANDED_SHEET_HEADERS)[number]>[] = [
   { header: "Date" },
   { header: "ASIN", source: "ASIN" },
   { header: "MSKU", source: "SKU" },
@@ -66,7 +68,7 @@ const STRANDED_COLUMNS: readonly PasteColumn[] = [
   { header: "Case Status" },
 ]
 
-const FEEDBACK_COLUMNS: readonly PasteColumn[] = [
+const FEEDBACK_COLUMNS: readonly PasteColumn<(typeof FEEDBACK_SHEET_HEADERS)[number]>[] = [
   { header: "Date" },
   { header: "Feedback Date", source: "Date", date: true },
   { header: "Order ID", source: "Order ID" },
@@ -78,7 +80,7 @@ const FEEDBACK_COLUMNS: readonly PasteColumn[] = [
   { header: "Case Status" },
 ]
 
-const SUPPRESSED_COLUMNS: readonly PasteColumn[] = [
+const SUPPRESSED_COLUMNS: readonly PasteColumn<(typeof SUPPRESSED_SHEET_HEADERS)[number]>[] = [
   { header: "Date" },
   { header: "MSKU", source: "SKU" },
   { header: "ASIN", source: "ASIN" },
@@ -92,23 +94,23 @@ const SUPPRESSED_COLUMNS: readonly PasteColumn[] = [
   { header: "Case Status" },
 ]
 
-const SHIPPING_COLUMNS: readonly PasteColumn[] = [
-  { header: "Date of Reconciliation" },
-  { header: "Shipment Date", source: "Created Date", date: true },
-  { header: "Shipment ID", source: "Shipment ID" },
-  { header: "SKU", source: "SKU" },
-  { header: "Product Title", source: "Title" },
-  { header: "ASIN", source: "ASIN" },
-  { header: "Discrepancy", source: "Item Discrepancy Quantity" },
-  { header: "Required Document" },
-  { header: "Status" },
-  { header: "Action" },
-  { header: "Date of E-Mail" },
-  { header: "Reimbursement ID" },
-  { header: "Amount / Unit" },
-  { header: "Case ID" },
-  { header: "Case Status" },
-]
+const SHIPPING_PASTE_HEADERS = [
+  "Date of Reconciliation",
+  "Shipment Date",
+  "Shipment ID",
+  "SKU",
+  "Product Title",
+  "ASIN",
+  "Discrepancy",
+  "Required Document",
+  "Status",
+  "Action",
+  "Date of E-Mail",
+  "Reimbursement ID",
+  "Amount / Unit",
+  "Case ID",
+  "Case Status",
+] as const
 
 const SHEET_MONTH_BY_NAME: Record<string, string> = Object.fromEntries(
   MONTH_ABBREVIATIONS.map((month) => [month.toLowerCase(), month]),
@@ -169,7 +171,7 @@ export interface SheetPasteInput {
   nextRemovalOrderId?: string | null
 }
 
-function unfulfillablePasteColumns(storeName: string): readonly PasteColumn[] {
+function unfulfillablePasteColumns(storeName: string): readonly PasteColumn<UnfulfillableHeader>[] {
   if (sanitizeStoreName(storeName) !== JMG_OUTDOORS_STORE) return UNFULFILLABLE_COLUMNS
   return [UNFULFILLABLE_COLUMNS[0], JMG_PRODUCT_COLUMN, ...UNFULFILLABLE_COLUMNS.slice(1)]
 }
@@ -202,15 +204,15 @@ function sourceHeaderIndex(
   return rows.findIndex((row) => sourceHeaders.every((header, index) => row[index] === header))
 }
 
-function sourceDataColumn(
+function sourceDataColumn<Source extends string>(
   rows: readonly (readonly (string | number)[])[],
-  sourceHeaders: readonly string[],
-  header: string,
+  sourceHeaders: readonly Source[],
+  header: Source,
 ): WorkbookCell[] {
   const headerIndex = sourceHeaderIndex(rows, sourceHeaders)
   if (headerIndex < 0) return []
   const column = rows[headerIndex].findIndex((cell) => cell === header)
-  if (column < 0) return []
+  if (column < 0) throw new Error(`The Raw sheet has no “${header}” column.`)
   return rows.slice(headerIndex + 1).map((row) => {
     const value = row[column]
     return value == null || value === "" ? "" : value
@@ -301,7 +303,7 @@ function fillWorkflowDefaults(rows: WorkbookCell[][]): WorkbookCell[][] {
 }
 
 function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconciliationDate: string): WorkbookCell[][] {
-  const rows: WorkbookCell[][] = [SHIPPING_COLUMNS.map((column) => column.header)]
+  const rows: WorkbookCell[][] = [[...SHIPPING_PASTE_HEADERS]]
   let previousId = ""
   for (const shipment of oldestShipmentsFirst(shipments)) {
     const items = (shipment.details?.items ?? []).filter((item) => (
@@ -329,35 +331,36 @@ function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconcil
       const shipmentIdCell = duplicate ? "" : shipmentId
       // A line without its own shipment date and ID is not reconciled separately.
       const lineReconciliationDate = shipmentDate === "" && shipmentIdCell === "" ? "" : reconciliationDate
-      rows.push([
-        lineReconciliationDate,
-        shipmentDate,
-        shipmentIdCell,
-        sku,
-        title,
-        asin,
-        discrepancy,
-        shipment.documentsFetchFailed
+      const cells: Record<(typeof SHIPPING_PASTE_HEADERS)[number], WorkbookCell> = {
+        "Date of Reconciliation": lineReconciliationDate,
+        "Shipment Date": shipmentDate,
+        "Shipment ID": shipmentIdCell,
+        "SKU": sku,
+        "Product Title": title,
+        "ASIN": asin,
+        "Discrepancy": discrepancy,
+        "Required Document": shipment.documentsFetchFailed
           ? SHIPPING_STATUS_UNAVAILABLE
           : requiredDocumentLabel(shipment.documentTypes, status),
-        status,
-        NOT_APPLICABLE,
-        reconciliationDate,
-        NOT_APPLICABLE,
-        NOT_APPLICABLE,
-        caseId,
-        CASE_STATUS_NOT_APPLICABLE,
-      ])
+        "Status": status,
+        "Action": NOT_APPLICABLE,
+        "Date of E-Mail": reconciliationDate,
+        "Reimbursement ID": NOT_APPLICABLE,
+        "Amount / Unit": NOT_APPLICABLE,
+        "Case ID": caseId,
+        "Case Status": CASE_STATUS_NOT_APPLICABLE,
+      }
+      rows.push(SHIPPING_PASTE_HEADERS.map((header) => cells[header]))
       if (shipmentId) previousId = shipmentId
     }
   }
   return rows
 }
 
-function projectRows(
+function projectRows<Source extends string>(
   rows: readonly (readonly (string | number)[])[],
-  sourceHeaders: readonly string[],
-  columns: readonly PasteColumn[],
+  sourceHeaders: readonly Source[],
+  columns: readonly PasteColumn<Source>[],
 ): WorkbookCell[][] {
   const headerIndex = sourceHeaderIndex(rows, sourceHeaders)
   const headerRow = headerIndex >= 0 ? rows[headerIndex] : sourceHeaders
@@ -371,7 +374,7 @@ function projectRows(
     ...dataRows.map((row) => columns.map((column) => {
       if (!column.source) return ""
       const index = sourceIndex.get(column.source)
-      if (index == null) return ""
+      if (index == null) throw new Error(`The Raw sheet has no “${column.source}” column.`)
       const value = row[index]
       const cell = value == null || value === "" ? "" : value
       return column.date ? toSheetDateText(cell) : cell

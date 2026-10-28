@@ -315,25 +315,26 @@ export function formatRemovalStatus(segments: readonly RemovalStatusSegment[] | 
 export function unfulfillableSheetRow(listing: UnfulfillableListing): Array<string | number> {
   const details = listing.availability?.unfulfillableDetails
   const price = firstOfferPrice(listing)
-  return [
-    textCell(listing.coreListingFields?.sku),
-    textCell(listing.coreListingFields?.asin),
-    textCell(listing.coreListingFields?.fnSku),
-    textCell(listing.listingData?.title),
-    formatListingStatus(listing.status?.status),
-    price.amount,
-    price.currency,
-    quantityCell(listing.availability?.unfulfillable),
-    quantityCell(details?.damagedByCarrier),
-    quantityCell(details?.damagedByCustomer),
-    quantityCell(details?.defective),
-    quantityCell(details?.expired),
-    quantityCell(details?.damagedByWarehouse),
-    quantityCell(details?.damagedByDistributor),
-    listing.removalFetchFailed ? REMOVAL_STATUS_UNAVAILABLE : formatRemovalStatus(listing.removal),
-    textCell(listing.listingData?.lastUpdated),
-    textCell(listing.imageUrl),
-  ]
+  const cells: Record<(typeof UNFULFILLABLE_SHEET_HEADERS)[number], string | number> = {
+    "SKU": textCell(listing.coreListingFields?.sku),
+    "ASIN": textCell(listing.coreListingFields?.asin),
+    "FNSKU": textCell(listing.coreListingFields?.fnSku),
+    "Title": textCell(listing.listingData?.title),
+    "Status": formatListingStatus(listing.status?.status),
+    "Price": price.amount,
+    "Currency": price.currency,
+    "Unfulfillable": quantityCell(listing.availability?.unfulfillable),
+    "Carrier Damaged": quantityCell(details?.damagedByCarrier),
+    "Customer Damaged": quantityCell(details?.damagedByCustomer),
+    "Defective": quantityCell(details?.defective),
+    "Expired": quantityCell(details?.expired),
+    "Warehouse Damaged": quantityCell(details?.damagedByWarehouse),
+    "Distributor Damaged": quantityCell(details?.damagedByDistributor),
+    "Removal Status": listing.removalFetchFailed ? REMOVAL_STATUS_UNAVAILABLE : formatRemovalStatus(listing.removal),
+    "Last Updated": textCell(listing.listingData?.lastUpdated),
+    "Image URL": textCell(listing.imageUrl),
+  }
+  return UNFULFILLABLE_SHEET_HEADERS.map((header) => cells[header])
 }
 
 function unfulfillableSheetNotes(listings: readonly UnfulfillableListing[]): Array<Array<string | number>> {

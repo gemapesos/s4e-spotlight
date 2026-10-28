@@ -99,20 +99,21 @@ export function feedbackSheetRow(feedback: SellerFeedback): Array<string | numbe
   const rating = typeof feedback.numericRating === "number" && Number.isFinite(feedback.numericRating)
     ? feedback.numericRating
     : ""
-  return [
-    formatFeedbackDate(feedback.feedbackDate),
-    rating,
-    feedbackSentiment(typeof rating === "number" ? rating : undefined),
-    textCell(feedback.orderId),
-    decodeHtmlEntities(feedback.feedbackText ?? ""),
-    itemAsDescribed(feedback),
-    decodeHtmlEntities(feedback.responseText ?? ""),
-    formatFeedbackDate(feedback.responseDate),
-    yesNo(feedback.suppressed),
-    yesNo(feedback.partiallySuppressed),
-    textCell(feedback.suppressReasonId),
-    textCell(feedback.feedbackId),
-  ]
+  const cells: Record<(typeof FEEDBACK_SHEET_HEADERS)[number], string | number> = {
+    "Date": formatFeedbackDate(feedback.feedbackDate),
+    "Rating": rating,
+    "Sentiment": feedbackSentiment(typeof rating === "number" ? rating : undefined),
+    "Order ID": textCell(feedback.orderId),
+    "Feedback": decodeHtmlEntities(feedback.feedbackText ?? ""),
+    "Item as described": itemAsDescribed(feedback),
+    "Seller response": decodeHtmlEntities(feedback.responseText ?? ""),
+    "Response date": formatFeedbackDate(feedback.responseDate),
+    "Suppressed": yesNo(feedback.suppressed),
+    "Partially suppressed": yesNo(feedback.partiallySuppressed),
+    "Suppress reason": textCell(feedback.suppressReasonId),
+    "Feedback ID": textCell(feedback.feedbackId),
+  }
+  return FEEDBACK_SHEET_HEADERS.map((header) => cells[header])
 }
 
 export function feedbackSheetRows(feedbacks: readonly SellerFeedback[]): Array<Array<string | number>> {

@@ -186,31 +186,32 @@ export function parseStrandedInventoryHtml(html: string): StrandedListing[] {
 }
 
 export function strandedSheetRow(listing: StrandedListing): Array<string | number> {
-  return [
-    textCell(listing.SKU),
-    textCell(listing.Condition),
-    textCell(listing.ProductName),
-    textCell(listing.ASIN),
-    textCell(listing.FNSKU),
-    textCell(listing.Status),
-    textCell(listing.StatusSecondary),
-    numberCell(listing.Price),
-    textCell(listing.PriceUnit),
-    quantityCell(listing.Available),
-    quantityCell(listing.TotalQuantity),
-    quantityCell(listing.Reserved),
-    quantityCell(listing.Inbound),
-    quantityCell(listing.Unfulfillable),
-    formatStrandedDate(listing.DateAutoRemoval),
-    autoRemovalTypeLabel(listing.AutoRemovalType),
-    formatStrandedDate(listing.DateStranded),
-    textCell(listing.StrandedReasonLabel || listing.ErrorMessage || listing.StrandedReasonCode || listing.StrandedReason),
-    textCell(listing.StrandedReasonCode || listing.StrandedReason),
-    textCell(listing.ErrorMessage),
-    textCell(listing.FulfilledBy),
-    textCell(listing.Program),
-    formatSupportedActions(listing.SupportedActions),
-  ]
+  const cells: Record<(typeof STRANDED_SHEET_HEADERS)[number], string | number> = {
+    "SKU": textCell(listing.SKU),
+    "Condition": textCell(listing.Condition),
+    "Product Name": textCell(listing.ProductName),
+    "ASIN": textCell(listing.ASIN),
+    "FNSKU": textCell(listing.FNSKU),
+    "Status": textCell(listing.Status),
+    "Status secondary": textCell(listing.StatusSecondary),
+    "Price": numberCell(listing.Price),
+    "Currency": textCell(listing.PriceUnit),
+    "Available": quantityCell(listing.Available),
+    "Total": quantityCell(listing.TotalQuantity),
+    "Reserved": quantityCell(listing.Reserved),
+    "Inbound": quantityCell(listing.Inbound),
+    "Unfulfillable": quantityCell(listing.Unfulfillable),
+    "Auto removal date": formatStrandedDate(listing.DateAutoRemoval),
+    "Auto removal type": autoRemovalTypeLabel(listing.AutoRemovalType),
+    "Date stranded": formatStrandedDate(listing.DateStranded),
+    "Stranded reason": textCell(listing.StrandedReasonLabel || listing.ErrorMessage || listing.StrandedReasonCode || listing.StrandedReason),
+    "Stranded reason code": textCell(listing.StrandedReasonCode || listing.StrandedReason),
+    "Error message": textCell(listing.ErrorMessage),
+    "Fulfilled by": textCell(listing.FulfilledBy),
+    "Program": textCell(listing.Program),
+    "Actions": formatSupportedActions(listing.SupportedActions),
+  }
+  return STRANDED_SHEET_HEADERS.map((header) => cells[header])
 }
 
 export function strandedSheetRows(listings: readonly StrandedListing[]): Array<Array<string | number>> {
