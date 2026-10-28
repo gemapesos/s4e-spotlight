@@ -1,8 +1,8 @@
 /** Moves a switch's tab through sign-out and sign-in to the store, following its navigations. */
-import { describeError } from "@/lib/log"
-import { assertSwitchOperationCurrent, operationGeneration, operationSwitchGeneration, queueVaultOperation, switchGeneration, vaultGeneration } from "../operations"
-import { SELLER_CENTRAL_HOME_URL } from "../sellerCentralTabs"
-import { setCurrentStoreId } from "../vault"
+import { describeError } from "@/shared/log"
+import { assertSwitchOperationCurrent, operationGeneration, operationSwitchGeneration, queueVaultOperation, switchGeneration, vaultGeneration } from "@/background/operations"
+import { SELLER_CENTRAL_HOME_URL } from "@/background/sellerCentralTabs"
+import { setCurrentStoreId } from "@/background/vault"
 import { type ActiveJob, closeOwnedSwitchTab, getActiveJob, getJobRecords, jobContext, jobLog, setActiveJob, setJobStage, withTabDebugger } from "./job"
 import { moveJobToUserTab } from "./tabs"
 

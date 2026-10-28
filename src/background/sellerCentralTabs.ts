@@ -1,6 +1,6 @@
 /** Finds, opens and waits for Seller Central tabs, talks to their content script, and reads their session. */
-import { createLogger, errorMessage } from "@/lib/log"
-import { type SellerCentralSessionState } from "@/lib/sellerCentralSession"
+import { createLogger, errorMessage } from "@/shared/log"
+import { type SellerCentralSessionState } from "@/sellerCentral/session"
 import { getActiveJob } from "./switch/job"
 import { sleep } from "@/shared/async"
 

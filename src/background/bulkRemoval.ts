@@ -1,5 +1,5 @@
 /** Bulk removal: checks SKUs on Seller Central and opens Create removal order prefilled. */
-import { createLogger, describeError } from "@/lib/log"
+import { createLogger, describeError } from "@/shared/log"
 import { type BackgroundReply, type BulkRemovalSummary, MAX_BULK_IDS } from "@/shared/messages"
 import { createChromeTab, type CreateTab, normalizeSkuIds } from "./openTabs"
 import { asArray, CASE_SCRAPE_SIGN_IN_ERROR } from "./reports"

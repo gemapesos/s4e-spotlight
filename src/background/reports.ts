@@ -1,5 +1,5 @@
 /** Report and case-scrape runs the workspace starts: each runs on one Seller Central tab for one page. */
-import { createLogger, describeError } from "@/lib/log"
+import { createLogger, describeError } from "@/shared/log"
 import { MAX_BULK_IDS, type BackgroundReply } from "@/shared/messages"
 import { normalizeCaseIds } from "./openTabs"
 import { ensureSellerCentralTab, probeSellerCentralSession, sendWhenContentScriptReady, waitForTabComplete } from "./sellerCentralTabs"

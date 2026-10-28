@@ -1,8 +1,8 @@
 /** The tabs and windows a switch uses, and handing the finished store to the user's tab. */
 import type { BackgroundReply } from "@/shared/messages"
-import { assertSwitchOperationCurrent } from "../operations"
-import { SELLER_CENTRAL_TAB_URL_PATTERN } from "../sellerCentralTabs"
-import { setCurrentStoreId } from "../vault"
+import { assertSwitchOperationCurrent } from "@/background/operations"
+import { SELLER_CENTRAL_TAB_URL_PATTERN } from "@/background/sellerCentralTabs"
+import { setCurrentStoreId } from "@/background/vault"
 import { type ActiveJob, assertWorkflowSender, getJobRecords, jobLog, setActiveJob, setJobStage, SWITCH_NOTICE_KEY, type SwitchNotice } from "./job"
 
 /** Rechecks a queried tab, since it may have navigated away or closed since the query. */

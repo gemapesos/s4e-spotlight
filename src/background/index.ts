@@ -1,5 +1,5 @@
 /** The service worker: restricts storage, then hands messages and tab events to their handlers. */
-import { createLogger, setLogSink } from "@/lib/log"
+import { createLogger, setLogSink } from "@/shared/log"
 import { workerLogStore } from "./logs"
 import { revokeResultsForTab } from "./reports"
 import { listenForMessages } from "./router"

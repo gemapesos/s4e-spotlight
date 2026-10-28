@@ -1,6 +1,6 @@
 /** Opens case, shipment, SKU and removal order IDs in tabs, and the Time Out form and sheet. */
-import { createLogger, describeError, errorMessage } from "@/lib/log"
-import { DEFAULT_TIME_OUT_FORM_VALUES, loadSettings, TIME_OUT_FORM_BASE_URL, TIME_OUT_FORM_ENTRY_IDS, type TimeOutFormValues } from "@/lib/settings"
+import { createLogger, describeError, errorMessage } from "@/shared/log"
+import { DEFAULT_TIME_OUT_FORM_VALUES, loadSettings, TIME_OUT_FORM_BASE_URL, TIME_OUT_FORM_ENTRY_IDS, type TimeOutFormValues } from "@/shared/settings"
 import { MAX_BULK_IDS } from "@/shared/messages"
 import { requireSenderTab, type SenderTab } from "./senders"
 

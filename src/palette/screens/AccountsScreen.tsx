@@ -16,7 +16,7 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { CurrentBadge, ErrorAlert } from "@/palette/parts"
 import type { AccountStoreSummary, ActiveSwitchSummary } from "@/shared/messages"
-import { SWITCH_STAGE_LABELS } from "@/SwitchProgress"
+import { SWITCH_STAGE_LABELS } from "@/components/switch/SwitchProgress"
 
 export function AccountsScreen({
   accountSearch,

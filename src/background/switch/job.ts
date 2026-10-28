@@ -1,10 +1,10 @@
 /** The running store switch: its state in session storage, its logs, and its debugger session. */
-import { ACTIVE_JOB_STORAGE_KEY, type CredentialRecord, type StoreRecord } from "@/lib/accounts"
-import { createLogger, type LogData } from "@/lib/log"
-import { assertSwitchOperationCurrent } from "../operations"
-import { SELLER_CENTRAL_HOME_URL } from "../sellerCentralTabs"
-import { isOwnSender } from "../senders"
-import { getUnlockedVault } from "../vault"
+import { ACTIVE_JOB_STORAGE_KEY, type CredentialRecord, type StoreRecord } from "@/shared/accounts"
+import { createLogger, type LogData } from "@/shared/log"
+import { assertSwitchOperationCurrent } from "@/background/operations"
+import { SELLER_CENTRAL_HOME_URL } from "@/background/sellerCentralTabs"
+import { isOwnSender } from "@/background/senders"
+import { getUnlockedVault } from "@/background/vault"
 
 const log = createLogger("background")
 

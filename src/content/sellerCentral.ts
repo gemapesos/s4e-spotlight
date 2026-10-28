@@ -2,8 +2,8 @@
  * seller-central.js, on Seller Central pages: runs the service worker's requests from the
  * signed-in tab (report sources, case scraping, removal checks and the session probe).
  */
-import { resolveRemovalSkus } from "@/lib/bulkRemoval"
-import { fetchNeutralNegativeFeedbacks } from "@/lib/feedback"
+import { resolveRemovalSkus } from "@/sellerCentral/bulkRemoval"
+import { fetchNeutralNegativeFeedbacks } from "@/sellerCentral/feedback"
 import {
   createLogger,
   createRequestMonitor,
@@ -12,15 +12,15 @@ import {
   forwardLogsToBackground,
   setLogSink,
   type Logger,
-} from "@/lib/log"
-import type { ReportProgressEvent } from "@/lib/reportProgress"
+} from "@/shared/log"
+import type { ReportProgressEvent } from "@/reports/progress"
 import { REPORT_SOURCE_DETAILS, reportSourceFor, type ReportSource } from "@/reports/sources"
-import { sellerCentralSessionStatus } from "@/lib/sellerCentralSession"
-import { fetchShippingQueueShipments } from "@/lib/shippingQueue"
-import { fetchStrandedListings } from "@/lib/stranded"
-import { fetchSuppressedListings } from "@/lib/suppressed"
-import { fetchNextRemovalOrderId, fetchUnfulfillableListings } from "@/lib/unfulfillable"
-import { scrapeCases } from "@/lib/viewCase"
+import { sellerCentralSessionStatus } from "@/sellerCentral/session"
+import { fetchShippingQueueShipments } from "@/sellerCentral/shippingQueue"
+import { fetchStrandedListings } from "@/sellerCentral/stranded"
+import { fetchSuppressedListings } from "@/sellerCentral/suppressed"
+import { fetchNextRemovalOrderId, fetchUnfulfillableListings } from "@/sellerCentral/unfulfillable"
+import { scrapeCases } from "@/sellerCentral/viewCase"
 import { isFromWorker, sendToBackground } from "@/shared/messages"
 
 const contentLog = createLogger("content")

@@ -2,18 +2,18 @@
  * Every request the extension's pages and scripts send to the service worker, and what a
  * successful reply adds to `ok: true`. A failed reply is `{ ok: false, error }`.
  */
-import type { AccountVault, SharedVaultFile, StoreIndexRecord, VaultMergeCounts } from "@/lib/accounts"
-import type { SellerFeedback } from "@/lib/feedback"
-import type { LogEntry } from "@/lib/log"
-import type { ReportProgressEvent } from "@/lib/reportProgress"
+import type { AccountVault, SharedVaultFile, StoreIndexRecord, VaultMergeCounts } from "@/shared/accounts"
+import type { SellerFeedback } from "@/sellerCentral/feedback"
+import type { LogEntry } from "@/shared/log"
+import type { ReportProgressEvent } from "@/reports/progress"
 import type { ReportSource } from "@/reports/sources"
-import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
-import type { ExtensionSettings } from "@/lib/settings"
-import type { ShippingQueueShipment } from "@/lib/shippingQueue"
-import type { StrandedListing } from "@/lib/stranded"
-import type { SuppressedListing } from "@/lib/suppressed"
-import type { UnfulfillableListing } from "@/lib/unfulfillable"
-import type { ScrapeCasesFile } from "@/lib/viewCase"
+import type { SellerCentralSessionState } from "@/sellerCentral/session"
+import type { ExtensionSettings } from "@/shared/settings"
+import type { ShippingQueueShipment } from "@/sellerCentral/shippingQueue"
+import type { StrandedListing } from "@/sellerCentral/stranded"
+import type { SuppressedListing } from "@/sellerCentral/suppressed"
+import type { UnfulfillableListing } from "@/sellerCentral/unfulfillable"
+import type { ScrapeCasesFile } from "@/sellerCentral/viewCase"
 
 /** The most IDs one command opens, removes or scrapes. */
 export const MAX_BULK_IDS = 50

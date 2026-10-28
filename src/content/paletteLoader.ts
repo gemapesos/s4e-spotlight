@@ -2,8 +2,8 @@
  * content.js, on every page: opens the command palette on ⌘/ or Ctrl+/, and when the service
  * worker asks. Seller Central requests are answered by seller-central.js.
  */
-import { createLogger, describeError, errorMessage, forwardLogsToBackground, setLogSink } from "@/lib/log"
-import { isPaletteShortcut } from "@/lib/shortcut"
+import { createLogger, describeError, errorMessage, forwardLogsToBackground, setLogSink } from "@/shared/log"
+import { isPaletteShortcut } from "@/shared/shortcut"
 import { isFromWorker, sendToBackground } from "@/shared/messages"
 
 const PALETTE_APP_FILE = "palette-app.js"

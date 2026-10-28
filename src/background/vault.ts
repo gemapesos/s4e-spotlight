@@ -21,8 +21,8 @@ import {
   type AccountVault,
   type EncryptedVault,
   type StoreIndexRecord,
-} from "@/lib/accounts"
-import { createLogger } from "@/lib/log"
+} from "@/shared/accounts"
+import { createLogger } from "@/shared/log"
 import type { BackgroundReply } from "@/shared/messages"
 import { assertVaultOperationCurrent } from "./operations"
 import { closeOwnedSwitchTab, getActiveJob, SWITCH_NOTICE_KEY, UNLOCK_RESUME_KEY } from "./switch/job"

@@ -23,9 +23,9 @@ const EXTENSION_SCRIPTS = {
   "background.js": { input: "src/background/index.ts", format: "es" },
   "content.js": { input: "src/content/paletteLoader.ts", format: "iife" },
   "seller-central.js": { input: "src/content/sellerCentral.ts", format: "iife" },
-  "paste-guard.js": { input: "src/pasteGuard.ts", format: "iife" },
-  "passkey-guard.js": { input: "src/passkeyGuard.ts", format: "iife" },
-  "account-automation.js": { input: "src/accountAutomation.ts", format: "iife" },
+  "paste-guard.js": { input: "src/content/pasteGuard.ts", format: "iife" },
+  "passkey-guard.js": { input: "src/content/passkeyGuard.ts", format: "iife" },
+  "account-automation.js": { input: "src/content/accountAutomation.ts", format: "iife" },
 } as const
 
 function extensionScriptsPlugin(): Plugin {
@@ -82,7 +82,7 @@ export default defineConfig(({ mode }) => ({
     cssCodeSplit: false,
     minify: "oxc",
     lib: {
-      entry: "src/paletteApp.tsx",
+      entry: "src/palette/index.tsx",
       formats: ["es"],
       fileName: () => "palette-app.js",
     },

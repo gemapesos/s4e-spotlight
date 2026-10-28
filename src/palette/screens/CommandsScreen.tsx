@@ -12,7 +12,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command"
-import type { CommandDefinition, IdentifierMode } from "@/CommandPalette"
+import type { CommandDefinition, IdentifierMode } from "@/palette/CommandPalette"
 import { CurrentBadge, ErrorAlert } from "@/palette/parts"
 import type { AccountStoreSummary } from "@/shared/messages"
 

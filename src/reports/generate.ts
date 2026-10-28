@@ -1,7 +1,7 @@
 /** Runs a report for the workspace window: asks the worker for each chosen section, then builds the report. */
-import { createLogger, describeError, errorMessage, logNow, type LogData } from "@/lib/log"
-import type { ReportProgressEvent } from "@/lib/reportProgress"
-import { reportWarnings, type GeneratedReport } from "@/lib/reports"
+import { createLogger, describeError, errorMessage, logNow, type LogData } from "@/shared/log"
+import type { ReportProgressEvent } from "@/reports/progress"
+import { reportWarnings, type GeneratedReport } from "@/reports/report"
 import { REPORT_SOURCES, type ReportSource } from "@/reports/sources"
 import { sendToBackground } from "@/shared/messages"
 import { getAccountsStatus } from "@/shared/requests"

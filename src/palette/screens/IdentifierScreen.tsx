@@ -3,7 +3,7 @@ import type * as React from "react"
 
 import { PrimaryButton } from "@/components/panel"
 import { CommandFooter, CommandHeader, CommandHint } from "@/components/ui/command"
-import type { InputModeDefinition } from "@/CommandPalette"
+import type { InputModeDefinition } from "@/palette/CommandPalette"
 import type { FadeMaskState } from "@/lib/fadeMask"
 import { ErrorAlert } from "@/palette/parts"
 

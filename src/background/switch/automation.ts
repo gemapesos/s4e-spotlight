@@ -1,8 +1,8 @@
 /** Requests from the sign-in automation content script running in the switch's tab. */
-import { generateTotp, parseOtpAuthUri } from "@/lib/accounts"
+import { generateTotp, parseOtpAuthUri } from "@/shared/accounts"
 import type { BackgroundReply } from "@/shared/messages"
-import { assertSwitchOperationCurrent } from "../operations"
-import { setCurrentStoreId } from "../vault"
+import { assertSwitchOperationCurrent } from "@/background/operations"
+import { setCurrentStoreId } from "@/background/vault"
 import { assertWorkflowSender, getActiveJob, getJobRecords, jobContext, jobLog, setJobStage, withJobDebugger } from "./job"
 import { advanceLogoutToSignIn, openStoreAfterSignIn, signInUrlFor } from "./signIn"
 import { finishAccountSwitch, pauseSwitch } from "./tabs"

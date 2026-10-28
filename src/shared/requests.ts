@@ -1,6 +1,6 @@
 /** Worker requests that both the palette and the workspace window make. */
-import { createLogger, describeError } from "@/lib/log"
-import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
+import { createLogger, describeError } from "@/shared/log"
+import type { SellerCentralSessionState } from "@/sellerCentral/session"
 import { sendToBackground, type AccountsStatus } from "@/shared/messages"
 
 // Logged as "palette", where these requests started, so existing log searches still find them.

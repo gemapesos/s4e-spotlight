@@ -1,6 +1,6 @@
 /** Every message the service worker answers: who may send it, how it waits its turn, and its handler. */
-import { createLogger, describeError, errorMessage } from "@/lib/log"
-import { loadSettings } from "@/lib/settings"
+import { createLogger, describeError, errorMessage } from "@/shared/log"
+import { loadSettings } from "@/shared/settings"
 import type { BackgroundMessageType, BackgroundReply } from "@/shared/messages"
 import { createBulkRemoval, focusBulkRemovalTab } from "./bulkRemoval"
 import { appendLogEntries, clearLogEntries, readLogEntries } from "./logs"

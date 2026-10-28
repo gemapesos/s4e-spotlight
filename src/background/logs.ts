@@ -1,5 +1,5 @@
 /** Log entries from every context, and reading or clearing them from extension pages. */
-import { createLogStore, sanitizeLogEntries, type LogEntry, type LogStore } from "@/lib/log"
+import { createLogStore, sanitizeLogEntries, type LogEntry, type LogStore } from "@/shared/log"
 
 let workerStore: LogStore | undefined
 
