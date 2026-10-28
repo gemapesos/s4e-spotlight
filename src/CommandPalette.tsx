@@ -527,6 +527,7 @@ export function CommandPalette({
       setError(errorMessage(caught, "Couldn’t load accounts. Please try again."))
     } finally {
       setSubmitting(false)
+      setStatusMessage(null)
     }
   }, [onGetAccountsStatus])
 
@@ -585,6 +586,7 @@ export function CommandPalette({
     } catch (caught) {
       setError(errorMessage(caught, "Couldn’t open Time Out. Please try again."))
       setSubmitting(false)
+      setStatusMessage(null)
     }
   }, [close, onOpenTimeOut])
 

@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { VAULT_STORAGE_KEY } from "../src/lib/accounts"
 import { OptionsApp } from "../src/options/OptionsApp"
 
 const vault = {
@@ -88,6 +89,27 @@ describe("accounts options page", () => {
     await user.click(confirm)
 
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_RESET" }))
+  })
+
+  it("closes a confirmed Reset dialog when the vault changes elsewhere", async () => {
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNTS_STATUS") return { ok: true, initialized: true, unlocked: false }
+      return { ok: true }
+    })
+    let onStorageChanged: ((changes: Record<string, chrome.storage.StorageChange>, area: string) => void) | undefined
+    vi.stubGlobal("chrome", {
+      runtime: { sendMessage },
+      storage: { onChanged: { addListener: vi.fn((listener) => { onStorageChanged = listener }), removeListener: vi.fn() } },
+    })
+    render(<OptionsApp />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole("button", { name: "Reset vault" }))
+    await user.type(within(screen.getByRole("alertdialog", { name: "Reset vault?" })).getByLabelText("Type RESET"), "RESET")
+
+    act(() => onStorageChanged?.({ [VAULT_STORAGE_KEY]: { newValue: {} } }, "local"))
+
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Reset vault?" })).not.toBeInTheDocument())
+    expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_RESET" })
   })
 
   it("sends the share password only after the export dialog confirms it", async () => {

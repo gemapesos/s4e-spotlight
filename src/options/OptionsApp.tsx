@@ -286,6 +286,8 @@ export function OptionsApp() {
       setExportOpen(false)
       setImportOpen(false)
       setDeleteTarget(null)
+      setResetOpen(false)
+      setResetConfirmation("")
       setExportFormKey((key) => key + 1)
       setImportFormKey((key) => key + 1)
       setPage("loading")

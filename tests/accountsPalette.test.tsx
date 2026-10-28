@@ -247,6 +247,18 @@ describe("Accounts palette", () => {
     expect(props.onUnlockAccounts).not.toHaveBeenCalled()
   })
 
+  it("doesn't keep showing the accounts loading message while a switch starts", async () => {
+    const user = userEvent.setup()
+    let finishStart: (() => void) | undefined
+    const props = renderAccounts({ onStartAccountSwitch: vi.fn(() => new Promise<void>((resolve) => { finishStart = resolve })) })
+    await user.click(screen.getByRole("option", { name: /^Switch store$/ }))
+    await user.click(await screen.findByRole("option", { name: "JMG Outdoors" }))
+
+    expect(props.onStartAccountSwitch).toHaveBeenCalledWith("store-1")
+    expect(screen.queryByText("Loading accounts…")).not.toBeInTheDocument()
+    await act(async () => { finishStart?.() })
+  })
+
   it("ignores Escape while accounts are loading", async () => {
     const user = userEvent.setup()
     let finishLoading: ((value: { initialized: boolean; unlocked: boolean; stores: never[] }) => void) | undefined
