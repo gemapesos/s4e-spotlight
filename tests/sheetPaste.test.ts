@@ -294,7 +294,13 @@ describe("sheet paste workbook", () => {
         listingsIncomplete: true,
         details: {
           ineligibilityReason: "NOT_ALL_SHIPPED",
-          items: [{ merchantSKU: "SKU-1", totalDiscrepancyQuantity: -3, caseId: "CASE-9" }],
+          items: [{
+            merchantSKU: "SKU-1",
+            title: "Garden Hose",
+            asin: "B000000001",
+            totalDiscrepancyQuantity: -3,
+            caseId: "CASE-9",
+          }],
         },
       }],
     })
@@ -306,6 +312,8 @@ describe("sheet paste workbook", () => {
       "14-Aug-2026",
       "FBA123456789",
       "SKU-1",
+      "Garden Hose",
+      "B000000001",
       -3,
       "N/A",
       SHIPPING_STATUS_MONITORING,
@@ -353,15 +361,15 @@ describe("sheet paste workbook", () => {
     expect(shipping.flat()).not.toContain("FBA000000000")
     expect(shipping.flat()).not.toContain("FBA111111111")
     expect(shipping[0][0]).toBe(yesterday)
-    expect(shipping[0][5]).toBe("Proof of Inventory Ownership AND Delivery")
-    expect(shipping[0][6]).toBe(SHIPPING_STATUS_NEW)
-    expect(shipping[0][8]).toBe(yesterday)
-    expect(shipping[0][11]).toBe("N/A")
+    expect(shipping[0][7]).toBe("Proof of Inventory Ownership AND Delivery")
+    expect(shipping[0][8]).toBe(SHIPPING_STATUS_NEW)
+    expect(shipping[0][10]).toBe(yesterday)
+    expect(shipping[0][13]).toBe("N/A")
     expect(shipping[1][0]).toBe("")
     expect(shipping[1][1]).toBe("")
     expect(shipping[1][2]).toBe("")
     expect(shipping[1][3]).toBe("SKU-2")
-    expect(shipping[1][5]).toBe("Proof of Inventory Ownership AND Delivery")
+    expect(shipping[1][7]).toBe("Proof of Inventory Ownership AND Delivery")
   })
 
   it("keeps only for-monitoring and new send-list shipping lines", () => {
@@ -394,7 +402,7 @@ describe("sheet paste workbook", () => {
       }],
     })
     const shipping = (sheets[4].rows ?? []).slice(1)
-    expect(shipping.map((row) => [row[2], row[3], row[6]])).toEqual([
+    expect(shipping.map((row) => [row[2], row[3], row[8]])).toEqual([
       ["FBA333333333", "SKU-WAIT", SHIPPING_STATUS_MONITORING],
       ["FBA222222222", "SKU-NEW", SHIPPING_STATUS_NEW],
     ])

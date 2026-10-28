@@ -105,6 +105,8 @@ const SHIPPING_COLUMNS: readonly PasteColumn[] = [
   { header: "Shipment Date", source: "Created Date", date: true },
   { header: "Shipment ID", source: "Shipment ID" },
   { header: "SKU", source: "SKU" },
+  { header: "Product Title", source: "Title" },
+  { header: "ASIN", source: "ASIN" },
   { header: "Discrepancy", source: "Item Discrepancy Quantity" },
   { header: "Required Document" },
   { header: "Status" },
@@ -329,6 +331,8 @@ function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconcil
       if (!SHIPPING_PASTE_STATUSES.has(status)) continue
       const caseId = item.caseId?.trim() || NOT_APPLICABLE
       const sku = item.merchantSKU?.trim() || NOT_APPLICABLE
+      const title = item.title?.trim() || NOT_APPLICABLE
+      const asin = item.asin?.trim() || NOT_APPLICABLE
       const shipmentDate = duplicate ? "" : toSheetDateText(formatShippingQueueLocalDate(shipment.createdDate))
       const shipmentIdCell = duplicate ? "" : shipmentId
       // A line without its own shipment date and ID is not reconciled separately.
@@ -338,6 +342,8 @@ function shippingPasteRows(shipments: readonly ShippingQueueShipment[], reconcil
         shipmentDate,
         shipmentIdCell,
         sku,
+        title,
+        asin,
         discrepancy,
         shipment.documentsFetchFailed
           ? SHIPPING_STATUS_UNAVAILABLE
