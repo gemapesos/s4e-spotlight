@@ -1,13 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import {
-  createBulkRemoval,
-  ensureSellerCentralTab,
-  focusBulkRemovalTab,
-  SELLER_CENTRAL_HOME_URL,
-  SELLER_CENTRAL_TAB_URL_PATTERN,
-  waitForTabComplete,
-} from "../src/background"
+import { createBulkRemoval, focusBulkRemovalTab } from "../src/background/bulkRemoval"
+import { ensureSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, waitForTabComplete } from "../src/background/sellerCentralTabs"
 
 describe("Seller Central tab", () => {
   const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
@@ -157,7 +151,7 @@ describe("Bulk removal", () => {
     await createBulkRemoval(["CC10"], sender, createTab)
 
     vi.resetModules()
-    const restarted = await import("../src/background")
+    const restarted = await import("../src/background/bulkRemoval")
 
     await expect(restarted.focusBulkRemovalTab(sender)).resolves.toEqual({ ok: true })
     expect(update).toHaveBeenCalledWith(31, { active: true })

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { checkSellerCentralSession, SELLER_CENTRAL_TAB_URL_PATTERN } from "../src/background"
+import { checkSellerCentralSession, SELLER_CENTRAL_TAB_URL_PATTERN } from "../src/background/sellerCentralTabs"
 import { ACTIVE_JOB_STORAGE_KEY } from "../src/lib/accounts"
 
 type SessionReply = { ok: boolean; loggedInToStore: boolean; settled: boolean }

@@ -1,7 +1,10 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, handleAccountsMessage as rawHandleAccountsMessage, pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, signInUrlFor, validateVault } from "../src/background"
+import { handleAccountsMessage as rawHandleAccountsMessage } from "../src/background/accounts"
+import { pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN } from "../src/background/sellerCentralTabs"
+import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, signInUrlFor } from "../src/background/switch/signIn"
+import { validateVault } from "../src/background/vault"
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, decryptSharedVault, generateTotp, decryptVault, encryptSharedVault, SHARE_FILE_KIND, STORE_INDEX_KEY, VAULT_STORAGE_KEY, type AccountVault } from "../src/lib/accounts"
 
 

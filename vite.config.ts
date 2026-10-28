@@ -20,7 +20,7 @@ const FONT_PATHS = [
  * modules, so they are IIFEs; the service worker is an ES module.
  */
 const EXTENSION_SCRIPTS = {
-  "background.js": { input: "src/background.ts", format: "es" },
+  "background.js": { input: "src/background/index.ts", format: "es" },
   "content.js": { input: "src/content/paletteLoader.ts", format: "iife" },
   "seller-central.js": { input: "src/content/sellerCentral.ts", format: "iife" },
   "paste-guard.js": { input: "src/pasteGuard.ts", format: "iife" },

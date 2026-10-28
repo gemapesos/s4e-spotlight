@@ -1,24 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
-import {
-  handleLogMessage,
-  buildCaseUrl,
-  buildRemovalOrderUrl,
-  buildShipmentUrl,
-  buildSkuUrl,
-  buildTimeOutFormUrl,
-  createOpenIdsMessageListener,
-  normalizeCaseIds,
-  normalizeRemovalOrderIds,
-  normalizeShipmentIds,
-  normalizeSkuIds,
-  openCaseTabs,
-  openRemovalOrderTabs,
-  openShipmentTabs,
-  openSkuTabs,
-  openTimeOutTabs,
-  TIME_OUT_SHEET_URL,
-} from "../src/background"
+import { handleLogMessage } from "../src/background/logs"
+import { buildCaseUrl, buildRemovalOrderUrl, buildShipmentUrl, buildSkuUrl, buildTimeOutFormUrl, createOpenIdsMessageListener, normalizeCaseIds, normalizeRemovalOrderIds, normalizeShipmentIds, normalizeSkuIds, openCaseTabs, openRemovalOrderTabs, openShipmentTabs, openSkuTabs, openTimeOutTabs, TIME_OUT_SHEET_URL } from "../src/background/openTabs"
 import { createLogStore, type LogEntry } from "../src/lib/log"
 import { DEFAULT_TIME_OUT_FORM_VALUES } from "../src/lib/settings"
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
-import { BULK_REMOVAL_URL, buildBulkRemovalUrl } from "../src/background"
+import { BULK_REMOVAL_URL, buildBulkRemovalUrl } from "../src/background/bulkRemoval"
 import { BULK_REMOVAL_NOT_FOUND, resolveRemovalSkus } from "../src/lib/bulkRemoval"
 import {
   REMOVAL_ORDER_REPORT_URL,

@@ -1,7 +1,9 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { handleAccountsMessage, handleAccountTabUpdated, handleResultsMessage, relayAuthorizedReportProgress, revokeResultsForTab, SIGN_IN_URL } from "../src/background"
+import { handleAccountsMessage } from "../src/background/accounts"
+import { handleResultsMessage, relayAuthorizedReportProgress, revokeResultsForTab } from "../src/background/reports"
+import { handleAccountTabUpdated, SIGN_IN_URL } from "../src/background/switch/signIn"
 import { ACTIVE_JOB_STORAGE_KEY, decryptVault, encryptVault, SESSION_KEY_STORAGE_KEY, serializeKey, STORE_INDEX_KEY, VAULT_STORAGE_KEY } from "../src/lib/accounts"
 
 const origin = "chrome-extension://security-fixture/"
