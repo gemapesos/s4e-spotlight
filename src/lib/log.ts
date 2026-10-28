@@ -148,10 +148,6 @@ export function createLogger(ctx: string, run?: string): Logger {
   }
 }
 
-export function createLogRunId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
-}
-
 /** Sends entries to the background worker in small batches. Install with setLogSink. */
 export function forwardLogsToBackground(): (entry: LogEntry) => void {
   let queue: LogEntry[] = []

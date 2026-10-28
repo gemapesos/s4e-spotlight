@@ -69,15 +69,6 @@ export function caseScrapeFileName(caseIds: readonly string[], date = new Date()
   return `cases-${caseIds.length}-${day}.json`
 }
 
-/** A message for the palette when the file is incomplete. Undefined when every case loaded. */
-export function caseScrapeFailure(file: ScrapeCasesFile): string | undefined {
-  const errors = file.errors ?? []
-  if (file.cases.length > 0 && errors.length === 0) return undefined
-  if (errors.length === 1) return `Couldn’t scrape ${errors[0].caseId}. ${errors[0].error}`
-  if (errors.length > 1) return `Couldn’t scrape ${errors.map((item) => item.caseId).join(", ")}.`
-  return "Couldn’t scrape cases. Please try again."
-}
-
 export function downloadCaseScrape(
   file: ScrapeCasesFile,
   caseIds: readonly string[],

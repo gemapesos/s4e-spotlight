@@ -26,7 +26,6 @@ import {
 } from "./lib/accounts.js"
 import {
   createLogger,
-  createLogRunId,
   createLogStore,
   describeError,
   errorMessage,
@@ -344,7 +343,6 @@ const MAX_OTP_CODES = 2
 const AUTOMATION_CLICK_ACTIONS = new Set(["continue", "password-submit", "otp-submit"])
 let startSwitchLock: Promise<void> = Promise.resolve()
 let sellerCentralTabLock: Promise<void> = Promise.resolve()
-let reportProgressTabId: number | undefined
 
 type ApiResponse = { ok: true; [key: string]: unknown } | { ok: false; error: string }
 
@@ -556,13 +554,6 @@ const TAB_LOAD_TIMEOUT_MS = 30_000
 const SESSION_PROBE_TIMEOUT_MS = 15_000
 const SESSION_PROBE_INTERVAL_MS = 250
 
-export interface ReportsPrepareResult {
-  ok: true
-  loggedInToStore: boolean
-  sellerCentralTabId: number
-  openedPromptOnSellerCentral?: true
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -640,12 +631,6 @@ export async function waitForTabCompleteMatching(
 
     chrome.tabs.onUpdated.addListener(onUpdated)
   })
-}
-
-interface ReportRun {
-  id: string
-  paletteTabId?: number
-  sellerCentralTabId: number
 }
 
 const RESULTS_RUN_PREFIX = "resultsRun:"
@@ -846,7 +831,6 @@ export async function handleResultsMessage(message: Record<string, unknown>, sen
       ...(launch.resumeId ? { resumeId: launch.resumeId, storeName: launch.storeName ?? "the selected store" } : {}),
     }
   }
-  if (type === "RESULTS_OPEN_SELLER") return focusOrOpenSellerCentralTab(sender.tab)
   if (type === "REPORTS_PREPARE") {
     const ownerEpoch = observeResultsTab(sender.tab.id)
     if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
@@ -895,24 +879,10 @@ export async function handleResultsMessage(message: Record<string, unknown>, sen
   })
   await serializeResultControl(() => assertResultsRun(run.id, sender))
   const result = type === "SCRAPE_CASES"
-    ? await scrapeSellerCentralCases(run.caseIds, sender.tab, run.sellerCentralTabId, run.id)
-    : await fetchReportSource(type as ReportFetchType, sender.tab, run.sellerCentralTabId, run.id)
+    ? await scrapeSellerCentralCases(run.caseIds, run.sellerCentralTabId, run.id)
+    : await fetchReportSource(type as ReportFetchType, run.sellerCentralTabId, run.id)
   await serializeResultControl(() => assertResultsRun(run.id, sender))
   return result
-}
-
-/** The report run started by the latest successful prepare; used to tag logs from every context. */
-let activeReportRun: ReportRun | undefined
-
-function reportRunForPaletteTab(tabId?: number): string | undefined {
-  return activeReportRun && activeReportRun.paletteTabId === tabId ? activeReportRun.id : undefined
-}
-
-function reportRunForTab(tabId?: number): string | undefined {
-  if (!activeReportRun || tabId === undefined) return undefined
-  return tabId === activeReportRun.paletteTabId || tabId === activeReportRun.sellerCentralTabId
-    ? activeReportRun.id
-    : undefined
 }
 
 type ReportFetchType =
@@ -998,21 +968,18 @@ async function sendWhenContentScriptReady(
 }
 
 /** Asks the Seller Central tab's content script for one report source. */
-async function sendReportFetch(tabId: number, type: ReportFetchType, runId?: string): Promise<Record<string, unknown>> {
+async function sendReportFetch(tabId: number, type: ReportFetchType, runId: string): Promise<Record<string, unknown>> {
   const request = REPORT_REQUESTS[type]
-  const response = await sendWhenContentScriptReady(tabId, runId ? { type, runId } : { type }, request.fallbackError, (attempts, ms) => {
+  const response = await sendWhenContentScriptReady(tabId, { type, runId }, request.fallbackError, (attempts, ms) => {
     log.withRun(runId).info("report.contentScriptWait", { source: request.source, attempts, ms })
   })
   return { ok: true, ...request.pick(response) }
 }
 
-async function fetchReportSource(type: ReportFetchType, senderTab?: chrome.tabs.Tab, authorizedTabId?: number, authorizedRunId?: string): Promise<Record<string, unknown>> {
-  rememberReportProgressTab(senderTab?.id)
-  const runId = authorizedRunId ?? reportRunForPaletteTab(senderTab?.id)
+async function fetchReportSource(type: ReportFetchType, tabId: number, runId: string): Promise<Record<string, unknown>> {
   const source = REPORT_REQUESTS[type].source
   const done = log.withRun(runId).time("report.source", { source })
   try {
-    const { tabId } = authorizedTabId === undefined ? await ensureSellerCentralTab(senderTab, { focus: false }) : { tabId: authorizedTabId }
     await waitForTabComplete(tabId)
     const result = await sendReportFetch(tabId, type, runId)
     const items = Object.values(result).find(Array.isArray)
@@ -1024,21 +991,7 @@ async function fetchReportSource(type: ReportFetchType, senderTab?: chrome.tabs.
   }
 }
 
-export function rememberReportProgressTab(tabId?: number): void {
-  if (typeof tabId === "number") reportProgressTabId = tabId
-}
-
-export async function relayReportProgress(message: unknown): Promise<{ ok: true }> {
-  if (reportProgressTabId === undefined) return { ok: true }
-  try {
-    await chrome.tabs.sendMessage(reportProgressTabId, message)
-  } catch {
-    /* palette tab may have closed */
-  }
-  return { ok: true }
-}
-
-async function relayAuthorizedReportProgress(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<{ ok: true }> {
+export async function relayAuthorizedReportProgress(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<{ ok: true }> {
   if (!isOwnSender(sender) || sender.frameId !== 0 || !sender.url || new URL(sender.url).origin !== "https://sellercentral.amazon.com") return { ok: true }
   const run = await readResultsRun(message.runId)
   if (!run || run.sellerCentralTabId !== sender.tab?.id) return { ok: true }
@@ -1048,43 +1001,19 @@ async function relayAuthorizedReportProgress(message: Record<string, unknown>, s
   return { ok: true }
 }
 
-type UnfulfillableReport = { ok: true; listings: unknown[]; nextRemovalOrderId: string | null }
-
-export async function fetchUnfulfillableReport(senderTab?: chrome.tabs.Tab): Promise<UnfulfillableReport> {
-  return await fetchReportSource("REPORTS_FETCH_UNFULFILLABLE", senderTab) as UnfulfillableReport
-}
-export async function fetchFeedbackReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; feedbacks: unknown[] }> {
-  return await fetchReportSource("REPORTS_FETCH_FEEDBACK", senderTab) as { ok: true; feedbacks: unknown[] }
-}
-export async function fetchStrandedReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
-  return await fetchReportSource("REPORTS_FETCH_STRANDED", senderTab) as { ok: true; listings: unknown[] }
-}
-export async function fetchSuppressedReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; listings: unknown[] }> {
-  return await fetchReportSource("REPORTS_FETCH_SUPPRESSED", senderTab) as { ok: true; listings: unknown[] }
-}
-export async function fetchShippingQueueReport(senderTab?: chrome.tabs.Tab): Promise<{ ok: true; shipments: unknown[] }> {
-  return await fetchReportSource("REPORTS_FETCH_SHIPPING_QUEUE", senderTab) as { ok: true; shipments: unknown[] }
-}
-
 const CASE_SCRAPE_LIMIT = 50
 const CASE_SCRAPE_SIGN_IN_ERROR = "Sign in to Seller Central, then try again."
 
-export async function scrapeSellerCentralCases(
-  caseIds: unknown,
-  senderTab?: chrome.tabs.Tab,
-  authorizedTabId?: number,
-  runId?: string,
-): Promise<{ ok: true; file: unknown }> {
+async function scrapeSellerCentralCases(caseIds: unknown, tabId: number, runId: string): Promise<{ ok: true; file: unknown }> {
   const ids = normalizeCaseIds(caseIds)
   if (ids.length === 0) throw new Error("Enter at least one 11-digit Case ID.")
   if (ids.length > CASE_SCRAPE_LIMIT) throw new Error(`Scrape no more than ${CASE_SCRAPE_LIMIT} cases at a time.`)
   const done = log.time("case.scrape", { requested: ids.length })
   try {
-    const { tabId } = authorizedTabId === undefined ? await ensureSellerCentralTab(senderTab, { focus: false }) : { tabId: authorizedTabId }
     await waitForTabComplete(tabId)
     const loggedIn = await probeSellerCentralSession(tabId)
     if (!loggedIn) throw new Error(CASE_SCRAPE_SIGN_IN_ERROR)
-    const response = await chrome.tabs.sendMessage(tabId, { type: "SCRAPE_CASES", caseIds: ids, ...(runId ? { runId } : {}) }, { frameId: 0 }) as {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "SCRAPE_CASES", caseIds: ids, runId }, { frameId: 0 }) as {
       ok?: boolean
       error?: string
       file?: unknown
@@ -1244,44 +1173,6 @@ export async function checkSellerCentralSession(senderTab?: chrome.tabs.Tab): Pr
     : settled.length ? "signed-out" : "unknown"
   log.info("session.check", { session, tabs: tabs.length, settled: settled.length })
   return session
-}
-
-export async function prepareReports(senderTab?: chrome.tabs.Tab): Promise<ReportsPrepareResult> {
-  const runId = createLogRunId("report")
-  const runLog = log.withRun(runId)
-  const done = runLog.time("report.prepare")
-  const timings: LogData = {}
-  const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
-    const startedAt = Date.now()
-    try {
-      return await action()
-    } finally {
-      timings[name] = Date.now() - startedAt
-    }
-  }
-  try {
-    const { tabId, opened } = await step("tabMs", () => ensureSellerCentralTab(senderTab, { focus: false }))
-    await step("loadMs", () => waitForTabComplete(tabId))
-    const tab = await chrome.tabs.get(tabId)
-    const loggedInToStore = await step("sessionMs", () => probeSellerCentralSession(tabId))
-    done({ loggedInToStore, sellerCentralTab: opened ? "opened" : "reused", ...timings })
-    if (loggedInToStore) {
-      activeReportRun = { id: runId, paletteTabId: senderTab?.id, sellerCentralTabId: tabId }
-      return { ok: true, loggedInToStore: true, sellerCentralTabId: tabId }
-    }
-    if (senderTab?.id === tabId) return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId }
-
-    await chrome.tabs.update(tabId, { active: true })
-    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
-
-    const prompt = await chrome.tabs.sendMessage(tabId, { type: "OPEN_PALETTE", mode: "sign-in" }) as
-      { ok?: boolean; error?: string }
-    if (!prompt?.ok) throw new Error(prompt?.error ?? "Couldn’t open the command palette on Seller Central.")
-    return { ok: true, loggedInToStore: false, sellerCentralTabId: tabId, openedPromptOnSellerCentral: true }
-  } catch (error) {
-    runLog.error("report.prepareFailed", { error: describeError(error), ...timings })
-    throw error
-  }
 }
 
 /** Rechecks a queried tab, since it may have navigated away or closed since the query. */
@@ -2196,10 +2087,7 @@ export function handleLogMessage(
 ): boolean | undefined {
   if (type === LOG_ENTRIES_MESSAGE) {
     const tab = sender.tab?.id
-    const entries = sanitizeLogEntries(message.entries).map((entry) => {
-      const run = entry.run ?? reportRunForTab(tab)
-      return { ...entry, tab, ...(run ? { run } : {}) }
-    })
+    const entries = sanitizeLogEntries(message.entries).map((entry) => ({ ...entry, tab }))
     store.append(entries)
     sendResponse({ ok: true })
     return undefined

@@ -1,7 +1,6 @@
 import * as React from "react"
 import type { LucideIcon } from "lucide-react"
 import {
-  Bug,
   Building2,
   CircleAlert,
   Clock,
@@ -29,9 +28,7 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
-  CommandShortcut,
 } from "@/components/ui/command"
-import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { extractCaseIds, findCaseIds } from "@/lib/caseIds"
 import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"

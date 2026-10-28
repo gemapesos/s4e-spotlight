@@ -23,14 +23,6 @@ import {
 } from "./unfulfillable"
 import type { WorkbookCell, WorkbookSheet } from "./xlsxWorkbook"
 
-export const SHEET_PASTE_SHEETS = [
-  "UnfulfillableDisposals",
-  "Stranded",
-  "Feedback",
-  "SuppressedLE",
-  "Shipping Queue",
-] as const
-
 const JMG_OUTDOORS_STORE = "JMG Outdoors"
 
 type PasteColumn = {

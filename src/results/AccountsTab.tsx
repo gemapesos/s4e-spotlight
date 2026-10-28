@@ -6,7 +6,6 @@ import { Field, HeaderButton, Kbd, Notice, PanelFooter, PrimaryButton } from "@/
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { cn } from "@/lib/utils"
 import { api } from "@/options/api"
 import { moveRowFocus, WorkspaceBody, type WorkspaceLaunch } from "@/results/workspaceParts"
 import { CheckBubble, SWITCH_STAGE_LABELS, SwitchSteps, switchProgress } from "@/SwitchProgress"

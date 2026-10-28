@@ -1,7 +1,7 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { handleAccountsMessage, handleAccountTabUpdated, handleResultsMessage, revokeResultsForTab, SIGN_IN_URL } from "../src/background"
+import { handleAccountsMessage, handleAccountTabUpdated, handleResultsMessage, relayAuthorizedReportProgress, revokeResultsForTab, SIGN_IN_URL } from "../src/background"
 import { ACTIVE_JOB_STORAGE_KEY, decryptVault, encryptVault, SESSION_KEY_STORAGE_KEY, serializeKey, STORE_INDEX_KEY, VAULT_STORAGE_KEY } from "../src/lib/accounts"
 
 const origin = "chrome-extension://security-fixture/"
@@ -372,5 +372,59 @@ describe("security boundaries", () => {
     const { runId } = await handleResultsMessage({ type: "REPORTS_PREPARE", sections: ["stranded"] }, resultsSender)
     get.mockResolvedValue({ id: 91, status: "complete", url: "https://untrusted.example/" })
     await expect(handleResultsMessage({ type: "REPORTS_FETCH_STRANDED", runId }, resultsSender)).rejects.toThrow(/session changed/)
+  })
+
+  it.each([
+    { section: "unfulfillable", type: "REPORTS_FETCH_UNFULFILLABLE", response: { listings: [{ sku: "ABC-123" }], extra: "dropped" }, expected: { listings: [{ sku: "ABC-123" }], nextRemovalOrderId: null } },
+    { section: "feedback", type: "REPORTS_FETCH_FEEDBACK", response: { feedbacks: [{ feedbackId: "A1JYWNJI6O4TQ1" }] }, expected: { feedbacks: [{ feedbackId: "A1JYWNJI6O4TQ1" }] } },
+    { section: "stranded", type: "REPORTS_FETCH_STRANDED", response: { listings: [{ SKU: "STRANDED-SKU" }] }, expected: { listings: [{ SKU: "STRANDED-SKU" }] } },
+    { section: "suppressed", type: "REPORTS_FETCH_SUPPRESSED", response: { listings: [{ sku: "STOCK-SKU" }] }, expected: { listings: [{ sku: "STOCK-SKU" }] } },
+    { section: "shippingQueue", type: "REPORTS_FETCH_SHIPPING_QUEUE", response: { shipments: [{ shipmentId: "FBA19RKC646S" }] }, expected: { shipments: [{ shipmentId: "FBA19RKC646S" }] } },
+  ])("returns only what Results needs from $section, without focusing Seller Central", async ({ section, type, response, expected }) => {
+    sendMessage.mockImplementation(async (_tab: number, message: { type: string }) => (
+      message.type === "REPORTS_SESSION_STATUS" ? { ok: true, loggedInToStore: true, settled: true }
+        : message.type === type ? { ok: true, ...response } : { ok: true }
+    ))
+    const { runId } = await handleResultsMessage({ type: "REPORTS_PREPARE", sections: [section] }, resultsSender)
+    await expect(handleResultsMessage({ type, runId }, resultsSender)).resolves.toEqual({ ok: true, ...expected })
+    expect(sendMessage).toHaveBeenCalledWith(91, { type, runId }, { frameId: 0 })
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it("starts no run while Seller Central is signed out", async () => {
+    sendMessage.mockResolvedValue({ ok: true, loggedInToStore: false, settled: true })
+    await expect(handleResultsMessage({ type: "REPORTS_PREPARE", sections: ["stranded"] }, resultsSender)).resolves.toEqual({ ok: true, loggedInToStore: false })
+    await expect(handleResultsMessage({ type: "REPORTS_PREPARE", mode: "cases", caseIds: ["22420938051"] }, resultsSender)).rejects.toThrow("Sign in to a store in Seller Central")
+    expect(Object.keys(session).some((key) => key.startsWith("resultsRun:"))).toBe(false)
+  })
+
+  it("scrapes only the run's case IDs on its Seller Central tab", async () => {
+    const file = { scrapedAt: "2026-10-22T11:01:00.000Z", timeZone: "Asia/Manila", cases: [{ caseId: "22420938051" }] }
+    sendMessage.mockImplementation(async (_tab: number, message: { type: string }) => (
+      message.type === "REPORTS_SESSION_STATUS" ? { ok: true, loggedInToStore: true, settled: true }
+        : message.type === "SCRAPE_CASES" ? { ok: true, file } : { ok: true }
+    ))
+    const { runId } = await handleResultsMessage({ type: "REPORTS_PREPARE", mode: "cases", caseIds: ["22420938051", "not-an-id"] }, resultsSender)
+    await expect(handleResultsMessage({ type: "SCRAPE_CASES", runId, caseIds: ["99999999999"] }, resultsSender)).resolves.toEqual({ ok: true, file })
+    expect(sendMessage).toHaveBeenCalledWith(91, { type: "SCRAPE_CASES", caseIds: ["22420938051"], runId }, { frameId: 0 })
+  })
+
+  it("stops a case scrape when the store signed out after prepare", async () => {
+    const { runId } = await handleResultsMessage({ type: "REPORTS_PREPARE", mode: "cases", caseIds: ["22420938051"] }, resultsSender)
+    sendMessage.mockResolvedValue({ ok: true, loggedInToStore: false, settled: true })
+    await expect(handleResultsMessage({ type: "SCRAPE_CASES", runId }, resultsSender)).rejects.toThrow("Sign in to Seller Central, then try again.")
+    expect(sendMessage).not.toHaveBeenCalledWith(91, expect.objectContaining({ type: "SCRAPE_CASES" }), { frameId: 0 })
+  })
+
+  it("forwards report progress only from the run's Seller Central tab to its Results page", async () => {
+    const { runId } = await handleResultsMessage({ type: "REPORTS_PREPARE", sections: ["shippingQueue"] }, resultsSender)
+    const progress = { type: "REPORTS_PROGRESS", runId, source: "shippingQueue", status: "active" }
+    const sellerCentralSender: chrome.runtime.MessageSender = { id: "security-fixture", url: "https://sellercentral.amazon.com/home", frameId: 0, tab: { id: 91, windowId: 1 } as chrome.tabs.Tab }
+    sendMessage.mockClear()
+    await relayAuthorizedReportProgress(progress, { ...sellerCentralSender, tab: { id: 92, windowId: 1 } as chrome.tabs.Tab })
+    await relayAuthorizedReportProgress(progress, { ...sellerCentralSender, url: "https://untrusted.example/" })
+    expect(sendMessage).not.toHaveBeenCalled()
+    await relayAuthorizedReportProgress(progress, sellerCentralSender)
+    expect(sendMessage).toHaveBeenCalledWith(200, progress, { documentId: "results-document" })
   })
 })

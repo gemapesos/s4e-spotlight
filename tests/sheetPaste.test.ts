@@ -6,7 +6,7 @@ import {
   SHIPPING_STATUS_NEW,
   type ShippingQueueShipment,
 } from "../src/lib/shippingQueue"
-import { SHEET_PASTE_SHEETS, sheetPasteSheets, type SheetPasteInput } from "../src/lib/sheetPaste"
+import { sheetPasteSheets, type SheetPasteInput } from "../src/lib/sheetPaste"
 import { buildWorkbook, readStoredZip } from "../src/lib/xlsxWorkbook"
 import {
   formatRemovalStatus,
@@ -77,7 +77,7 @@ describe("sheet paste workbook", () => {
       unfulfillableListings: [listing],
     })
 
-    expect(sheets.map((sheet) => sheet.name)).toEqual([...SHEET_PASTE_SHEETS])
+    expect(sheets.map((sheet) => sheet.name)).toEqual(["UnfulfillableDisposals", "Stranded", "Feedback", "SuppressedLE", "Shipping Queue"])
     const unfulfillable = sheets[0].rows ?? []
     expect(unfulfillable[0]).toEqual([
       "Date",

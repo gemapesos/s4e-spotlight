@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   DEFAULT_ENABLED_FEATURES,
-  DEFAULT_SETTINGS,
   DEFAULT_TIME_OUT_FORM_VALUES,
   FEATURE_IDS,
   enabledFeaturesEqual,
@@ -12,6 +11,8 @@ import {
   parseSettings,
   saveSettings,
 } from "../src/lib/settings"
+
+const DEFAULT_SETTINGS = { features: DEFAULT_ENABLED_FEATURES, timeOutForm: DEFAULT_TIME_OUT_FORM_VALUES }
 
 describe("parseSettings", () => {
   it("returns defaults for missing or invalid values", () => {

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest"
 
 import {
   VIEW_CASE_SIGN_IN_ERROR,
-  caseScrapeFailure,
   caseScrapeFileName,
   scrapeCases,
 } from "../src/lib/viewCase"
@@ -253,7 +252,6 @@ describe("scrapeCases", () => {
 
     expect(file.cases.map((item) => item.caseId)).toEqual([CASE_ID])
     expect(file.errors).toEqual([{ caseId: "11111111111", error: VIEW_CASE_SIGN_IN_ERROR }])
-    expect(caseScrapeFailure(file)).toBe(`Couldn’t scrape 11111111111. ${VIEW_CASE_SIGN_IN_ERROR}`)
   })
 })
 

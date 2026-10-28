@@ -15,8 +15,7 @@ import {
   setLogSink,
   type LogData,
 } from "./lib/log"
-import { downloadGeneratedReport } from "./lib/reportDownload"
-import { reportWarnings, type GeneratedReport, type ReportDownloadFormat } from "./lib/reports"
+import { reportWarnings, type GeneratedReport } from "./lib/reports"
 import {
   DEFAULT_ENABLED_FEATURES,
   enabledFeaturesEqual,
@@ -478,17 +477,6 @@ export async function generateReports(
     throw error
   } finally {
     unsubscribe()
-  }
-}
-
-function downloadReport(report: GeneratedReport, format: ReportDownloadFormat, targetDocument: Document): void {
-  const done = paletteLog.time("report.download", { format })
-  try {
-    const { bytes } = downloadGeneratedReport(report, format, targetDocument)
-    done({ bytes })
-  } catch (error) {
-    done({ error: describeError(error) }, "error")
-    throw error
   }
 }
 

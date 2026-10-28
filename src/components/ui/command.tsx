@@ -462,7 +462,7 @@ function CommandItem({
   ) : selectedHint ? (
     <CommandKbd aria-hidden="true" className="opacity-0 transition-opacity duration-100 group-data-selected/command-item:opacity-100">{selectedHint}</CommandKbd>
   ) : (
-    <CheckIcon className="opacity-0 group-has-data-[slot=command-checkbox]/command-item:hidden group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100" />
+    <CheckIcon className="opacity-0 group-has-data-[slot=command-shortcut]/command-item:hidden group-data-[checked=true]/command-item:opacity-100" />
   )
 
   return (
@@ -493,23 +493,6 @@ function CommandShortcut({
       )}
       {...props}
     />
-  )
-}
-
-/** A leading checkbox for toggle rows; it follows the row's data-checked. */
-function CommandCheckbox({ className, ...props }: React.ComponentProps<"span">) {
-  return (
-    <span
-      aria-hidden="true"
-      data-slot="command-checkbox"
-      className={cn(
-        "flex size-4 shrink-0 items-center justify-center rounded-[0.25rem] border border-ring bg-background text-primary-foreground group-data-[checked=true]/command-item:border-primary group-data-[checked=true]/command-item:bg-primary dark:bg-input/30 dark:group-data-[checked=true]/command-item:bg-primary",
-        className
-      )}
-      {...props}
-    >
-      <CheckIcon className="size-3! text-primary-foreground! opacity-0 group-data-[checked=true]/command-item:animate-check-in group-data-[checked=true]/command-item:opacity-100" strokeWidth={3} />
-    </span>
   )
 }
 
@@ -573,7 +556,6 @@ function CommandHeader({
 
 export {
   Command,
-  CommandCheckbox,
   CommandFooter,
   CommandHeader,
   CommandHint,

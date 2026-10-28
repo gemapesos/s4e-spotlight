@@ -76,11 +76,6 @@ export const DEFAULT_TIME_OUT_FORM_VALUES: TimeOutFormValues = {
   karenReviewNeeded: "No",
 }
 
-export const DEFAULT_SETTINGS: ExtensionSettings = {
-  features: DEFAULT_ENABLED_FEATURES,
-  timeOutForm: DEFAULT_TIME_OUT_FORM_VALUES,
-}
-
 export const TIME_OUT_FORM_BASE_URL =
   "https://docs.google.com/forms/d/e/1FAIpQLScmidfrFAqBMXv6EdQ6GEyj1GrGo-cxPh3OcqTMpICYUg6kRw/viewform"
 
