@@ -1,7 +1,7 @@
 import { webcrypto } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { handleAccountsMessage as rawHandleAccountsMessage } from "../src/background/accounts"
+import { routeMessage } from "../src/background/router"
 import { pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN } from "../src/background/sellerCentralTabs"
 import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, signInUrlFor } from "../src/background/switch/signIn"
 import { validateVault } from "../src/background/vault"
@@ -14,13 +14,13 @@ const accountsSender: chrome.runtime.MessageSender = { id: "test-extension", url
 // Happy-path fixtures use real context metadata. Authorization regression tests call the raw handler.
 function handleAccountsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender) {
   const automation = String(message.type).startsWith("ACCOUNT_AUTOMATION_")
-  const result = rawHandleAccountsMessage(message, {
+  const result = routeMessage(message, {
     ...accountsSender,
     ...(automation ? { url: "https://sellercentral.amazon.com/ap/signin", documentId: "login-document" } : {}),
     ...sender,
   })
   // A started switch signs out in a follow-up vault operation; a read queued behind it waits for it.
-  const settled = () => rawHandleAccountsMessage({ type: "ACCOUNTS_GET_VAULT" }, accountsSender).catch(() => undefined)
+  const settled = () => routeMessage({ type: "ACCOUNTS_GET_VAULT" }, accountsSender).catch(() => undefined)
   return message.type === "ACCOUNTS_START_SWITCH" ? result.finally(settled) : result
 }
 
@@ -722,7 +722,7 @@ describe("Accounts background workflow", () => {
     debuggerAttach.mockClear(); debuggerSendCommand.mockClear(); debuggerDetach.mockClear() // ignore the sign-out step's session
     const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/ap/signin" }
 
-    await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_ESCAPE", jobId: job.id }, sender)).rejects.toThrow(/unknown account command/i)
+    await expect(handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_ESCAPE", jobId: job.id }, sender)).rejects.toThrow(/unknown message type/i)
     expect(debuggerAttach).not.toHaveBeenCalled()
   })
 

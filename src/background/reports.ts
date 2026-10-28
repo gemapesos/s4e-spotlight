@@ -1,16 +1,16 @@
 /** Report and case-scrape runs the workspace starts: each runs on one Seller Central tab for one page. */
 import { createLogger, describeError } from "@/lib/log"
-import { MAX_BULK_IDS, type WorkspaceMode } from "@/shared/messages"
+import { MAX_BULK_IDS, type BackgroundReply } from "@/shared/messages"
 import { normalizeCaseIds } from "./openTabs"
 import { ensureSellerCentralTab, probeSellerCentralSession, sendWhenContentScriptReady, waitForTabComplete } from "./sellerCentralTabs"
-import { isOwnSender, isPageSender, requireSenderTab } from "./senders"
+import { isOwnSender, isPageSender } from "./senders"
 import { getActiveJob } from "./switch/job"
-import { openWorkspace, RESULTS_LAUNCH_PREFIX, serializeWorkspace, type WorkspaceLaunch } from "./workspace"
+import { requireWorkspaceSender, RESULTS_LAUNCH_PREFIX } from "./workspace"
 
 const log = createLogger("background")
 
 const RESULTS_RUN_PREFIX = "resultsRun:"
-const RESULTS_RUN_TTL_MS = 30 * 60 * 1000
+export const RESULTS_RUN_TTL_MS = 30 * 60 * 1000
 interface ResultsRun {
   id: string
   ownerTabId: number
@@ -83,88 +83,72 @@ export async function revokeResultsForTab(tabId: number, closed = false): Promis
   })
 }
 
-/** Raw results are only returned to a confirmed run in our own Results document. */
-export async function handleResultsMessage(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<Record<string, unknown>> {
-  if (!isOwnSender(sender)) throw new Error("Unauthorized extension message.")
-  const type = String(message.type)
-  if (type === "RESULTS_OPEN") {
-    const source = requireSenderTab(sender.tab)
-    const mode: WorkspaceMode = message.mode === "cases" ? "cases" : message.mode === "accounts" ? "accounts" : "reports"
-    const caseIds = mode === "cases" ? normalizeCaseIds(message.caseIds) : []
-    if (caseIds.length > MAX_BULK_IDS) throw new Error(`Choose no more than ${MAX_BULK_IDS} case IDs.`)
-    await serializeWorkspace(() => openWorkspace({ mode, caseIds }, source))
-    return { ok: true }
+export async function prepareRun(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"REPORTS_PREPARE">> {
+  const owner = requireWorkspaceSender(sender)
+  const ownerEpoch = observeResultsTab(owner.tabId)
+  if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
+  const { tabId } = await ensureSellerCentralTab(sender.tab, { focus: false })
+  await waitForTabComplete(tabId)
+  const sellerEpoch = observeResultsTab(tabId)
+  if (!await probeSellerCentralSession(tabId)) {
+    if (message.mode === "cases") throw new Error("Sign in to a store in Seller Central, then try again.")
+    return { ok: true, loggedInToStore: false }
   }
-  if (!isPageSender(sender, "results.html") || !sender.documentId || sender.tab?.id === undefined) {
-    throw new Error("Open this action from the Results page.")
-  }
-  if (type === "RESULTS_INIT") {
-    if (typeof message.launchId !== "string" || !/^[a-f\d-]{36}$/iu.test(message.launchId)) return { ok: true, mode: "reports", caseIds: [] }
-    const key = `${RESULTS_LAUNCH_PREFIX}${message.launchId}`
-    const launch = (await chrome.storage.session.get(key))[key] as WorkspaceLaunch | undefined
-    if (!launch || launch.tabId !== sender.tab.id || Date.now() - launch.startedAt >= RESULTS_RUN_TTL_MS) throw new Error("This window has expired. Open it again from the palette.")
-    return {
-      ok: true,
-      mode: launch.mode,
-      caseIds: launch.caseIds,
-      ...(launch.resumeId ? { resumeId: launch.resumeId, storeName: launch.storeName ?? "the selected store" } : {}),
+  const tab = await chrome.tabs.get(tabId)
+  if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com") throw new Error("The Seller Central tab has navigated away.")
+  const cases = message.mode === "cases"
+  const sections = Array.isArray(message.sections) ? message.sections : []
+  const allowed = cases ? ["SCRAPE_CASES"] : Object.entries(REPORT_REQUESTS).filter(([, request]) => sections.includes(request.source)).map(([name]) => name)
+  const caseIds = cases ? normalizeCaseIds(message.caseIds) : []
+  if (allowed.length === 0 || (cases && (caseIds.length === 0 || caseIds.length > MAX_BULK_IDS))) throw new Error("Choose what to include before starting.")
+  const run: ResultsRun = { id: crypto.randomUUID(), ownerTabId: owner.tabId, ownerDocumentId: owner.documentId, sellerCentralTabId: tabId, sellerCentralUrl: tab.url, startedAt: Date.now(), allowed, claimed: [], caseIds }
+  await serializeResultControl(async () => {
+    const alive = await chrome.tabs.sendMessage(run.ownerTabId, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: run.ownerDocumentId }) as { ok?: boolean } | undefined
+    if (!alive?.ok || resultsNavigationEpoch.get(run.ownerTabId) !== ownerEpoch || resultsNavigationEpoch.get(tabId) !== sellerEpoch) {
+      throw new Error("A report tab changed while preparing. Start the report again.")
     }
-  }
-  if (type === "REPORTS_PREPARE") {
-    const ownerEpoch = observeResultsTab(sender.tab.id)
     if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
-    const { tabId } = await ensureSellerCentralTab(sender.tab, { focus: false })
-    await waitForTabComplete(tabId)
-    const sellerEpoch = observeResultsTab(tabId)
-    if (!await probeSellerCentralSession(tabId)) {
-      if (message.mode === "cases") throw new Error("Sign in to a store in Seller Central, then try again.")
-      return { ok: true, loggedInToStore: false }
-    }
-    const tab = await chrome.tabs.get(tabId)
-    if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com") throw new Error("The Seller Central tab has navigated away.")
-    const cases = message.mode === "cases"
-    const sections = Array.isArray(message.sections) ? message.sections : []
-    const allowed = cases ? ["SCRAPE_CASES"] : Object.entries(REPORT_REQUESTS).filter(([, request]) => sections.includes(request.source)).map(([name]) => name)
-    const caseIds = cases ? normalizeCaseIds(message.caseIds) : []
-    if (allowed.length === 0 || (cases && (caseIds.length === 0 || caseIds.length > MAX_BULK_IDS))) throw new Error("Choose what to include before starting.")
-    const run: ResultsRun = { id: crypto.randomUUID(), ownerTabId: sender.tab.id, ownerDocumentId: sender.documentId, sellerCentralTabId: tabId, sellerCentralUrl: tab.url, startedAt: Date.now(), allowed, claimed: [], caseIds }
-    await serializeResultControl(async () => {
-      const alive = await chrome.tabs.sendMessage(run.ownerTabId, { type: "ACCOUNTS_RESUME_CHECK" }, { documentId: run.ownerDocumentId }) as { ok?: boolean } | undefined
-      if (!alive?.ok || resultsNavigationEpoch.get(run.ownerTabId) !== ownerEpoch || resultsNavigationEpoch.get(tabId) !== sellerEpoch) {
-        throw new Error("A report tab changed while preparing. Start the report again.")
-      }
-      if (await getActiveJob()) throw new Error("Wait for the store switch to finish, then try again.")
-      await chrome.storage.session.set({ [`${RESULTS_RUN_PREFIX}${run.id}`]: run })
-    })
-    return { ok: true, runId: run.id }
-  }
-  if (type === "RESULTS_CANCEL" || type === "RESULTS_FINISH") {
-    return serializeResultControl(async () => {
-      const run = await readResultsRun(message.runId)
-      if (run && (run.ownerTabId !== sender.tab?.id || run.ownerDocumentId !== sender.documentId)) throw new Error("This report belongs to another Results page.")
-      if (run) {
-        await chrome.storage.session.remove(`${RESULTS_RUN_PREFIX}${run.id}`)
-        void chrome.tabs.sendMessage(run.sellerCentralTabId, { type: "REPORTS_ABORT", runId: run.id }, { frameId: 0 }).catch(() => undefined)
-      }
-      return { ok: true }
-    })
-  }
-  const run = await serializeResultControl(async () => {
-    const current = await assertResultsRun(message.runId, sender)
-    if (!current.allowed.includes(type) || current.claimed.includes(type)) throw new Error("This request was not selected or has already started.")
-    current.claimed.push(type)
-    await chrome.storage.session.set({ [`${RESULTS_RUN_PREFIX}${current.id}`]: current })
-    return current
+    await chrome.storage.session.set({ [`${RESULTS_RUN_PREFIX}${run.id}`]: run })
   })
-  await serializeResultControl(() => assertResultsRun(run.id, sender))
-  const result = type === "SCRAPE_CASES"
-    ? await scrapeSellerCentralCases(run.caseIds, run.sellerCentralTabId, run.id)
-    : await fetchReportSource(type as ReportFetchType, run.sellerCentralTabId, run.id)
-  await serializeResultControl(() => assertResultsRun(run.id, sender))
-  return result
+  return { ok: true, runId: run.id }
 }
 
-type ReportFetchType =
+/** Cancels or finishes a run; the Seller Central tab stops any request still going. */
+export function endRun(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<{ ok: true }> {
+  const owner = requireWorkspaceSender(sender)
+  return serializeResultControl(async () => {
+    const run = await readResultsRun(message.runId)
+    if (run && (run.ownerTabId !== owner.tabId || run.ownerDocumentId !== owner.documentId)) throw new Error("This report belongs to another Results page.")
+    if (run) {
+      await chrome.storage.session.remove(`${RESULTS_RUN_PREFIX}${run.id}`)
+      void chrome.tabs.sendMessage(run.sellerCentralTabId, { type: "REPORTS_ABORT", runId: run.id }, { frameId: 0 }).catch(() => undefined)
+    }
+    return { ok: true }
+  })
+}
+
+/** Raw results are only returned to a confirmed run in our own Results document, once per source. */
+export function runSource<T extends ReportFetchType | "SCRAPE_CASES">(type: T) {
+  return async (message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<T>> => {
+    requireWorkspaceSender(sender)
+    const run = await serializeResultControl(async () => {
+      const current = await assertResultsRun(message.runId, sender)
+      if (!current.allowed.includes(type) || current.claimed.includes(type)) throw new Error("This request was not selected or has already started.")
+      current.claimed.push(type)
+      await chrome.storage.session.set({ [`${RESULTS_RUN_PREFIX}${current.id}`]: current })
+      return current
+    })
+    await serializeResultControl(() => assertResultsRun(run.id, sender))
+    const result = type === "SCRAPE_CASES"
+      ? await scrapeSellerCentralCases(run.caseIds, run.sellerCentralTabId, run.id)
+      : await fetchReportSource(type as ReportFetchType, run.sellerCentralTabId, run.id)
+    await serializeResultControl(() => assertResultsRun(run.id, sender))
+    // The content script's reply, narrowed by its source's pick.
+    return result as BackgroundReply<T>
+  }
+}
+
+export type ReportFetchType =
   | "REPORTS_FETCH_UNFULFILLABLE"
   | "REPORTS_FETCH_FEEDBACK"
   | "REPORTS_FETCH_STRANDED"

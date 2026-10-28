@@ -16,7 +16,8 @@ export function isPageSender(sender: chrome.runtime.MessageSender, page: string)
     && sender.url?.split(/[?#]/u)[0] === chrome.runtime.getURL(page)
 }
 
-/** Only extension pages (popup, options) may read or clear the diagnostics log. */
+export const EXTENSION_PAGES = ["options.html", "popup.html", "timeout.html", "results.html"] as const
+
 export function isExtensionPage(sender: chrome.runtime.MessageSender): boolean {
-  return ["options.html", "popup.html", "timeout.html", "results.html"].some((page) => isPageSender(sender, page))
+  return EXTENSION_PAGES.some((page) => isPageSender(sender, page))
 }

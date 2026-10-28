@@ -1,5 +1,5 @@
 /** The tabs and windows a switch uses, and handing the finished store to the user's tab. */
-import type { ApiResponse } from "../accounts"
+import type { BackgroundReply } from "@/shared/messages"
 import { assertSwitchOperationCurrent } from "../operations"
 import { SELLER_CENTRAL_TAB_URL_PATTERN } from "../sellerCentralTabs"
 import { setCurrentStoreId } from "../vault"
@@ -92,7 +92,7 @@ export async function moveJobToUserTab(job: ActiveJob): Promise<boolean> {
 }
 
 /** Finish only after the saved store URL has produced a new, loaded, signed-in document. */
-export async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.MessageSender): Promise<ApiResponse> {
+export async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"ACCOUNT_AUTOMATION_STORE_READY">> {
   if ((job.resumeStage ?? job.stage) !== "store" || sender.documentId === job.storeNavigationDocumentId) {
     throw new Error("The selected store has not loaded yet.")
   }

@@ -1,6 +1,9 @@
 /** The workspace window (results.html): opening it and handing it what to show. */
-import { type WorkspaceMode } from "@/shared/messages"
+import { MAX_BULK_IDS, type BackgroundReply, type WorkspaceMode } from "@/shared/messages"
+import { normalizeCaseIds } from "./openTabs"
+import { RESULTS_RUN_TTL_MS } from "./reports"
 import { waitForTabCompleteMatching } from "./sellerCentralTabs"
+import { isPageSender, requireSenderTab } from "./senders"
 
 export const RESULTS_LAUNCH_PREFIX = "resultsLaunch:"
 /**
@@ -96,4 +99,35 @@ export async function openWorkspace(
     .then(() => chrome.windows.update(windowId, { focused: true }))
     .catch(() => undefined)
   return { tabId, created: true }
+}
+
+export async function openResults(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"RESULTS_OPEN">> {
+  const source = requireSenderTab(sender.tab)
+  const mode: WorkspaceMode = message.mode === "cases" ? "cases" : message.mode === "accounts" ? "accounts" : "reports"
+  const caseIds = mode === "cases" ? normalizeCaseIds(message.caseIds) : []
+  if (caseIds.length > MAX_BULK_IDS) throw new Error(`Choose no more than ${MAX_BULK_IDS} case IDs.`)
+  await serializeWorkspace(() => openWorkspace({ mode, caseIds }, source))
+  return { ok: true }
+}
+
+/** The workspace page asking for itself: its tab and document, which runs and launches are bound to. */
+export function requireWorkspaceSender(sender: chrome.runtime.MessageSender): { tabId: number; documentId: string } {
+  if (!isPageSender(sender, "results.html") || !sender.documentId || sender.tab?.id === undefined) {
+    throw new Error("Open this action from the Results page.")
+  }
+  return { tabId: sender.tab.id, documentId: sender.documentId }
+}
+
+export async function initResults(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"RESULTS_INIT">> {
+  const { tabId } = requireWorkspaceSender(sender)
+  if (typeof message.launchId !== "string" || !/^[a-f\d-]{36}$/iu.test(message.launchId)) return { ok: true, mode: "reports", caseIds: [] }
+  const key = `${RESULTS_LAUNCH_PREFIX}${message.launchId}`
+  const launch = (await chrome.storage.session.get(key))[key] as WorkspaceLaunch | undefined
+  if (!launch || launch.tabId !== tabId || Date.now() - launch.startedAt >= RESULTS_RUN_TTL_MS) throw new Error("This window has expired. Open it again from the palette.")
+  return {
+    ok: true,
+    mode: launch.mode,
+    caseIds: launch.caseIds,
+    ...(launch.resumeId ? { resumeId: launch.resumeId, storeName: launch.storeName ?? "the selected store" } : {}),
+  }
 }

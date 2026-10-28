@@ -12,13 +12,8 @@ const REMOVAL_ORDER_URL = "https://sellercentral.amazon.com/recoveryui/removal-o
 const SKU_URL = "https://sellercentral.amazon.com/myinventory/inventory?fulfilledBy=all&page=1&pageSize=250&searchField=all&searchTerm="
 const SKU_URL_SUFFIX = "&sort=available_desc&status=all&ref_=xx_invmgr_favb_xx"
 export const TIME_OUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1E7gfUVzy47vboZHOJ6xd8Jwx-1N6oewaVggrtI7G4yw/edit?gid=0#gid=0"
-export type OpenIdsResponse =
-  | { ok: true; openedCount: number }
-  | { ok: false; error: string; openedIds?: string[]; rolledBackIds?: string[] }
 export type CreateTab = (properties: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>
 type RemoveTabs = (tabIds: number[]) => Promise<void>
-type OpenTabs = (ids: unknown, senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
-type OpenTimeOut = (senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedCount: number }>
 type LoadTimeOutFormValues = () => Promise<TimeOutFormValues>
 export const createChromeTab: CreateTab = (properties) => chrome.tabs.create(properties)
 const removeChromeTabs: RemoveTabs = (tabIds) => chrome.tabs.remove(tabIds)
@@ -173,54 +168,18 @@ export async function openTimeOutTabs(
   )
 }
 
-function openTabsFailure(error: unknown, fallback: string): OpenIdsResponse {
-  return {
-    ok: false,
-    error: errorMessage(error, fallback),
-    ...(error instanceof TabBatchError ? { openedIds: error.openedIds, rolledBackIds: error.rolledBackIds } : {}),
-  }
-}
-
-export function createOpenIdsMessageListener(
-  openCases: OpenTabs = openCaseTabs,
-  openShipments: OpenTabs = openShipmentTabs,
-  openSkus: OpenTabs = openSkuTabs,
-  openTimeOut: OpenTimeOut = openTimeOutTabs,
-  openRemovalOrders: OpenTabs = openRemovalOrderTabs,
-) {
-  const openers: Record<string, { kind: string; idsKey: string; open: OpenTabs }> = {
-    OPEN_CASE_IDS: { kind: "case", idsKey: "caseIds", open: openCases },
-    OPEN_SHIPMENT_IDS: { kind: "shipment", idsKey: "shipmentIds", open: openShipments },
-    OPEN_SKU_IDS: { kind: "sku", idsKey: "skuIds", open: openSkus },
-    OPEN_REMOVAL_ORDER_IDS: { kind: "removalOrder", idsKey: "removalOrderIds", open: openRemovalOrders },
-  }
-  return (
-    message: unknown,
-    sender: chrome.runtime.MessageSender,
-    sendResponse: (response: OpenIdsResponse) => void,
-  ): boolean | undefined => {
-    if (!message || typeof message !== "object" || !("type" in message)) return undefined
-    const record = message as Record<string, unknown>
-    const type = String(record.type)
-    const opener = Object.hasOwn(openers, type) ? openers[type] : undefined
-    if (type !== "OPEN_TIME_OUT" && !opener) return undefined
-
-    const kind = opener?.kind ?? "timeOut"
-    const done = log.time("tabs.open", { kind })
-    const request = opener ? opener.open(record[opener.idsKey], sender.tab) : openTimeOut(sender.tab)
-    void request.then(
-      (result) => {
-        done({ count: result?.openedCount ?? 0 })
-        sendResponse({ ok: true, openedCount: result?.openedCount ?? 0 })
-      },
-      (error: unknown) => {
-        const rollback = error instanceof TabBatchError
-          ? { stillOpen: error.openedIds.length, closed: error.rolledBackIds.length }
-          : {}
-        done({ error: describeError(error), ...rollback }, "error")
-        sendResponse(openTabsFailure(error, opener ? "Couldn’t open tabs." : "Couldn’t open Time Out."))
-      },
-    )
-    return true
+/** Opens one batch of tabs, logging how many opened, or on failure how many were closed again. */
+export async function openIds(kind: string, open: () => Promise<{ openedCount: number }>): Promise<{ ok: true; openedCount: number }> {
+  const done = log.time("tabs.open", { kind })
+  try {
+    const { openedCount } = await open()
+    done({ count: openedCount })
+    return { ok: true, openedCount }
+  } catch (error) {
+    const rollback = error instanceof TabBatchError
+      ? { stillOpen: error.openedIds.length, closed: error.rolledBackIds.length }
+      : {}
+    done({ error: describeError(error), ...rollback }, "error")
+    throw error
   }
 }

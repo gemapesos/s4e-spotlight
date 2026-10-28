@@ -11,6 +11,8 @@ const log = createLogger("background")
 export const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
 /** "Switched to …" stays on the finished tab, across its reloads, until the user dismisses it. */
 export const SWITCH_NOTICE_KEY = "accountsSwitchNotice"
+/** The store switch an unlock in the workspace window resumes, and the page it was chosen on. */
+export const UNLOCK_RESUME_KEY = "accountsUnlockResume"
 export interface SwitchNotice { tabId: number; storeName: string }
 export interface ActiveJob {
   id: string

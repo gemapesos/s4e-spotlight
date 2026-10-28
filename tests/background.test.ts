@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { handleLogMessage } from "../src/background/logs"
-import { buildCaseUrl, buildRemovalOrderUrl, buildShipmentUrl, buildSkuUrl, buildTimeOutFormUrl, createOpenIdsMessageListener, normalizeCaseIds, normalizeRemovalOrderIds, normalizeShipmentIds, normalizeSkuIds, openCaseTabs, openRemovalOrderTabs, openShipmentTabs, openSkuTabs, openTimeOutTabs, TIME_OUT_SHEET_URL } from "../src/background/openTabs"
+import { appendLogEntries, clearLogEntries, readLogEntries } from "../src/background/logs"
+import { buildCaseUrl, buildRemovalOrderUrl, buildShipmentUrl, buildSkuUrl, buildTimeOutFormUrl, normalizeCaseIds, normalizeRemovalOrderIds, normalizeShipmentIds, normalizeSkuIds, openCaseTabs, openRemovalOrderTabs, openShipmentTabs, openSkuTabs, openTimeOutTabs, TIME_OUT_SHEET_URL } from "../src/background/openTabs"
+import { listenForMessages, routeMessage } from "../src/background/router"
 import { createLogStore, type LogEntry } from "../src/lib/log"
 import { DEFAULT_TIME_OUT_FORM_VALUES } from "../src/lib/settings"
 
@@ -67,48 +68,6 @@ describe("background Case ID handling", () => {
     })
   })
 
-  it("returns a structured success response for the message", async () => {
-    const openTabs = vi.fn().mockResolvedValue({ openedCount: 1 })
-    const sendResponse = vi.fn()
-    const listener = createOpenIdsMessageListener(openTabs)
-
-    expect(
-      listener(
-        { type: "OPEN_CASE_IDS", caseIds: ["21476974831"] },
-        { tab: senderTab } as chrome.runtime.MessageSender,
-        sendResponse,
-      ),
-    ).toBe(true)
-
-    await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
-    })
-    expect(openTabs).toHaveBeenCalledWith(["21476974831"], senderTab)
-  })
-
-  it("returns a structured error and ignores unrelated messages", async () => {
-    const openTabs = vi.fn().mockRejectedValue(new Error("tab creation failed"))
-    const sendResponse = vi.fn()
-    const listener = createOpenIdsMessageListener(openTabs)
-
-    expect(
-      listener(
-        { type: "OPEN_CASE_IDS", caseIds: [] },
-        { tab: senderTab } as chrome.runtime.MessageSender,
-        sendResponse,
-      ),
-    ).toBe(true)
-
-    await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({
-        ok: false,
-        error: "tab creation failed",
-      })
-    })
-
-    expect(listener({ type: "OTHER" }, {}, sendResponse)).toBeUndefined()
-  })
-
   it("rolls back a partially created batch", async () => {
     const createTab = vi.fn()
       .mockResolvedValueOnce({ id: 101 } as chrome.tabs.Tab)
@@ -167,26 +126,6 @@ describe("background Removal Order ID handling", () => {
     })
   })
 
-  it("routes removal order messages to the removal order opener", async () => {
-    const unused = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openRemovalOrders = vi.fn().mockResolvedValue({ openedCount: 1 })
-    const sendResponse = vi.fn()
-    const listener = createOpenIdsMessageListener(unused, unused, unused, unused, openRemovalOrders)
-
-    expect(
-      listener(
-        { type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds: ["S4EKM0127"] },
-        { tab: senderTab } as chrome.runtime.MessageSender,
-        sendResponse,
-      ),
-    ).toBe(true)
-
-    await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
-    })
-    expect(openRemovalOrders).toHaveBeenCalledWith(["S4EKM0127"], senderTab)
-    expect(unused).not.toHaveBeenCalled()
-  })
 })
 
 describe("background Shipment ID handling", () => {
@@ -233,29 +172,6 @@ describe("background Shipment ID handling", () => {
     })
   })
 
-  it("routes shipment messages and returns a structured response", async () => {
-    const openCases = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openShipments = vi.fn().mockResolvedValue({ openedCount: 1 })
-    const sendResponse = vi.fn()
-    const listener = createOpenIdsMessageListener(openCases, openShipments)
-
-    expect(
-      listener(
-        {
-          type: "OPEN_SHIPMENT_IDS",
-          shipmentIds: ["FBA19749WJ6Q"],
-        },
-        { tab: senderTab } as chrome.runtime.MessageSender,
-        sendResponse,
-      ),
-    ).toBe(true)
-
-    await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
-    })
-    expect(openShipments).toHaveBeenCalledWith(["FBA19749WJ6Q"], senderTab)
-    expect(openCases).not.toHaveBeenCalled()
-  })
 })
 
 describe("background SKU handling", () => {
@@ -297,29 +213,6 @@ describe("background SKU handling", () => {
       url: buildSkuUrl("DEF_456"),
       windowId: 7,
     })
-  })
-
-  it("routes SKU messages and returns a structured response", async () => {
-    const openCases = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openShipments = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openSkus = vi.fn().mockResolvedValue({ openedCount: 1 })
-    const sendResponse = vi.fn()
-    const listener = createOpenIdsMessageListener(openCases, openShipments, openSkus)
-
-    expect(
-      listener(
-        { type: "OPEN_SKU_IDS", skuIds: ["ABC-123"] },
-        { tab: senderTab } as chrome.runtime.MessageSender,
-        sendResponse,
-      ),
-    ).toBe(true)
-
-    await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 })
-    })
-    expect(openSkus).toHaveBeenCalledWith(["ABC-123"], senderTab)
-    expect(openCases).not.toHaveBeenCalled()
-    expect(openShipments).not.toHaveBeenCalled()
   })
 
   it("enforces the fifty-ID limit in the background", async () => {
@@ -443,27 +336,66 @@ describe("background Time Out handling", () => {
     })
   })
 
-  it("routes Time Out messages and returns a structured response", async () => {
-    const openCases = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openShipments = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openSkus = vi.fn().mockResolvedValue({ openedCount: 0 })
-    const openTimeOut = vi.fn().mockResolvedValue({ openedCount: 2 })
-    const sendResponse = vi.fn()
-    const listener = createOpenIdsMessageListener(openCases, openShipments, openSkus, openTimeOut)
+})
 
-    expect(listener(
-      { type: "OPEN_TIME_OUT" },
-      { tab: senderTab } as chrome.runtime.MessageSender,
-      sendResponse,
-    )).toBe(true)
-
-    await vi.waitFor(() => {
-      expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 2 })
+describe("routing ID and Time Out messages", () => {
+  const sender = { id: "extension-id", tab: senderTab } as chrome.runtime.MessageSender
+  const create = vi.fn(async (properties: chrome.tabs.CreateProperties) => ({ id: 100, ...properties }) as chrome.tabs.Tab)
+  const remove = vi.fn(async () => undefined)
+  beforeEach(() => {
+    create.mockClear(); remove.mockClear()
+    vi.stubGlobal("chrome", {
+      runtime: { id: "extension-id", getURL: (path: string) => `chrome-extension://extension-id/${path}` },
+      storage: { local: { get: vi.fn(async () => ({})) } },
+      tabs: { create, remove },
     })
-    expect(openTimeOut).toHaveBeenCalledWith(senderTab)
-    expect(openCases).not.toHaveBeenCalled()
-    expect(openShipments).not.toHaveBeenCalled()
-    expect(openSkus).not.toHaveBeenCalled()
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each([
+    { message: { type: "OPEN_CASE_IDS", caseIds: ["21476974831"] }, url: buildCaseUrl("21476974831") },
+    { message: { type: "OPEN_SHIPMENT_IDS", shipmentIds: ["FBA19749WJ6Q"] }, url: buildShipmentUrl("FBA19749WJ6Q") },
+    { message: { type: "OPEN_SKU_IDS", skuIds: ["ABC-123"] }, url: buildSkuUrl("ABC-123") },
+    { message: { type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds: ["S4EKM0127"] }, url: buildRemovalOrderUrl("S4EKM0127") },
+  ])("opens $message.type in the sender's window and answers with the count", async ({ message, url }) => {
+    const sendResponse = vi.fn()
+
+    expect(listenForMessages(Promise.resolve())(message, sender, sendResponse)).toBe(true)
+
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 1 }))
+    expect(create).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledWith({ active: true, openerTabId: 42, url, windowId: 7 })
+  })
+
+  it("opens the Time Out sheet and form", async () => {
+    const sendResponse = vi.fn()
+
+    listenForMessages(Promise.resolve())({ type: "OPEN_TIME_OUT" }, sender, sendResponse)
+
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true, openedCount: 2 }))
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ active: false, url: TIME_OUT_SHEET_URL }))
+  })
+
+  it("answers a failed batch with what was closed, and leaves other messages unanswered", async () => {
+    create.mockResolvedValueOnce({ id: 101 } as chrome.tabs.Tab).mockRejectedValueOnce(new Error("tab creation failed"))
+    const listener = listenForMessages(Promise.resolve())
+    const failed = vi.fn()
+    const empty = vi.fn()
+    const other = vi.fn()
+
+    listener({ type: "OPEN_CASE_IDS", caseIds: ["21476974831", "21476874681"] }, sender, failed)
+    listener({ type: "OPEN_CASE_IDS", caseIds: [] }, sender, empty)
+
+    await vi.waitFor(() => expect(failed).toHaveBeenCalledWith({
+      ok: false,
+      error: "tab creation failed Any tabs opened by this attempt were closed.",
+      openedIds: [],
+      rolledBackIds: ["21476974831"],
+    }))
+    expect(remove).toHaveBeenCalledWith([101])
+    await vi.waitFor(() => expect(empty).toHaveBeenCalledWith({ ok: false, error: "No valid Case IDs were provided." }))
+    expect(listener({ type: "OTHER" }, sender, other)).toBeUndefined()
+    expect(other).not.toHaveBeenCalled()
   })
 })
 
@@ -481,15 +413,12 @@ describe("diagnostics log messages", () => {
     return store
   }
   const entry: LogEntry = { t: 1, level: "info", ctx: "content", event: "report.fetch" }
-  const extensionPage = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" }
 
   it("stores forwarded entries with the sending tab", async () => {
     const store = setup()
-    const sendResponse = vi.fn()
 
-    handleLogMessage("LOG_ENTRIES", { entries: [entry, { bad: true }] }, { id: "extension-id", tab: { id: 22 } as chrome.tabs.Tab }, store, sendResponse)
+    await expect(appendLogEntries([entry, { bad: true }], { id: "extension-id", tab: { id: 22 } as chrome.tabs.Tab }, store)).resolves.toEqual({ ok: true })
 
-    expect(sendResponse).toHaveBeenCalledWith({ ok: true })
     expect(await store.read()).toEqual([{ ...entry, tab: 22 }])
     vi.unstubAllGlobals()
   })
@@ -497,17 +426,12 @@ describe("diagnostics log messages", () => {
   it("only lets extension pages read or clear logs", async () => {
     const store = setup()
     store.append([entry])
-    const fromPage = vi.fn()
-    const fromPopup = vi.fn()
+    const webPage = { id: "extension-id", url: "https://sellercentral.amazon.com/home" }
 
-    handleLogMessage("LOGS_GET", {}, { id: "extension-id", url: "https://sellercentral.amazon.com/home" }, store, fromPage)
-    expect(handleLogMessage("LOGS_GET", {}, extensionPage, store, fromPopup)).toBe(true)
-
-    expect(fromPage).toHaveBeenCalledWith({ ok: false, error: "Logs are only available to extension pages." })
-    await vi.waitFor(() => expect(fromPopup).toHaveBeenCalledWith({ ok: true, entries: [entry] }))
-    const cleared = vi.fn()
-    handleLogMessage("LOGS_CLEAR", {}, extensionPage, store, cleared)
-    await vi.waitFor(() => expect(cleared).toHaveBeenCalledWith({ ok: true }))
+    await expect(routeMessage({ type: "LOGS_GET" }, webPage)).rejects.toThrow("Logs are only available to extension pages.")
+    await expect(routeMessage({ type: "LOGS_CLEAR" }, webPage)).rejects.toThrow("Logs are only available to extension pages.")
+    await expect(readLogEntries(store)).resolves.toEqual({ ok: true, entries: [entry] })
+    await expect(clearLogEntries(store)).resolves.toEqual({ ok: true })
     expect(await store.read()).toEqual([])
     vi.unstubAllGlobals()
   })

@@ -1,29 +1,25 @@
 /** Log entries from every context, and reading or clearing them from extension pages. */
-import { errorMessage, LOG_ENTRIES_MESSAGE, LOGS_CLEAR_MESSAGE, LOGS_GET_MESSAGE, type LogStore, sanitizeLogEntries } from "@/lib/log"
-import { isExtensionPage } from "./senders"
+import { createLogStore, sanitizeLogEntries, type LogEntry, type LogStore } from "@/lib/log"
 
-export function handleLogMessage(
-  type: string,
-  message: Record<string, unknown>,
-  sender: chrome.runtime.MessageSender,
-  store: LogStore,
-  sendResponse: (response: unknown) => void,
-): boolean | undefined {
-  if (type === LOG_ENTRIES_MESSAGE) {
-    const tab = sender.tab?.id
-    const entries = sanitizeLogEntries(message.entries).map((entry) => ({ ...entry, tab }))
-    store.append(entries)
-    sendResponse({ ok: true })
-    return undefined
-  }
-  if (type !== LOGS_GET_MESSAGE && type !== LOGS_CLEAR_MESSAGE) return undefined
-  if (!isExtensionPage(sender)) {
-    sendResponse({ ok: false, error: "Logs are only available to extension pages." })
-    return undefined
-  }
-  const request = type === LOGS_GET_MESSAGE
-    ? store.read().then((entries) => ({ ok: true, entries }))
-    : store.clear().then(() => ({ ok: true }))
-  void request.then(sendResponse, (error: unknown) => sendResponse({ ok: false, error: errorMessage(error, "Couldn’t read logs.") }))
-  return true
+let workerStore: LogStore | undefined
+
+/** One store for the worker's own entries and forwarded ones, so they share a write queue. */
+export function workerLogStore(): LogStore {
+  return workerStore ??= createLogStore(chrome.storage.local)
+}
+
+/** Keeps entries forwarded from another context, tagged with the tab that sent them. */
+export async function appendLogEntries(entries: unknown, sender: chrome.runtime.MessageSender, store = workerLogStore()): Promise<{ ok: true }> {
+  const tab = sender.tab?.id
+  store.append(sanitizeLogEntries(entries).map((entry) => ({ ...entry, tab })))
+  return { ok: true }
+}
+
+export async function readLogEntries(store = workerLogStore()): Promise<{ ok: true; entries: LogEntry[] }> {
+  return { ok: true, entries: await store.read() }
+}
+
+export async function clearLogEntries(store = workerLogStore()): Promise<{ ok: true }> {
+  await store.clear()
+  return { ok: true }
 }
