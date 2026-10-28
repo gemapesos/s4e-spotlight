@@ -1,14 +1,13 @@
 import * as React from "react"
 import { Building2, ExternalLink, Lock, Search, Settings, TriangleAlertIcon } from "lucide-react"
 
-import type { AccountsStatus, AccountStoreSummary, ActiveSwitchSummary } from "@/CommandPalette"
 import { Field, HeaderButton, Kbd, Notice, PanelFooter, PrimaryButton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { api } from "@/options/api"
 import { moveRowFocus, WorkspaceBody, type WorkspaceLaunch } from "@/results/workspaceParts"
 import { CheckBubble, SWITCH_STAGE_LABELS, SwitchSteps, switchProgress } from "@/SwitchProgress"
+import { sendToBackground, type AccountsStatus, type AccountStoreSummary, type ActiveSwitchSummary } from "@/shared/messages"
 
 const SWITCH_POLL_MS = 750
 
@@ -144,14 +143,14 @@ export function AccountsTab({
     event.preventDefault()
     if (busy || !password) return
     void run(async () => {
-      await api({ type: "ACCOUNTS_UNLOCK", masterPassword: password })
+      await sendToBackground({ type: "ACCOUNTS_UNLOCK", masterPassword: password })
       setPassword("")
       onStatusChange()
       if (!resume) return
       const pending = resume
       setResume(null)
       // Starts the palette's switch; a window opened only for this unlock then closes.
-      await api({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id })
+      await sendToBackground({ type: "ACCOUNTS_RESUME_SWITCH", resumeId: pending.id })
     }, "Couldn’t unlock accounts.")
   }
 
@@ -159,15 +158,15 @@ export function AccountsTab({
     if (busy) return
     void run(async () => {
       if (status?.currentStore?.id === store.id) {
-        await api({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" })
+        await sendToBackground({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" })
         return
       }
       setDoneName(null)
-      await api({ type: "ACCOUNTS_START_SWITCH", storeId: store.id })
+      await sendToBackground({ type: "ACCOUNTS_START_SWITCH", storeId: store.id })
     }, "Couldn’t start the store switch.")
   }
 
-  const openAccountsPage = () => void run(() => api({ type: "ACCOUNTS_OPEN_OPTIONS" }), "Couldn’t open the Accounts page.")
+  const openAccountsPage = () => void run(() => sendToBackground({ type: "ACCOUNTS_OPEN_OPTIONS" }), "Couldn’t open the Accounts page.")
 
   const panelProps = {
     "aria-labelledby": "workspace-tab-accounts",
@@ -280,9 +279,9 @@ export function AccountsTab({
             active={active}
             busy={busy}
             doneName={doneName}
-            onCancel={() => void run(() => api({ type: "ACCOUNTS_CANCEL_SWITCH" }), "Couldn’t cancel the switch.")}
+            onCancel={() => void run(() => sendToBackground({ type: "ACCOUNTS_CANCEL_SWITCH" }), "Couldn’t cancel the switch.")}
             onDismiss={() => setDoneName(null)}
-            onShowSignIn={() => void run(() => api({ type: "ACCOUNTS_FOCUS_SWITCH" }), "Couldn’t show the sign-in window.")}
+            onShowSignIn={() => void run(() => sendToBackground({ type: "ACCOUNTS_FOCUS_SWITCH" }), "Couldn’t show the sign-in window.")}
           />
         ) : null}
         <div aria-labelledby="workspace-stores-heading" className="flex flex-col" onKeyDown={(event) => moveRowFocus(event, "[data-store-row]")} role="group">
@@ -334,7 +333,7 @@ export function AccountsTab({
           <Button
             className="gap-1.5 rounded-[0.5rem] bg-background px-3 text-foreground ring-1 ring-foreground/10 hover:bg-muted dark:bg-input/30 dark:hover:bg-input/50"
             disabled={busy}
-            onClick={() => void run(async () => { await api({ type: "ACCOUNTS_LOCK" }); onStatusChange() }, "Couldn’t lock accounts.")}
+            onClick={() => void run(async () => { await sendToBackground({ type: "ACCOUNTS_LOCK" }); onStatusChange() }, "Couldn’t lock accounts.")}
             type="button"
             variant="ghost"
           >

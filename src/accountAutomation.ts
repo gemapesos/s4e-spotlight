@@ -1,5 +1,6 @@
 import { createLogger, errorMessage, forwardLogsToBackground, setLogSink } from "./lib/log"
 import { hasAuthenticatedSellerUi, visible } from "./lib/sellerCentralSession"
+import { sendToBackground } from "./shared/messages"
 
 const STATUS_ID = "s4e-account-switch-status"
 const documentStartedAt = Date.now()
@@ -33,18 +34,6 @@ const OTP_INPUT_SELECTORS = [
   'input[autocomplete="one-time-code"]',
   'input[inputmode="numeric"]',
 ]
-
-type AutomationResponse = {
-  ok: boolean
-  error?: string
-  value?: string
-  waitMs?: number
-  job?: { id: string; stage: string; resumeStage?: string } | null
-}
-
-async function send(message: Record<string, unknown>): Promise<AutomationResponse> {
-  return chrome.runtime.sendMessage(message) as Promise<AutomationResponse>
-}
 
 /** Runs the workflow again after `delayMs`, replacing any run already scheduled so only one loop polls. */
 function scheduleRun(delayMs: number): void {
@@ -190,24 +179,24 @@ async function activate(
   if (!finite || rect.width <= 0 || rect.height <= 0) {
     throw new Error(`${missingMessage} The control has invalid click coordinates.`)
   }
-  const click = () => send({
-    type: "ACCOUNT_AUTOMATION_CLICK",
-    jobId,
-    action,
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2,
-  })
-  const response = await click()
-  // Other extensions own their UI. Leave it intact when Chrome refuses the attachment.
-  if (!response.ok && isDebuggerBlocked(response.error)) {
+  try {
+    await sendToBackground({
+      type: "ACCOUNT_AUTOMATION_CLICK",
+      jobId,
+      action,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    }, "Chrome could not activate Amazon’s login control.")
+  } catch (error) {
+    // Other extensions own their UI. Leave it intact when Chrome refuses the attachment.
+    if (!isDebuggerBlocked(errorMessage(error, ""))) throw error
     automationLog.warn("account.switch.debuggerBlocked", { action })
     throw new Error("Another Chrome extension is preventing automated sign-in. Its interface was left open. Complete sign-in manually, or resolve the conflict and retry the switch.")
   }
-  if (!response.ok) throw new Error(response.error ?? "Chrome could not activate Amazon’s login control.")
 }
 
-function isDebuggerBlocked(error: string | undefined): boolean {
-  return Boolean(error?.includes("chrome-extension:// URL of different extension"))
+function isDebuggerBlocked(error: string): boolean {
+  return error.includes("chrome-extension:// URL of different extension")
 }
 
 function prepareStage(stage: string, failureMessage: string): boolean {
@@ -281,7 +270,7 @@ function hasManualVerification(): boolean {
 async function requestAttention(jobId: string, reason: string): Promise<void> {
   if (!attempts.has(reason)) {
     attempts.set(reason, 1)
-    await send({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId, reason })
+    await sendToBackground({ type: "ACCOUNT_AUTOMATION_PAUSED", jobId, reason }).catch(() => undefined)
   }
   scheduleRun(1500)
 }
@@ -298,17 +287,17 @@ function shouldCompleteAuthenticatedSession(stage: string): boolean {
 }
 
 async function requestSecret(jobId: string, kind: "email" | "password" | "otp", retry = false): Promise<string | null> {
-  const response = await send({ type: "ACCOUNT_AUTOMATION_SECRET", jobId, kind, ...(retry ? { retry } : {}) })
-  if (!response.ok) throw new Error(response.error ?? "The saved account details are unavailable.")
-  return response.value ?? null
+  const { value } = await sendToBackground({ type: "ACCOUNT_AUTOMATION_SECRET", jobId, kind, ...(retry ? { retry } : {}) }, "The saved account details are unavailable.")
+  return value ?? null
 }
 
 async function leaveLogout(jobId: string): Promise<void> {
   leavingLogout = true
-  const left = await send({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId })
-  if (!left.ok) {
+  try {
+    await sendToBackground({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId }, "Could not leave Amazon’s logout page.")
+  } catch (error) {
     leavingLogout = false
-    throw new Error(left.error ?? "Could not leave Amazon’s logout page.")
+    throw error
   }
 }
 
@@ -320,7 +309,7 @@ async function failWorkflow(jobId: string, error: unknown): Promise<void> {
   // Report once per document; later polls keep retrying without flooding the log.
   if (!manualSignIn) {
     manualSignIn = true
-    await send({ type: "ACCOUNT_AUTOMATION_ERROR", jobId, error: message })
+    await sendToBackground({ type: "ACCOUNT_AUTOMATION_ERROR", jobId, error: message }).catch(() => undefined)
   }
   scheduleRun(1500)
 }
@@ -332,9 +321,8 @@ function onLogoutIntercept(): boolean {
 }
 
 async function run(): Promise<void> {
-  const response = await send({ type: "ACCOUNT_AUTOMATION_GET_JOB" })
-  const job = response.job
-  if (!response.ok || !job) {
+  const job = await sendToBackground({ type: "ACCOUNT_AUTOMATION_GET_JOB" }).then((reply) => reply.job, () => null)
+  if (!job) {
     stopWatchingPage()
     clearWorkflowStatus()
     return
@@ -356,8 +344,7 @@ async function run(): Promise<void> {
     if (stage === "store") {
       if (hasAuthenticatedSellerUi() && document.readyState === "complete") {
         setWorkflowStatus("Store loaded. Finishing the switch…")
-        const ready = await send({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id })
-        if (!ready.ok) throw new Error(ready.error ?? "Couldn’t finish the store switch.")
+        const ready = await sendToBackground({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, "Couldn’t finish the store switch.")
         if (ready.waitMs) scheduleRun(ready.waitMs)
         else {
           // The user keeps working in this tab; stop reacting to its page changes.
@@ -367,8 +354,7 @@ async function run(): Promise<void> {
         return
       }
       if (location.pathname.startsWith("/ap/") && (input(EMAIL_INPUT_SELECTORS) || input(PASSWORD_INPUT_SELECTORS) || input(OTP_INPUT_SELECTORS))) {
-        const reauth = await send({ type: "ACCOUNT_AUTOMATION_REAUTH", jobId: job.id })
-        if (!reauth.ok) throw new Error(reauth.error ?? "Sign in to this account again.")
+        await sendToBackground({ type: "ACCOUNT_AUTOMATION_REAUTH", jobId: job.id }, "Sign in to this account again.")
         return
       }
       if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) throw new Error("The selected store did not finish loading. Review this window or cancel and retry.")
@@ -378,8 +364,7 @@ async function run(): Promise<void> {
     }
     if (manualSignIn) {
       if (hasAuthenticatedSellerUi() || location.pathname.startsWith("/account-switcher/")) {
-        const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
-        if (!completed.ok) throw new Error(completed.error ?? "Couldn’t open the selected store.")
+        await sendToBackground({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, "Couldn’t open the selected store.")
       } else scheduleRun(1500)
       return
     }
@@ -449,8 +434,7 @@ async function run(): Promise<void> {
 
     if (isReadyForStoreNavigation() && (job.stage === "paused" || shouldCompleteAuthenticatedSession(stage))) {
       setWorkflowStatus("Signed in. Opening the selected store…")
-      const completed = await send({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id })
-      if (!completed.ok) throw new Error(completed.error ?? "Couldn’t open the selected store.")
+      await sendToBackground({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, "Couldn’t open the selected store.")
       return
     }
 

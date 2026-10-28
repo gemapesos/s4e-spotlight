@@ -3,7 +3,7 @@ import { createPortal } from "react-dom"
 import { createRoot, type Root } from "react-dom/client"
 
 import styles from "./styles.css?inline"
-import { CommandPalette, type AccountsStatus, type BulkRemovalSummary, type PaletteMode, type ReportsPrepareResult } from "./CommandPalette"
+import { CommandPalette, type PaletteMode } from "./CommandPalette"
 import { SwitchStatusCard } from "./SwitchProgress"
 import { applyPrefersColorScheme } from "./lib/colorScheme"
 import {
@@ -24,7 +24,6 @@ import {
   type EnabledFeatures,
   type ExtensionSettings,
 } from "./lib/settings"
-import type { SellerFeedback } from "./lib/feedback"
 import { isPaletteShortcut } from "./lib/shortcut"
 import type { SellerCentralSessionState } from "./lib/sellerCentralSession"
 import {
@@ -33,10 +32,7 @@ import {
   type ReportProgressEvent,
   type ReportSource,
 } from "./lib/reportProgress"
-import type { ShippingQueueShipment } from "./lib/shippingQueue"
-import type { StrandedListing } from "./lib/stranded"
-import type { SuppressedListing } from "./lib/suppressed"
-import type { UnfulfillableListing } from "./lib/unfulfillable"
+import { sendToBackground, type AccountsStatus, type BulkRemovalSummary } from "./shared/messages"
 
 const HOST_ID = "command-palette-extension-root"
 const PALETTE_OPEN_ATTRIBUTE = "data-s4e-palette-open"
@@ -100,39 +96,6 @@ type PasteGuardWindow = Window &
   typeof globalThis & {
     [PASTE_GUARD_KEY]?: PasteGuardController
   }
-
-export interface OpenCaseIdsMessage {
-  type: "OPEN_CASE_IDS"
-  caseIds: string[]
-}
-
-export interface ScrapeCasesMessage {
-  type: "SCRAPE_CASES"
-  caseIds: string[]
-}
-
-export interface OpenShipmentIdsMessage {
-  type: "OPEN_SHIPMENT_IDS"
-  shipmentIds: string[]
-}
-
-export interface OpenRemovalOrderIdsMessage {
-  type: "OPEN_REMOVAL_ORDER_IDS"
-  removalOrderIds: string[]
-}
-
-export interface OpenSkuIdsMessage {
-  type: "OPEN_SKU_IDS"
-  skuIds: string[]
-}
-
-export interface OpenTimeOutMessage {
-  type: "OPEN_TIME_OUT"
-}
-
-export type OpenIdsResponse =
-  | { ok: true; openedCount: number }
-  | { ok: false; error: string; openedIds?: string[]; rolledBackIds?: string[] }
 
 export interface MountedCommandPalette {
   destroy: () => void
@@ -246,65 +209,45 @@ function applyPaletteRemScale(host: HTMLElement, targetDocument: Document): numb
   return scale
 }
 
-/** Sends a message to the background worker and requires `ok: true` in the reply. */
-async function requestBackground<T extends object = Record<string, unknown>>(
-  message: Record<string, unknown>,
-): Promise<T & { ok: true }> {
-  const response = await chrome.runtime.sendMessage(message) as (T & { ok?: boolean; error?: string }) | undefined
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return response as T & { ok: true }
-}
-
 export async function openCaseIds(caseIds: string[]): Promise<void> {
-  await requestBackground<OpenIdsResponse>({ type: "OPEN_CASE_IDS", caseIds } satisfies OpenCaseIdsMessage)
+  await sendToBackground({ type: "OPEN_CASE_IDS", caseIds })
 }
 
 export async function openCases(): Promise<void> {
-  await requestBackground({ type: "RESULTS_OPEN", mode: "cases" })
+  await sendToBackground({ type: "RESULTS_OPEN", mode: "cases" })
 }
 
 export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
-  await requestBackground<OpenIdsResponse>({ type: "OPEN_SHIPMENT_IDS", shipmentIds } satisfies OpenShipmentIdsMessage)
+  await sendToBackground({ type: "OPEN_SHIPMENT_IDS", shipmentIds })
 }
 export async function openRemovalOrderIds(removalOrderIds: string[]): Promise<void> {
-  await requestBackground<OpenIdsResponse>({ type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds } satisfies OpenRemovalOrderIdsMessage)
+  await sendToBackground({ type: "OPEN_REMOVAL_ORDER_IDS", removalOrderIds })
 }
 export async function openSkuIds(skuIds: string[]): Promise<void> {
-  await requestBackground<OpenIdsResponse>({ type: "OPEN_SKU_IDS", skuIds } satisfies OpenSkuIdsMessage)
+  await sendToBackground({ type: "OPEN_SKU_IDS", skuIds })
 }
 export async function createBulkRemoval(skus: string[]): Promise<BulkRemovalSummary> {
-  const response = await requestBackground<BulkRemovalSummary>({ type: "CREATE_BULK_REMOVAL", skus })
-  return {
-    openedCount: response.openedCount,
-    skipped: response.skipped,
-    nextRemovalOrderId: response.nextRemovalOrderId,
-    eligibilityUnknown: response.eligibilityUnknown,
-  }
+  const { openedCount, skipped, nextRemovalOrderId, eligibilityUnknown } = await sendToBackground({ type: "CREATE_BULK_REMOVAL", skus })
+  return { openedCount, skipped, nextRemovalOrderId, eligibilityUnknown }
 }
 export async function focusBulkRemoval(): Promise<void> {
-  await requestBackground({ type: "BULK_REMOVAL_FOCUS" })
+  await sendToBackground({ type: "BULK_REMOVAL_FOCUS" })
 }
 export async function openTimeOut(): Promise<void> {
-  await requestBackground<OpenIdsResponse>({ type: "OPEN_TIME_OUT" } satisfies OpenTimeOutMessage)
+  await sendToBackground({ type: "OPEN_TIME_OUT" })
 }
 
 export async function getAccountsStatus(): Promise<AccountsStatus> {
-  const response = await requestBackground<AccountsStatus>({ type: "ACCOUNTS_STATUS" })
-  return {
-    initialized: response.initialized,
-    unlocked: response.unlocked,
-    stores: response.stores,
-    activeSwitch: response.activeSwitch,
-    currentStore: response.currentStore ?? null,
-  }
+  const { initialized, unlocked, stores, activeSwitch, currentStore } = await sendToBackground({ type: "ACCOUNTS_STATUS" })
+  return { initialized, unlocked, stores, activeSwitch, currentStore: currentStore ?? null }
 }
 export async function unlockAccounts(storeId: string): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId })
+  await sendToBackground({ type: "ACCOUNTS_REQUEST_UNLOCK", storeId })
 }
 /** Reads the session from open Seller Central tabs; "unknown" never blocks a command. */
 export async function checkSellerCentralSession(): Promise<SellerCentralSessionState> {
   try {
-    const { session } = await requestBackground<{ session?: unknown }>({ type: "SELLER_CENTRAL_SESSION" })
+    const { session } = await sendToBackground({ type: "SELLER_CENTRAL_SESSION" })
     return session === "signed-in" || session === "signed-out" ? session : "unknown"
   } catch (error) {
     paletteLog.warn("session.checkFailed", { error: describeError(error) })
@@ -312,70 +255,43 @@ export async function checkSellerCentralSession(): Promise<SellerCentralSessionS
   }
 }
 export async function openSellerCentral(): Promise<void> {
-  await requestBackground({ type: "SELLER_CENTRAL_OPEN" })
+  await sendToBackground({ type: "SELLER_CENTRAL_OPEN" })
 }
 export async function openReports(): Promise<void> {
-  await requestBackground({ type: "RESULTS_OPEN", mode: "reports" })
+  await sendToBackground({ type: "RESULTS_OPEN", mode: "reports" })
 }
 export async function startAccountSwitch(storeId: string): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_START_SWITCH", storeId })
+  await sendToBackground({ type: "ACCOUNTS_START_SWITCH", storeId })
 }
 export async function focusCurrentStore(): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" })
+  await sendToBackground({ type: "ACCOUNTS_FOCUS_CURRENT_STORE" })
 }
 export async function focusAccountSwitch(): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_FOCUS_SWITCH" })
+  await sendToBackground({ type: "ACCOUNTS_FOCUS_SWITCH" })
 }
 export async function cancelAccountSwitch(): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_CANCEL_SWITCH" })
+  await sendToBackground({ type: "ACCOUNTS_CANCEL_SWITCH" })
 }
 export async function dismissSwitchNotice(): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" })
+  await sendToBackground({ type: "ACCOUNTS_SWITCH_NOTICE_DISMISS" })
 }
 export async function manageAccounts(): Promise<void> {
-  await requestBackground({ type: "ACCOUNTS_OPEN_OPTIONS" })
+  await sendToBackground({ type: "ACCOUNTS_OPEN_OPTIONS" })
 }
 
 export async function getSettings(): Promise<ExtensionSettings> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return parseSettings(undefined)
   try {
-    const response = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" }) as { ok?: boolean; settings?: unknown; error?: string }
-    if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-    return parseSettings(response.settings)
+    return parseSettings((await sendToBackground({ type: "GET_SETTINGS" })).settings)
   } catch (error) {
     paletteLog.warn("settings.loadFailed", { error: describeError(error) })
     return parseSettings(undefined)
   }
 }
 
-export async function prepareReports(sections: readonly ReportSource[] = REPORT_SOURCES): Promise<ReportsPrepareResult> {
-  const response = await requestBackground<ReportsPrepareResult>({ type: "REPORTS_PREPARE", sections })
-  return {
-    loggedInToStore: response.loggedInToStore !== false,
-    runId: response.runId,
-    openedPromptOnSellerCentral: response.openedPromptOnSellerCentral,
-  }
-}
-
-async function fetchReportItems<T>(type: string, key: string, runId?: string): Promise<T[]> {
-  const response = await requestBackground<Record<string, unknown>>({ type, ...(runId ? { runId } : {}) })
-  const items = response[key]
-  return Array.isArray(items) ? items as T[] : []
-}
-
-async function fetchUnfulfillableFromBackground(runId?: string): Promise<{
-  listings: UnfulfillableListing[]
-  nextRemovalOrderId: string | null
-}> {
-  const response = await requestBackground<{ listings?: unknown; nextRemovalOrderId?: unknown }>({
-    type: "REPORTS_FETCH_UNFULFILLABLE",
-    ...(runId ? { runId } : {}),
-  })
-  const nextRemovalOrderId = response.nextRemovalOrderId
-  return {
-    listings: Array.isArray(response.listings) ? response.listings as UnfulfillableListing[] : [],
-    nextRemovalOrderId: typeof nextRemovalOrderId === "string" && nextRemovalOrderId ? nextRemovalOrderId : null,
-  }
+export async function prepareReports(sections: readonly ReportSource[] = REPORT_SOURCES): Promise<{ loggedInToStore: boolean; runId?: string }> {
+  const response = await sendToBackground({ type: "REPORTS_PREPARE", sections })
+  return { loggedInToStore: response.loggedInToStore !== false, runId: response.runId }
 }
 
 const reportProgressListeners = new Set<(event: ReportProgressEvent) => void>()
@@ -389,13 +305,23 @@ export function dispatchReportProgress(event: ReportProgressEvent): void {
   for (const listener of reportProgressListeners) listener(event)
 }
 
-export async function generateReports(
+export interface GenerateReportsOptions {
+  /** The run REPORTS_PREPARE started; the worker only answers fetches for it. */
+  runId: string
+  sections?: readonly ReportSource[]
+  /** Defaults to the store the vault last switched to. */
+  storeName?: string
+  onProgress?: (event: ReportProgressEvent) => void
+  now?: Date
+}
+
+export async function generateReports({
+  runId,
+  sections = REPORT_SOURCES,
+  storeName: currentStoreName,
+  onProgress,
   now = new Date(),
-  currentStoreName?: string,
-  onProgress?: (event: ReportProgressEvent) => void,
-  sections: readonly ReportSource[] = REPORT_SOURCES,
-  runId?: string,
-): Promise<GeneratedReport> {
+}: GenerateReportsOptions): Promise<GeneratedReport> {
   const unsubscribe = onProgress ? subscribeReportProgress(onProgress) : () => undefined
   const done = paletteLog.time("report.run")
   const sources: Partial<Record<ReportSource, LogData>> = {}
@@ -433,19 +359,17 @@ export async function generateReports(
     const [unfulfillable, feedbacks, strandedListings, suppressedListings, shipments] = await Promise.all([
       track(
         "unfulfillable",
-        () => fetchUnfulfillableFromBackground(runId),
+        async () => {
+          const { listings, nextRemovalOrderId } = await sendToBackground({ type: "REPORTS_FETCH_UNFULFILLABLE", runId })
+          return { listings, nextRemovalOrderId }
+        },
         { listings: [], nextRemovalOrderId: null },
         (value) => value.listings.length,
       ),
-      track("feedback", () => fetchReportItems<SellerFeedback>("REPORTS_FETCH_FEEDBACK", "feedbacks", runId), [], length),
-      track("stranded", () => fetchReportItems<StrandedListing>("REPORTS_FETCH_STRANDED", "listings", runId), [], length),
-      track("suppressed", () => fetchReportItems<SuppressedListing>("REPORTS_FETCH_SUPPRESSED", "listings", runId), [], length),
-      track(
-        "shippingQueue",
-        () => fetchReportItems<ShippingQueueShipment>("REPORTS_FETCH_SHIPPING_QUEUE", "shipments", runId),
-        [],
-        length,
-      ),
+      track("feedback", async () => (await sendToBackground({ type: "REPORTS_FETCH_FEEDBACK", runId })).feedbacks, [], length),
+      track("stranded", async () => (await sendToBackground({ type: "REPORTS_FETCH_STRANDED", runId })).listings, [], length),
+      track("suppressed", async () => (await sendToBackground({ type: "REPORTS_FETCH_SUPPRESSED", runId })).listings, [], length),
+      track("shippingQueue", async () => (await sendToBackground({ type: "REPORTS_FETCH_SHIPPING_QUEUE", runId })).shipments, [], length),
     ])
     const timed = Object.entries(sources) as Array<[ReportSource, LogData]>
     const slowest = timed.reduce<[ReportSource, LogData] | undefined>(

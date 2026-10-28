@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import type { AccountsStatus, ActiveSwitchSummary } from "../src/CommandPalette"
+import type { AccountsStatus, ActiveSwitchSummary } from "../src/shared/messages"
 import { SwitchScreen, SwitchStatusCard } from "../src/SwitchProgress"
 
 const stores = [{ id: "jmg", name: "JMG Outdoors" }]

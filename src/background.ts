@@ -44,6 +44,7 @@ import {
   TIME_OUT_FORM_ENTRY_IDS,
   type TimeOutFormValues,
 } from "./lib/settings.js"
+import { MAX_BULK_IDS, type BackgroundReply, type BulkRemovalSummary, type WorkspaceMode } from "./shared/messages"
 import type { SellerCentralSessionState } from "./lib/sellerCentralSession.js"
 
 const CASE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID="
@@ -81,7 +82,6 @@ type OpenTimeOut = (senderTab: chrome.tabs.Tab | undefined) => Promise<{ openedC
 type LoadTimeOutFormValues = () => Promise<TimeOutFormValues>
 type SenderTab = chrome.tabs.Tab & { id: number; windowId: number }
 
-const MAX_BULK_IDS = 50
 const ACTIVE_JOB_TTL_MS = 15 * 60 * 1000
 const UNLOCK_ATTEMPTS_KEY = "accountsUnlockAttempts"
 const UNLOCK_RESUME_KEY = "accountsUnlockResume"
@@ -669,7 +669,6 @@ const WORKSPACE_WINDOW_KEY = "workspaceWindow"
 const WORKSPACE_WIDTH = 440
 const WORKSPACE_HEIGHT = 680
 const WORKSPACE_LOAD_TIMEOUT_MS = 5_000
-type WorkspaceMode = "reports" | "cases" | "accounts"
 interface WorkspaceLaunch {
   tabId: number
   mode: WorkspaceMode
@@ -812,7 +811,7 @@ export async function handleResultsMessage(message: Record<string, unknown>, sen
     const source = requireSenderTab(sender.tab)
     const mode: WorkspaceMode = message.mode === "cases" ? "cases" : message.mode === "accounts" ? "accounts" : "reports"
     const caseIds = mode === "cases" ? normalizeCaseIds(message.caseIds) : []
-    if (caseIds.length > MAX_BULK_IDS) throw new Error("Choose no more than 50 case IDs.")
+    if (caseIds.length > MAX_BULK_IDS) throw new Error(`Choose no more than ${MAX_BULK_IDS} case IDs.`)
     await serializeWorkspace(() => openWorkspace({ mode, caseIds }, source))
     return { ok: true }
   }
@@ -1001,13 +1000,12 @@ export async function relayAuthorizedReportProgress(message: Record<string, unkn
   return { ok: true }
 }
 
-const CASE_SCRAPE_LIMIT = 50
 const CASE_SCRAPE_SIGN_IN_ERROR = "Sign in to Seller Central, then try again."
 
 async function scrapeSellerCentralCases(caseIds: unknown, tabId: number, runId: string): Promise<{ ok: true; file: unknown }> {
   const ids = normalizeCaseIds(caseIds)
   if (ids.length === 0) throw new Error("Enter at least one 11-digit Case ID.")
-  if (ids.length > CASE_SCRAPE_LIMIT) throw new Error(`Scrape no more than ${CASE_SCRAPE_LIMIT} cases at a time.`)
+  if (ids.length > MAX_BULK_IDS) throw new Error(`Scrape no more than ${MAX_BULK_IDS} cases at a time.`)
   const done = log.time("case.scrape", { requested: ids.length })
   try {
     await waitForTabComplete(tabId)
@@ -1033,14 +1031,6 @@ async function scrapeSellerCentralCases(caseIds: unknown, tabId: number, runId: 
   }
 }
 
-export interface BulkRemovalResponse {
-  ok: true
-  openedCount: number
-  skipped: Array<{ sku: string; reason: string }>
-  nextRemovalOrderId: string | null
-  eligibilityUnknown: boolean
-}
-
 function asRemovalItems(value: unknown): Array<{ sku: string; asin: string; fnSku: string }> {
   return asArray(value).filter((item): item is { sku: string; asin: string; fnSku: string } => {
     if (!item || typeof item !== "object") return false
@@ -1050,7 +1040,7 @@ function asRemovalItems(value: unknown): Array<{ sku: string; asin: string; fnSk
   })
 }
 
-function asSkipped(value: unknown): BulkRemovalResponse["skipped"] {
+function asSkipped(value: unknown): BulkRemovalSummary["skipped"] {
   return asArray(value).flatMap((entry) => {
     if (!entry || typeof entry !== "object") return []
     const { sku, reason } = entry as Record<string, unknown>
@@ -1087,7 +1077,7 @@ export async function createBulkRemoval(
   skus: unknown,
   senderTab?: chrome.tabs.Tab,
   createTab: CreateTab = createChromeTab,
-): Promise<BulkRemovalResponse> {
+): Promise<BackgroundReply<"CREATE_BULK_REMOVAL">> {
   const ids = normalizeSkuIds(skus)
   if (ids.length === 0) throw new Error("Enter at least one SKU.")
   if (ids.length > MAX_BULK_IDS) throw new Error(`Remove no more than ${MAX_BULK_IDS} SKUs at a time.`)

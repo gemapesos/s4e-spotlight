@@ -137,10 +137,7 @@ describe("content-script mount", () => {
     })
     vi.stubGlobal("chrome", { runtime: { sendMessage } })
 
-    await expect(prepareReports()).resolves.toEqual({
-      loggedInToStore: true,
-      openedPromptOnSellerCentral: undefined,
-    })
+    await expect(prepareReports()).resolves.toEqual({ loggedInToStore: true })
     expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_PREPARE", sections: ["unfulfillable", "feedback", "stranded", "suppressed", "shippingQueue"] })
 
     sendMessage.mockResolvedValue({ ok: false, error: "worker failed" })
@@ -268,13 +265,13 @@ describe("content-script mount", () => {
     })
 
     try {
-      const report = await generateReports(new Date(2026, 7, 14))
+      const report = await generateReports({ runId: "run-1", now: new Date(2026, 7, 14) })
       expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE", runId: "run-1" })
       expect(clicked.download).toBeUndefined()
       expect(createObjectURL).not.toHaveBeenCalled()
       downloadGeneratedReport(report, "raw")
@@ -284,12 +281,12 @@ describe("content-script mount", () => {
 
       sendMessage.mockClear()
       clicked.download = undefined
-      await generateReports(new Date(2026, 7, 14), "JMG Outdoors")
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+      await generateReports({ runId: "run-1", now: new Date(2026, 7, 14), storeName: "JMG Outdoors" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE", runId: "run-1" })
       expect(sendMessage).not.toHaveBeenCalledWith({ type: "ACCOUNTS_STATUS" })
       expect(clicked.download).toBeUndefined()
     } finally {
@@ -309,13 +306,13 @@ describe("content-script mount", () => {
     const onProgress = vi.fn()
 
     try {
-      const pending = generateReports(new Date(2026, 7, 14), "JMG Outdoors", onProgress)
+      const pending = generateReports({ runId: "run-1", now: new Date(2026, 7, 14), storeName: "JMG Outdoors", onProgress })
       await vi.waitFor(() => {
-        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
-        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
-        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
-        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
-        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE", runId: "run-1" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK", runId: "run-1" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED", runId: "run-1" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED", runId: "run-1" })
+        expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE", runId: "run-1" })
       })
       expect(resolvers.REPORTS_FETCH_UNFULFILLABLE).toBeTypeOf("function")
       expect(resolvers.REPORTS_FETCH_FEEDBACK).toBeTypeOf("function")
@@ -351,7 +348,7 @@ describe("content-script mount", () => {
     vi.stubGlobal("chrome", { runtime: { sendMessage } })
     const onProgress = vi.fn()
 
-    const report = await generateReports(new Date(2026, 7, 14), "JMG Outdoors", onProgress, ["stranded"])
+    const report = await generateReports({ runId: "run-1", now: new Date(2026, 7, 14), storeName: "JMG Outdoors", onProgress, sections: ["stranded"] })
 
     const reportRequests = sendMessage.mock.calls
       .map(([message]) => message.type)
@@ -400,12 +397,12 @@ describe("content-script mount", () => {
     const onProgress = vi.fn()
 
     try {
-      const report = await generateReports(new Date(2026, 7, 14), "JMG Outdoors", onProgress)
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+      const report = await generateReports({ runId: "run-1", now: new Date(2026, 7, 14), storeName: "JMG Outdoors", onProgress })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE", runId: "run-1" })
       expect(onProgress).toHaveBeenCalledWith({
         source: "unfulfillable",
         status: "error",
@@ -454,12 +451,12 @@ describe("content-script mount", () => {
     })
 
     try {
-      const report = await generateReports(new Date(2026, 7, 14))
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED" })
-      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE" })
+      const report = await generateReports({ runId: "run-1", now: new Date(2026, 7, 14) })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_UNFULFILLABLE", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_FEEDBACK", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_STRANDED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SUPPRESSED", runId: "run-1" })
+      expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_FETCH_SHIPPING_QUEUE", runId: "run-1" })
       expect(clicked.download).toBeUndefined()
       downloadGeneratedReport(report, "raw")
       expect(clicked.download).toBe("Unknown - 14-Aug-2026.xlsx")

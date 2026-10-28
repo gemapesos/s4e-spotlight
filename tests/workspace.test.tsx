@@ -73,7 +73,7 @@ describe("workspace window", () => {
 
     expect(await screen.findByRole("heading", { name: "Scraped 1 of 2 cases" })).toBeVisible()
     expect(sendMessage).toHaveBeenCalledWith({ type: "REPORTS_PREPARE", mode: "cases", caseIds: ["22420938051", "11111111111"] })
-    expect(sendMessage).toHaveBeenCalledWith({ type: "SCRAPE_CASES", caseIds: ["22420938051", "11111111111"], runId: "fixture-run" })
+    expect(sendMessage).toHaveBeenCalledWith({ type: "SCRAPE_CASES", runId: "fixture-run" })
     const rows = within(screen.getByRole("list", { name: "Cases" })).getAllByRole("listitem")
     expect(rows[0]).toHaveTextContent("14 replies · opened 5 Oct 2026")
     expect(rows[1]).toHaveTextContent("Couldn’t load this case (403).")

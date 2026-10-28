@@ -1,7 +1,6 @@
 import * as React from "react"
 import { CheckIcon, CircleAlert, TriangleAlertIcon } from "lucide-react"
 
-import type { AccountsStatus, ActiveSwitchSummary } from "@/CommandPalette"
 import { PrimaryButton } from "@/components/panel"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -9,6 +8,7 @@ import { CommandFooter, CommandHeader, CommandHint } from "@/components/ui/comma
 import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
+import type { AccountsStatus, ActiveSwitchSummary } from "@/shared/messages"
 
 /** What an account switch is doing, in the user's terms. */
 export const SWITCH_STAGE_LABELS: Record<string, string> = {

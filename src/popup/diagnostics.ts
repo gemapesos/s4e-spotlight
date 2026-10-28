@@ -5,6 +5,7 @@ import {
   type LogEntry,
 } from "@/lib/log"
 import { REPORT_PROGRESS_ROWS } from "@/lib/reportProgress"
+import { sendToBackground } from "@/shared/messages"
 
 export interface LastReportSummary {
   at: number
@@ -13,18 +14,12 @@ export interface LastReportSummary {
   failed: string[]
 }
 
-async function requestLogs(type: string): Promise<{ entries?: LogEntry[] }> {
-  const response = await chrome.runtime.sendMessage({ type }) as { ok?: boolean; error?: string; entries?: LogEntry[] }
-  if (!response?.ok) throw new Error(response?.error ?? "The background worker did not respond.")
-  return response
-}
-
 export async function readLogs(): Promise<LogEntry[]> {
-  return (await requestLogs(LOGS_GET_MESSAGE)).entries ?? []
+  return (await sendToBackground({ type: LOGS_GET_MESSAGE })).entries
 }
 
 export async function clearLogs(): Promise<void> {
-  await requestLogs(LOGS_CLEAR_MESSAGE)
+  await sendToBackground({ type: LOGS_CLEAR_MESSAGE })
 }
 
 function sourceLabel(source: string): string {

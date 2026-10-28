@@ -48,7 +48,7 @@ import {
 import { SESSION_KEY_STORAGE_KEY, VAULT_STORAGE_KEY, SHARE_FILE_NAME, type AccountVault, type CredentialRecord, type SharedVaultFile, type StoreRecord, type VaultMergeCounts } from "@/lib/accounts"
 import { errorMessage } from "@/lib/log"
 import { cn } from "@/lib/utils"
-import { api } from "@/options/api"
+import { sendToBackground } from "@/shared/messages"
 
 type Page = "loading" | "create" | "locked" | "editor"
 type DeleteTarget = { kind: "store" | "credential"; id: string; name: string }
@@ -261,7 +261,7 @@ export function OptionsApp() {
     showNotice()
     setBusy(true)
     try {
-      const status = await api<{ ok: true; initialized?: boolean; unlocked?: boolean }>({ type: "ACCOUNTS_STATUS" })
+      const status = await sendToBackground({ type: "ACCOUNTS_STATUS" })
       if (version !== stateVersion.current) return
       if (!status.initialized) {
         setVault(null)
@@ -270,7 +270,7 @@ export function OptionsApp() {
         setVault(null)
         setPage("locked")
       } else {
-        const response = await api<{ ok: true; vault: AccountVault }>({ type: "ACCOUNTS_GET_VAULT" })
+        const response = await sendToBackground({ type: "ACCOUNTS_GET_VAULT" })
         if (version !== stateVersion.current) return
         setVault(response.vault)
         setPage("editor")
@@ -312,7 +312,7 @@ export function OptionsApp() {
     const version = stateVersion.current
     setBusy(true)
     try {
-      await api({ type: "ACCOUNTS_SAVE_VAULT", vault: next })
+      await sendToBackground({ type: "ACCOUNTS_SAVE_VAULT", vault: next })
       if (version !== stateVersion.current) return
       setVault(next)
       setPage("editor")
@@ -352,7 +352,7 @@ export function OptionsApp() {
     const form = new FormData(event.currentTarget)
     const password = String(form.get("password") ?? "")
     if (password !== String(form.get("confirm") ?? "")) return showNotice("Master passwords do not match.", true)
-    if (await runBusy(() => api({ type: "ACCOUNTS_CREATE", masterPassword: password }), "Could not create the vault.")) {
+    if (await runBusy(() => sendToBackground({ type: "ACCOUNTS_CREATE", masterPassword: password }), "Could not create the vault.")) {
       await load()
     }
   }
@@ -361,7 +361,7 @@ export function OptionsApp() {
     event.preventDefault()
     if (busy) return
     const password = String(new FormData(event.currentTarget).get("password") ?? "")
-    if (await runBusy(() => api({ type: "ACCOUNTS_UNLOCK", masterPassword: password }), "Could not unlock accounts.")) {
+    if (await runBusy(() => sendToBackground({ type: "ACCOUNTS_UNLOCK", masterPassword: password }), "Could not unlock accounts.")) {
       await load()
     }
   }
@@ -369,7 +369,7 @@ export function OptionsApp() {
   async function onReset() {
     if (resetConfirmation !== RESET_CONFIRMATION) return showNotice("Type RESET exactly to delete the vault.", true)
     const reset = await runBusy(async () => {
-      await api({ type: "ACCOUNTS_RESET" })
+      await sendToBackground({ type: "ACCOUNTS_RESET" })
       setResetOpen(false)
       setResetConfirmation("")
       return true
@@ -378,7 +378,7 @@ export function OptionsApp() {
   }
 
   async function onLock() {
-    if (await runBusy(() => api({ type: "ACCOUNTS_LOCK" }), "Could not lock accounts.")) await load()
+    if (await runBusy(() => sendToBackground({ type: "ACCOUNTS_LOCK" }), "Could not lock accounts.")) await load()
   }
 
   async function onSaveCredential(event: React.FormEvent<HTMLFormElement>) {
@@ -422,7 +422,7 @@ export function OptionsApp() {
     const password = String(form.get("password") ?? "")
     if (password !== String(form.get("confirm") ?? "")) return showNotice("Master passwords do not match.", true)
     await runBusy(async () => {
-      await api({ type: "ACCOUNTS_CHANGE_MASTER_PASSWORD", masterPassword: password })
+      await sendToBackground({ type: "ACCOUNTS_CHANGE_MASTER_PASSWORD", masterPassword: password })
       setPasswordOpen(false)
       showNotice("Master password changed.")
     }, "Could not change the master password.")
@@ -451,7 +451,7 @@ export function OptionsApp() {
     const password = String(form.get("sharePassword") ?? "")
     if (password !== String(form.get("confirm") ?? "")) return showNotice("Share passwords do not match.", true)
     const response = await runBusy(
-      () => api<{ ok: true; file: SharedVaultFile }>({ type: "ACCOUNTS_EXPORT_SHARE", sharePassword: password }),
+      () => sendToBackground({ type: "ACCOUNTS_EXPORT_SHARE", sharePassword: password }),
       "Could not export the vault.",
     )
     if (!response) return
@@ -474,7 +474,7 @@ export function OptionsApp() {
       return
     }
     const response = await runBusy(
-      () => api<{ ok: true; vault: AccountVault; added: VaultMergeCounts; updated: VaultMergeCounts }>({
+      () => sendToBackground({
         type: "ACCOUNTS_IMPORT_SHARE",
         file,
         sharePassword: password,
@@ -504,7 +504,7 @@ export function OptionsApp() {
       return
     }
     const created = await runBusy(
-      () => api({
+      () => sendToBackground({
         type: "ACCOUNTS_CREATE_FROM_SHARE",
         file,
         sharePassword: String(form.get("sharePassword") ?? ""),

@@ -7,6 +7,8 @@
  * customer data.
  */
 
+import { sendToBackground } from "@/shared/messages"
+
 export type LogLevel = "info" | "warn" | "error"
 export type LogData = Record<string, unknown>
 
@@ -155,11 +157,8 @@ export function forwardLogsToBackground(): (entry: LogEntry) => void {
     const entries = queue
     queue = []
     if (entries.length === 0 || typeof chrome === "undefined" || !chrome.runtime?.id) return
-    try {
-      void chrome.runtime.sendMessage({ type: LOG_ENTRIES_MESSAGE, entries }).catch(() => undefined)
-    } catch {
-      // The extension was reloaded; this page can no longer reach the worker.
-    }
+    // Fails once the extension is reloaded and this page can no longer reach the worker.
+    void sendToBackground({ type: LOG_ENTRIES_MESSAGE, entries }).catch(() => undefined)
   }
   return (entry) => {
     queue.push(entry)

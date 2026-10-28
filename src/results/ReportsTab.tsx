@@ -1,7 +1,6 @@
 import * as React from "react"
 import { CheckIcon, Download, FileText, LogIn } from "lucide-react"
 
-import type { AccountsStatus } from "@/CommandPalette"
 import { HeaderButton, Kbd, KeyHint, Notice, PanelFooter, PrimaryButton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
 import { downloadGeneratedReport } from "@/lib/reportDownload"
@@ -16,7 +15,6 @@ import {
 import { reportWarnings, sheetsReportFileName, type GeneratedReport, type ReportDownloadFormat } from "@/lib/reports"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { cn } from "@/lib/utils"
-import { api } from "@/options/api"
 import { generateReports, prepareReports } from "@/paletteApp"
 import { ReportProgressPanel } from "@/ReportProgressPanel"
 import {
@@ -30,6 +28,7 @@ import {
   WorkspaceBody,
   type WorkspaceRuns,
 } from "@/results/workspaceParts"
+import { sendToBackground, type AccountsStatus } from "@/shared/messages"
 
 type Phase = "pick" | "running" | "ready" | "signed-out"
 
@@ -89,10 +88,14 @@ export function ReportsTab({
         for (const source of chosen) sources[source] = { status: "active" }
         return { ...current, prepare: "complete", sources }
       })
-      const result = await generateReports(new Date(), undefined, (event) => {
-        if (run !== token.current || !chosen.includes(event.source)) return
-        setProgress((current) => applyReportProgressEvent(current, event))
-      }, chosen, runId)
+      const result = await generateReports({
+        runId,
+        sections: chosen,
+        onProgress: (event) => {
+          if (run !== token.current || !chosen.includes(event.source)) return
+          setProgress((current) => applyReportProgressEvent(current, event))
+        },
+      })
       if (run !== token.current) return
       setReport(result)
       setProgress((current) => ({ ...current, workbook: "complete" }))
@@ -105,7 +108,7 @@ export function ReportsTab({
     } finally {
       if (runId) {
         if (runs.current.report === runId) runs.current.report = undefined
-        await api({ type: run === token.current ? "RESULTS_FINISH" : "RESULTS_CANCEL", runId }).catch(() => undefined)
+        await sendToBackground({ type: run === token.current ? "RESULTS_FINISH" : "RESULTS_CANCEL", runId }).catch(() => undefined)
       }
     }
   }
@@ -114,7 +117,7 @@ export function ReportsTab({
     token.current += 1
     const runId = runs.current.report
     runs.current.report = undefined
-    if (runId) void api({ type: "RESULTS_CANCEL", runId }).catch(() => undefined)
+    if (runId) void sendToBackground({ type: "RESULTS_CANCEL", runId }).catch(() => undefined)
     setPhase("pick")
   }
 

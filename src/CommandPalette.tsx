@@ -43,6 +43,7 @@ import { extractRemovalOrderIds, findRemovalOrderIds } from "@/lib/removalOrderI
 import { extractShipmentIds, findShipmentIds } from "@/lib/shipmentIds"
 import { extractSkuIds, findSkuIds } from "@/lib/skuIds"
 import { SWITCH_STAGE_LABELS, SwitchScreen } from "@/SwitchProgress"
+import { MAX_BULK_IDS, type AccountsStatus, type AccountStoreSummary, type ActiveSwitchSummary, type BulkRemovalSummary } from "@/shared/messages"
 
 export type PaletteMode =
   | "commands"
@@ -66,7 +67,6 @@ type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "bulk-removal" |
 type SignInCommand = IdentifierMode | "generate-reports" | "scrape-case"
 
 const CONFIRM_THRESHOLD = 10
-const MAX_BULK_IDS = 50
 
 /** How deep each screen sits, so going back slides the other way. */
 const SCREEN_DEPTH: Record<PaletteMode, number> = {
@@ -131,26 +131,6 @@ export interface CommandDefinition {
   external?: boolean
 }
 
-export interface AccountStoreSummary { id: string; name: string }
-export interface ActiveSwitchSummary {
-  storeId: string
-  storeName: string
-  stage: string
-  startedAt: number
-  /** False when a same-credential switch only opens the store. */
-  signIn?: boolean
-  /** The step a paused switch is waiting on. */
-  resumeStage?: string
-  attentionMessage?: string
-}
-export interface AccountsStatus {
-  initialized: boolean
-  unlocked: boolean
-  stores: AccountStoreSummary[]
-  activeSwitch?: ActiveSwitchSummary
-  currentStore?: AccountStoreSummary | null
-}
-
 const EMPTY_ACCOUNTS_STATUS: AccountsStatus = {
   initialized: false,
   unlocked: false,
@@ -185,20 +165,6 @@ export const commandGroups: ReadonlyArray<{
     commands: [{ id: "accounts", label: "Switch store", icon: Building2, keywords: ["account", "store", "stores", "switch", "login"] }],
   },
 ] as const
-
-export interface BulkRemovalSummary {
-  openedCount: number
-  skipped: Array<{ sku: string; reason: string }>
-  nextRemovalOrderId: string | null
-  /** Amazon didn't report eligibility for some SKUs, so they were included unchecked. */
-  eligibilityUnknown: boolean
-}
-
-export interface ReportsPrepareResult {
-  loggedInToStore: boolean
-  openedPromptOnSellerCentral?: boolean
-  runId?: string
-}
 
 export interface CommandPaletteProps {
   container: ShadowRoot | HTMLElement

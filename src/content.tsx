@@ -17,6 +17,7 @@ import { fetchStrandedListings } from "./lib/stranded"
 import { fetchSuppressedListings } from "./lib/suppressed"
 import { fetchNextRemovalOrderId, fetchUnfulfillableListings } from "./lib/unfulfillable"
 import { scrapeCases } from "./lib/viewCase"
+import { sendToBackground } from "./shared/messages"
 
 const PALETTE_APP_FILE = "palette-app.js"
 const EXTENSION_CONTEXT_INVALIDATED = "Extension context invalidated."
@@ -95,17 +96,14 @@ export function handleContentKeyDown(
 /** A finished store switch reloads this tab; show its result until the user is back. */
 export async function showSwitchNotice(load: () => Promise<MountedPalette> = loadPalette): Promise<void> {
   if (location.origin !== "https://sellercentral.amazon.com") return
-  const response = await chrome.runtime.sendMessage({ type: "ACCOUNTS_SWITCH_NOTICE" }) as { ok?: boolean; storeName?: unknown } | undefined
-  if (!response?.ok || typeof response.storeName !== "string") return
-  ;(await load()).showSwitchDone(response.storeName)
+  const { storeName } = await sendToBackground({ type: "ACCOUNTS_SWITCH_NOTICE" })
+  if (typeof storeName !== "string") return
+  ;(await load()).showSwitchDone(storeName)
 }
 
 function emitReportProgress(event: ReportProgressEvent, runId?: string): void {
   if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return
-  void chrome.runtime.sendMessage({ type: "REPORTS_PROGRESS", ...event, ...(runId ? { runId } : {}) }).then(
-    () => undefined,
-    () => undefined,
-  )
+  void sendToBackground({ type: "REPORTS_PROGRESS", ...event, ...(runId ? { runId } : {}) }).catch(() => undefined)
 }
 
 interface SourceFetchOptions {

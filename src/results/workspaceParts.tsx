@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Building2 } from "lucide-react"
 
-import type { AccountsStatus } from "@/CommandPalette"
+import type { AccountsStatus } from "@/shared/messages"
 import { HeaderButton } from "@/components/panel"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { cn } from "@/lib/utils"

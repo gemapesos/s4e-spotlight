@@ -1,19 +1,18 @@
 import * as React from "react"
 import { FileJson, FileSpreadsheet, Lock, LockOpen, type LucideIcon } from "lucide-react"
 
-import type { AccountsStatus } from "@/CommandPalette"
 import { Notice } from "@/components/panel"
 import { ACTIVE_JOB_STORAGE_KEY, SESSION_KEY_STORAGE_KEY } from "@/lib/accounts"
 import { isReportProgressMessage } from "@/lib/reportProgress"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { DEFAULT_ENABLED_FEATURES, isFeatureEnabled, parseSettings, type EnabledFeatures, type FeatureId } from "@/lib/settings"
 import { cn } from "@/lib/utils"
-import { api } from "@/options/api"
 import { checkSellerCentralSession, dispatchReportProgress, getAccountsStatus, openSellerCentral } from "@/paletteApp"
 import { AccountsTab } from "@/results/AccountsTab"
 import { CasesTab } from "@/results/CasesTab"
 import { ReportsTab } from "@/results/ReportsTab"
 import type { WorkspaceLaunch, WorkspaceRuns, WorkspaceTab } from "@/results/workspaceParts"
+import { sendToBackground, type AccountsStatus } from "@/shared/messages"
 
 const TABS: ReadonlyArray<{ id: WorkspaceTab; label: string; feature: FeatureId; icon: LucideIcon }> = [
   { id: "reports", label: "Reports", feature: "generate-reports", icon: FileSpreadsheet },
@@ -57,7 +56,7 @@ export function WorkspaceApp() {
 
   const showLaunch = React.useCallback(async (launchId: string | null) => {
     try {
-      const value = await api<Record<string, unknown>>({ type: "RESULTS_INIT", launchId })
+      const value = await sendToBackground({ type: "RESULTS_INIT", launchId })
       const mode = isWorkspaceTab(value.mode) ? value.mode : "reports"
       setLaunch((current) => ({
         mode,
@@ -79,7 +78,7 @@ export function WorkspaceApp() {
     void showLaunch(new URLSearchParams(window.location.search).get("launch"))
     void refreshStatus()
     refreshSession()
-    void api<{ settings?: unknown }>({ type: "GET_SETTINGS" }).then(
+    void sendToBackground({ type: "GET_SETTINGS" }).then(
       (response) => setFeatures(parseSettings(response.settings).features),
       () => undefined,
     )
@@ -111,7 +110,7 @@ export function WorkspaceApp() {
     // Closing the window stops whatever it was running.
     const onLeave = () => {
       for (const runId of [runs.current.report, runs.current.cases]) {
-        if (runId) void api({ type: "RESULTS_CANCEL", runId }).catch(() => undefined)
+        if (runId) void sendToBackground({ type: "RESULTS_CANCEL", runId }).catch(() => undefined)
       }
       runs.current = {}
     }

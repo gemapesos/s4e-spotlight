@@ -1,7 +1,6 @@
 import * as React from "react"
 import { CircleAlert, Download, ExternalLink, FileJson } from "lucide-react"
 
-import type { AccountsStatus } from "@/CommandPalette"
 import { HeaderButton, KeyHint, Notice, PanelFooter, PrimaryButton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -9,7 +8,6 @@ import { extractCaseIds, findCaseIds } from "@/lib/caseIds"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { cn } from "@/lib/utils"
 import { caseScrapeFileName, casePageUrl, downloadCaseScrape, type ScrapeCasesFile, type ScrapedCase } from "@/lib/viewCase"
-import { api } from "@/options/api"
 import {
   formatDuration,
   plural,
@@ -21,10 +19,10 @@ import {
   type WorkspaceRuns,
 } from "@/results/workspaceParts"
 import { CheckBubble } from "@/SwitchProgress"
+import { MAX_BULK_IDS, sendToBackground, type AccountsStatus } from "@/shared/messages"
 
 type Phase = "input" | "running" | "done"
 
-const MAX_CASES = 50
 const MAX_CHIPS = 12
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -94,7 +92,7 @@ export function CasesTab({
     if (phase === "running") return
     const caseIds = extractCaseIds(input)
     if (caseIds.length === 0) return setError("Enter at least one 11-digit Case ID.")
-    if (caseIds.length > MAX_CASES) return setError(`Scrape no more than ${MAX_CASES} cases at a time.`)
+    if (caseIds.length > MAX_BULK_IDS) return setError(`Scrape no more than ${MAX_BULK_IDS} cases at a time.`)
     const run = ++token.current
     const startedAt = Date.now()
     setRequested(caseIds)
@@ -103,12 +101,12 @@ export function CasesTab({
     setPhase("running")
     let runId: string | undefined
     try {
-      const prepared = await api<{ runId?: string }>({ type: "REPORTS_PREPARE", mode: "cases", caseIds })
+      const prepared = await sendToBackground({ type: "REPORTS_PREPARE", mode: "cases", caseIds })
       runId = prepared.runId
       if (run !== token.current) return
       if (!runId) throw new Error("Couldn’t start this scrape. Please try again.")
       runs.current.cases = runId
-      const response = await api<{ file?: ScrapeCasesFile }>({ type: "SCRAPE_CASES", caseIds, runId })
+      const response = await sendToBackground({ type: "SCRAPE_CASES", runId })
       if (run !== token.current) return
       if (!response.file || !Array.isArray(response.file.cases)) throw new Error("Couldn’t scrape cases. Please try again.")
       setFile(response.file)
@@ -122,7 +120,7 @@ export function CasesTab({
     } finally {
       if (runId) {
         if (runs.current.cases === runId) runs.current.cases = undefined
-        await api({ type: run === token.current ? "RESULTS_FINISH" : "RESULTS_CANCEL", runId }).catch(() => undefined)
+        await sendToBackground({ type: run === token.current ? "RESULTS_FINISH" : "RESULTS_CANCEL", runId }).catch(() => undefined)
       }
     }
   }
@@ -131,7 +129,7 @@ export function CasesTab({
     token.current += 1
     const runId = runs.current.cases
     runs.current.cases = undefined
-    if (runId) void api({ type: "RESULTS_CANCEL", runId }).catch(() => undefined)
+    if (runId) void sendToBackground({ type: "RESULTS_CANCEL", runId }).catch(() => undefined)
     setPhase("input")
   }
 
@@ -195,7 +193,7 @@ export function CasesTab({
           </div>
           <div className="flex shrink-0 gap-2.5 rounded-[0.625rem] px-3 py-2.5 text-xs leading-4 text-foreground/70 ring-1 ring-border ring-inset">
             <FileJson aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-            <span>Saves one JSON file with each case’s details and every reply, timestamped in your time zone. Up to {MAX_CASES} cases at a time.</span>
+            <span>Saves one JSON file with each case’s details and every reply, timestamped in your time zone. Up to {MAX_BULK_IDS} cases at a time.</span>
           </div>
           {error ? <Notice error message={error} onDismiss={() => setError(null)} /> : null}
         </WorkspaceBody>
