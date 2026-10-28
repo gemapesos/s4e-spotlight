@@ -5,6 +5,7 @@ import { Field, HeaderButton, Kbd, Notice, PanelFooter, PrimaryButton } from "@/
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
+import { errorMessage } from "@/lib/log"
 import { moveRowFocus, WorkspaceBody, type WorkspaceLaunch } from "@/results/workspaceParts"
 import { CheckBubble, SWITCH_STAGE_LABELS, SwitchSteps, switchProgress } from "@/SwitchProgress"
 import { sendToBackground, type AccountsStatus, type AccountStoreSummary, type ActiveSwitchSummary } from "@/shared/messages"
@@ -132,7 +133,7 @@ export function AccountsTab({
     try {
       await action()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : failure)
+      setError(errorMessage(caught, failure))
     } finally {
       setBusy(false)
       await refreshStatus()

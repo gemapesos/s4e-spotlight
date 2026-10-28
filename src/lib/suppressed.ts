@@ -8,6 +8,7 @@ import {
   readAntiCsrfToken,
   UNFULFILLABLE_GQL_URL,
 } from "./unfulfillable"
+import { numberCell, quantityCell, textCell, yesNo } from "@/shared/format"
 
 export const SUPPRESSED_GQL_URL = UNFULFILLABLE_GQL_URL
 export const SUPPRESSED_PAGE_SIZE = 250
@@ -792,31 +793,8 @@ export interface FetchSuppressedListingsOptions {
   log?: Logger
 }
 
-function suppressedCell(value: string | number | null | undefined): string {
-  if (value == null) return ""
-  return String(value)
-}
-
-function suppressedQuantity(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0
-}
-
-function optionalNumber(value: string | number | null | undefined): number | "" {
-  if (typeof value === "number" && Number.isFinite(value)) return value
-  if (typeof value === "string" && value.trim()) {
-    const amount = Number(value)
-    if (Number.isFinite(amount)) return amount
-  }
-  return ""
-}
-
-function suppressedYesNo(value: boolean | null | undefined): string {
-  if (value == null) return ""
-  return value ? "Yes" : "No"
-}
-
 function currencyAmount(price: Currency | null | undefined): number | "" {
-  return optionalNumber(price?.amount)
+  return numberCell(price?.amount)
 }
 
 function joinParts(parts: Array<string | number | null | undefined>): string {
@@ -837,7 +815,7 @@ function keyValues(pairs: Array<KeyValuePair | null> | null | undefined): string
 function quantityPrices(entries: Array<QuantityPrice | null> | null | undefined, suffix = ""): string[] {
   return (entries ?? [])
     .filter((entry): entry is QuantityPrice => Boolean(entry))
-    .map((entry) => `${suppressedCell(entry.quantity)}${suffix}:${suppressedCell(entry.amount)}`)
+    .map((entry) => `${textCell(entry.quantity)}${suffix}:${textCell(entry.amount)}`)
     .filter((part) => part !== `${suffix}:` && part !== ":")
 }
 
@@ -867,7 +845,7 @@ function formatFbaRecommendation(recommendation: FbaRecommendation | null | unde
 function formatAvailabilities(listing: SuppressedListing): string {
   return (listing.availability?.availabilities ?? [])
     .filter((item): item is NonNullable<typeof item> => Boolean(item))
-    .map((item) => `${suppressedCell(item.fmid)}:${suppressedQuantity(item.quantity)}:${suppressedCell(item.fulfillmentChannelName)}`)
+    .map((item) => `${textCell(item.fmid)}:${quantityCell(item.quantity)}:${textCell(item.fulfillmentChannelName)}`)
     .filter(Boolean)
     .join(" | ")
 }
@@ -875,7 +853,7 @@ function formatAvailabilities(listing: SuppressedListing): string {
 function formatAaAvailabilities(listing: SuppressedListing): string {
   return (listing.availability?.aaAvailabilities ?? [])
     .filter((item): item is NonNullable<typeof item> => Boolean(item))
-    .map((item) => joinParts([item.fulfillmentChannelName, suppressedQuantity(item.quantity), item.isAggregatedAvailability ? "aggregated" : ""]))
+    .map((item) => joinParts([item.fulfillmentChannelName, quantityCell(item.quantity), item.isAggregatedAvailability ? "aggregated" : ""]))
     .filter(Boolean)
     .join(" | ")
 }
@@ -886,7 +864,7 @@ function formatInventoryAlert(listing: SuppressedListing): string {
   return joinParts([
     alert.alertType,
     alert.threshold == null ? "" : `threshold=${alert.threshold}`,
-    alert.isThresholdReached == null ? "" : `reached=${suppressedYesNo(alert.isThresholdReached)}`,
+    alert.isThresholdReached == null ? "" : `reached=${yesNo(alert.isThresholdReached)}`,
   ])
 }
 
@@ -955,82 +933,82 @@ export function suppressedSheetRow(listing: SuppressedListing): Array<string | n
   const benchmark = listing.pricing?.competitivePricingSummary?.competitiveBenchmarkPrice
   const price = currencyAmount(offer?.price?.price)
   return [
-    suppressedCell(listing.coreListingFields?.sku ?? listing.listingData?.sku),
-    suppressedCell(listing.coreListingFields?.asin ?? listing.listingData?.asin),
-    suppressedCell(listing.coreListingFields?.fnSku ?? listing.listingData?.fnSku),
-    suppressedCell(listing.listingData?.title),
-    suppressedCell(listing.listingData?.titleDifferentiation),
-    suppressedCell(listing.imageUrl),
-    suppressedCell(listing.detailPageUrl),
-    suppressedCell(listing.skuCentralLink),
+    textCell(listing.coreListingFields?.sku ?? listing.listingData?.sku),
+    textCell(listing.coreListingFields?.asin ?? listing.listingData?.asin),
+    textCell(listing.coreListingFields?.fnSku ?? listing.listingData?.fnSku),
+    textCell(listing.listingData?.title),
+    textCell(listing.listingData?.titleDifferentiation),
+    textCell(listing.imageUrl),
+    textCell(listing.detailPageUrl),
+    textCell(listing.skuCentralLink),
     formatListingStatus(listing.status?.status),
-    suppressedCell(listing.status?.statusText),
-    suppressedCell(listing.status?.highlightedState),
-    suppressedCell(listing.status?.inlineAction),
-    suppressedCell(listing.status?.inlineActionText),
-    suppressedCell(listing.status?.redirectionLink),
+    textCell(listing.status?.statusText),
+    textCell(listing.status?.highlightedState),
+    textCell(listing.status?.inlineAction),
+    textCell(listing.status?.inlineActionText),
+    textCell(listing.status?.redirectionLink),
     ...suppressedIssueCells(listing),
-    suppressedCell(listing.listingData?.productType),
-    suppressedCell(listing.listingData?.listingType),
-    suppressedCell(listing.listingData?.bundleStatus),
-    suppressedCell(listing.coreListingFields?.fulfillmentChannel ?? offer?.fulfillmentChannel),
-    suppressedCell(offer?.condition?.condition),
-    suppressedCell(offer?.condition?.subCondition),
-    suppressedCell(listing.listingData?.parentAsin),
-    suppressedCell(listing.listingData?.parentSku),
-    suppressedQuantity(listing.listingData?.numberOfChildren),
-    suppressedYesNo(listing.isParentListing),
-    suppressedYesNo(listing.isCustomizable),
-    suppressedQuantity(listing.marketplaceCount),
+    textCell(listing.listingData?.productType),
+    textCell(listing.listingData?.listingType),
+    textCell(listing.listingData?.bundleStatus),
+    textCell(listing.coreListingFields?.fulfillmentChannel ?? offer?.fulfillmentChannel),
+    textCell(offer?.condition?.condition),
+    textCell(offer?.condition?.subCondition),
+    textCell(listing.listingData?.parentAsin),
+    textCell(listing.listingData?.parentSku),
+    quantityCell(listing.listingData?.numberOfChildren),
+    yesNo(listing.isParentListing),
+    yesNo(listing.isCustomizable),
+    quantityCell(listing.marketplaceCount),
     (listing.listingData?.externalIds ?? [])
       .filter((id): id is NonNullable<typeof id> => Boolean(id))
-      .map((id) => `${suppressedCell(id.type)}:${suppressedCell(id.value)}`)
+      .map((id) => `${textCell(id.type)}:${textCell(id.value)}`)
       .filter((part) => part !== ":")
       .join(", "),
-    suppressedYesNo(listing.annotations?.favorite),
+    yesNo(listing.annotations?.favorite),
     (listing.annotations?.tagsAnnotation ?? [])
       .map((tag) => tag?.value)
       .filter((value): value is string => Boolean(value))
       .join(", "),
-    suppressedCell(listing.shippingTemplate?.TemplateName),
-    suppressedCell(listing.shippingTemplate?.TemplateId),
-    suppressedYesNo(listing.shippingTemplate?.Legacy),
-    suppressedCell(listing.listingData?.dateCreated),
-    suppressedCell(listing.listingData?.lastUpdated),
-    optionalNumber(listing.listingData?.last30DayGms),
-    optionalNumber(listing.listingData?.last30DayGv),
-    optionalNumber(listing.listingData?.last30DayUnitsSold),
-    suppressedCell(listing.listingData?.qualityRecommendationScore?.grade),
-    suppressedCell(listing.listingData?.qualityRecommendationScore?.lastUpdatedDate),
-    suppressedQuantity(listing.availability?.quantity),
-    suppressedYesNo(listing.availability?.isQuantityInfinite),
-    suppressedCell(listing.availability?.inventoryAvailability),
-    suppressedQuantity(listing.availability?.onHandQuantity),
-    suppressedQuantity(listing.availability?.inbound),
-    suppressedQuantity(listing.availability?.reservedQuantity),
-    suppressedQuantity(listing.availability?.reserved?.fcTransfer),
-    suppressedQuantity(listing.availability?.reserved?.customerOrder),
-    suppressedQuantity(listing.availability?.reserved?.fcProcessing),
-    suppressedQuantity(listing.availability?.buyableInTransit),
-    suppressedQuantity(listing.availability?.pendingCustomerOrdersInTransit),
-    suppressedQuantity(listing.availability?.unfulfillable),
-    suppressedQuantity(details?.damagedByCarrier),
-    suppressedQuantity(details?.damagedByCustomer),
-    suppressedQuantity(details?.defective),
-    suppressedQuantity(details?.expired),
-    suppressedQuantity(details?.damagedByWarehouse),
-    suppressedQuantity(details?.damagedByDistributor),
-    suppressedQuantity(listing.availability?.researching?.shortTerm),
-    suppressedQuantity(listing.availability?.researching?.midTerm),
-    suppressedQuantity(listing.availability?.researching?.longTerm),
+    textCell(listing.shippingTemplate?.TemplateName),
+    textCell(listing.shippingTemplate?.TemplateId),
+    yesNo(listing.shippingTemplate?.Legacy),
+    textCell(listing.listingData?.dateCreated),
+    textCell(listing.listingData?.lastUpdated),
+    numberCell(listing.listingData?.last30DayGms),
+    numberCell(listing.listingData?.last30DayGv),
+    numberCell(listing.listingData?.last30DayUnitsSold),
+    textCell(listing.listingData?.qualityRecommendationScore?.grade),
+    textCell(listing.listingData?.qualityRecommendationScore?.lastUpdatedDate),
+    quantityCell(listing.availability?.quantity),
+    yesNo(listing.availability?.isQuantityInfinite),
+    textCell(listing.availability?.inventoryAvailability),
+    quantityCell(listing.availability?.onHandQuantity),
+    quantityCell(listing.availability?.inbound),
+    quantityCell(listing.availability?.reservedQuantity),
+    quantityCell(listing.availability?.reserved?.fcTransfer),
+    quantityCell(listing.availability?.reserved?.customerOrder),
+    quantityCell(listing.availability?.reserved?.fcProcessing),
+    quantityCell(listing.availability?.buyableInTransit),
+    quantityCell(listing.availability?.pendingCustomerOrdersInTransit),
+    quantityCell(listing.availability?.unfulfillable),
+    quantityCell(details?.damagedByCarrier),
+    quantityCell(details?.damagedByCustomer),
+    quantityCell(details?.defective),
+    quantityCell(details?.expired),
+    quantityCell(details?.damagedByWarehouse),
+    quantityCell(details?.damagedByDistributor),
+    quantityCell(listing.availability?.researching?.shortTerm),
+    quantityCell(listing.availability?.researching?.midTerm),
+    quantityCell(listing.availability?.researching?.longTerm),
     formatFbaRecommendation(listing.availability?.fbaRecommendation),
     formatAvailabilities(listing),
     formatAaAvailabilities(listing),
     formatInventoryAlert(listing),
-    optionalNumber(listing.availability?.recommendation?.daysOfSupply),
-    optionalNumber(listing.availability?.recommendation?.recommendedInventory),
+    numberCell(listing.availability?.recommendation?.daysOfSupply),
+    numberCell(listing.availability?.recommendation?.recommendedInventory),
     price,
-    suppressedCell(offer?.price?.price?.currencyUnit),
+    textCell(offer?.price?.price?.currencyUnit),
     currencyAmount(offer?.salePrice?.price),
     currencyAmount(offer?.minAllowedPrice?.price),
     currencyAmount(offer?.maxAllowedPrice?.price),
@@ -1038,20 +1016,20 @@ export function suppressedSheetRow(listing: SuppressedListing): Array<string | n
     formatQuantityDiscount(offer?.quantityDiscount ?? offer?.businessPrice),
     currencyAmount(offer?.maxRetailPrice?.price),
     currencyAmount(listing.estimatedShipping),
-    suppressedCell(offer?.points ?? listing.pricing?.points),
-    suppressedCell(offer?.automatedPricing?.enrollmentStatus ?? listing.pricing?.automatedPricing?.enrollmentStatus),
-    optionalNumber(listing.pricing?.taxData?.taxRate),
-    optionalNumber(listing.pricing?.taxData?.taxExclusivePrice),
-    optionalNumber(listing.pricing?.taxData?.taxExclusiveBusinessPrice),
+    textCell(offer?.points ?? listing.pricing?.points),
+    textCell(offer?.automatedPricing?.enrollmentStatus ?? listing.pricing?.automatedPricing?.enrollmentStatus),
+    numberCell(listing.pricing?.taxData?.taxRate),
+    numberCell(listing.pricing?.taxData?.taxExclusivePrice),
+    numberCell(listing.pricing?.taxData?.taxExclusiveBusinessPrice),
     currencyAmount(competition?.lowestPrice?.price),
     currencyAmount(competition?.lowestPrice?.shipping),
     currencyAmount(competition?.buyBoxPrice?.price),
     currencyAmount(competition?.buyBoxPrice?.shipping),
-    optionalNumber(competition?.salesRank?.rank),
-    suppressedCell(competition?.salesRank?.productCategory),
+    numberCell(competition?.salesRank?.rank),
+    textCell(competition?.salesRank?.productCategory),
     currencyAmount(benchmark?.price),
     currencyAmount(benchmark?.shipping),
-    suppressedCell(offer?.businessProgram?.valueLabel ?? offer?.businessProgram?.value),
+    textCell(offer?.businessProgram?.valueLabel ?? offer?.businessProgram?.value),
     formatSpecialOffer(offer?.haulOffer, offer?.haulOffer?.haulPrice?.price),
     formatSpecialOffer(offer?.ffoOffer, offer?.ffoOffer?.ffoPrice?.price),
     formatSpecialOffer(offer?.nonAllOffer, offer?.nonAllOffer?.nonAllPrice?.price),
@@ -1059,7 +1037,7 @@ export function suppressedSheetRow(listing: SuppressedListing): Array<string | n
       .map((action) => action?.type)
       .filter((type): type is string => Boolean(type))
       .join(", "),
-    suppressedCell(listing.pointsCentralLink),
+    textCell(listing.pointsCentralLink),
   ]
 }
 

@@ -5,6 +5,7 @@ import {
   type LogEntry,
 } from "@/lib/log"
 import { REPORT_PROGRESS_ROWS } from "@/lib/reportProgress"
+import { saveJsonFile } from "@/shared/download"
 import { sendToBackground } from "@/shared/messages"
 
 export interface LastReportSummary {
@@ -60,12 +61,5 @@ export function downloadLogs(entries: readonly LogEntry[], targetDocument: Docum
     userAgent: navigator.userAgent,
     entries,
   }
-  const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }))
-  const anchor = targetDocument.createElement("a")
-  anchor.href = url
-  anchor.download = logsFileName()
-  targetDocument.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1_000)
+  saveJsonFile(payload, logsFileName(), targetDocument)
 }

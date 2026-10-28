@@ -1,5 +1,6 @@
 import { describeError, errorMessage, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
+import { quantityCell, textCell } from "@/shared/format"
 
 export const UNFULFILLABLE_GQL_URL = "https://sellercentral.amazon.com/myinventory/gql"
 export const UNFULFILLABLE_INVENTORIES_URL = "https://sellercentral.amazon.com/recovery/inventories"
@@ -283,15 +284,6 @@ export function formatListingStatus(status: string | null | undefined): string {
     .join(" ")
 }
 
-function cell(value: string | number | null | undefined): string {
-  if (value == null) return ""
-  return String(value)
-}
-
-function quantity(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0
-}
-
 function firstOfferPrice(listing: UnfulfillableListing): { amount: number | ""; currency: string } {
   for (const offer of listing.offers ?? []) {
     const price = offer?.price?.price
@@ -324,23 +316,23 @@ export function unfulfillableSheetRow(listing: UnfulfillableListing): Array<stri
   const details = listing.availability?.unfulfillableDetails
   const price = firstOfferPrice(listing)
   return [
-    cell(listing.coreListingFields?.sku),
-    cell(listing.coreListingFields?.asin),
-    cell(listing.coreListingFields?.fnSku),
-    cell(listing.listingData?.title),
+    textCell(listing.coreListingFields?.sku),
+    textCell(listing.coreListingFields?.asin),
+    textCell(listing.coreListingFields?.fnSku),
+    textCell(listing.listingData?.title),
     formatListingStatus(listing.status?.status),
     price.amount,
     price.currency,
-    quantity(listing.availability?.unfulfillable),
-    quantity(details?.damagedByCarrier),
-    quantity(details?.damagedByCustomer),
-    quantity(details?.defective),
-    quantity(details?.expired),
-    quantity(details?.damagedByWarehouse),
-    quantity(details?.damagedByDistributor),
+    quantityCell(listing.availability?.unfulfillable),
+    quantityCell(details?.damagedByCarrier),
+    quantityCell(details?.damagedByCustomer),
+    quantityCell(details?.defective),
+    quantityCell(details?.expired),
+    quantityCell(details?.damagedByWarehouse),
+    quantityCell(details?.damagedByDistributor),
     listing.removalFetchFailed ? REMOVAL_STATUS_UNAVAILABLE : formatRemovalStatus(listing.removal),
-    cell(listing.listingData?.lastUpdated),
-    cell(listing.imageUrl),
+    textCell(listing.listingData?.lastUpdated),
+    textCell(listing.imageUrl),
   ]
 }
 
@@ -418,18 +410,18 @@ export function removalStatusFromLineItem(item: RecoveryLineItem): RemovalStatus
   let ineligibleTotal = 0
   for (const entry of item.unsellableIneligibleQuantities ?? []) {
     if (!entry) continue
-    const qty = quantity(entry.quantity)
+    const qty = quantityCell(entry.quantity)
     if (qty <= 0) continue
     ineligibleTotal += qty
     const label = removalStatusLabel(entry.unfulfillableErrorCode)
     byLabel.set(label, (byLabel.get(label) ?? 0) + qty)
   }
-  const reportedIneligible = quantity(item.unsellableIneligibleQuantity)
+  const reportedIneligible = quantityCell(item.unsellableIneligibleQuantity)
   if (reportedIneligible > ineligibleTotal) {
     byLabel.set(REMOVAL_STATUS_UNKNOWN, (byLabel.get(REMOVAL_STATUS_UNKNOWN) ?? 0) + (reportedIneligible - ineligibleTotal))
     ineligibleTotal = reportedIneligible
   }
-  const eligible = Math.max(0, quantity(item.totalUnsellableQuantity) - ineligibleTotal)
+  const eligible = Math.max(0, quantityCell(item.totalUnsellableQuantity) - ineligibleTotal)
   if (eligible > 0) byLabel.set(REMOVAL_STATUS_ELIGIBLE, (byLabel.get(REMOVAL_STATUS_ELIGIBLE) ?? 0) + eligible)
 
   return REMOVAL_STATUS_ORDER

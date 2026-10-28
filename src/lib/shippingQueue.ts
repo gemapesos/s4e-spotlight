@@ -1,6 +1,7 @@
 import { formatLocalDateTime, formatUtcDateTime } from "./dates"
 import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
+import { numberCell, textCell, yesNo } from "@/shared/format"
 
 export const SHIPPING_QUEUE_URL = "https://sellercentral.amazon.com/fba/shippingqueue/api/v1/shipment/listShipments"
 export const SHIPPING_QUEUE_REFERRER = "https://sellercentral.amazon.com/manage/shipments?ref=sc_shipments"
@@ -317,29 +318,12 @@ function formatEligibilityDate(value: DateValue): string {
   return formatShippingQueueDate(value)
 }
 
-function shippingQueueCell(value: unknown): string {
-  if (value == null) return ""
-  return String(value)
-}
-
-export function shippingQueueNumericCell(value: unknown): number | "" {
-  if (value == null || value === "") return ""
-  const num = typeof value === "number" ? value : Number(value)
-  return Number.isFinite(num) ? num : ""
-}
-
-export function shippingQueueYesNo(value: boolean | null | undefined): string {
-  if (value === true) return "Yes"
-  if (value === false) return "No"
-  return ""
-}
-
 export function calculateDiscrepancyQuantity(
   receivedQuantity: unknown,
   shippedQuantity: unknown,
 ): number | "" {
-  const received = shippingQueueNumericCell(receivedQuantity)
-  const shipped = shippingQueueNumericCell(shippedQuantity)
+  const received = numberCell(receivedQuantity)
+  const shipped = numberCell(shippedQuantity)
   if (received === "" || shipped === "") return ""
   return received - shipped
 }
@@ -363,7 +347,7 @@ export function buildAsinUrl(asin?: string | null): string {
 
 function shippingQueueFormatComplexField(value: unknown): string {
   if (value == null) return ""
-  if (typeof value === "boolean") return shippingQueueYesNo(value)
+  if (typeof value === "boolean") return yesNo(value)
   if (typeof value === "object") {
     try {
       return JSON.stringify(value)
@@ -586,40 +570,40 @@ const BLANK_ITEM_CELLS = SHIPPING_QUEUE_ITEM_HEADERS.map(() => "")
 function shipmentListCells(shipment: ShippingQueueShipment): Array<string | number> {
   const window = shipment.shipOrDeliveryWindow
   return [
-    shippingQueueCell(shipment.shipmentName),
-    shippingQueueCell(shipment.shipmentId),
+    textCell(shipment.shipmentName),
+    textCell(shipment.shipmentId),
     buildShipmentUrl(shipment.shipmentId),
-    shippingQueueCell(shipment.shipmentStatus),
-    shippingQueueCell(shipment.destinationFC),
-    shippingQueueCell(shipment.fcAddress),
-    shippingQueueCell(shipment.shipFromAddressId),
+    textCell(shipment.shipmentStatus),
+    textCell(shipment.destinationFC),
+    textCell(shipment.fcAddress),
+    textCell(shipment.shipFromAddressId),
     formatShippingQueueLocalDate(shipment.createdDate),
     formatShippingQueueLocalDate(shipment.lastUpdatedDate),
-    shippingQueueNumericCell(shipment.mskus),
-    shippingQueueNumericCell(shipment.shippedQuantity),
-    shippingQueueNumericCell(shipment.receivedQuantity),
-    shippingQueueNumericCell(shipment.expectedQuantity),
-    shippingQueueNumericCell(shipment.locatedQuantity),
-    shippingQueueNumericCell(shipment.stowedQuantity),
+    numberCell(shipment.mskus),
+    numberCell(shipment.shippedQuantity),
+    numberCell(shipment.receivedQuantity),
+    numberCell(shipment.expectedQuantity),
+    numberCell(shipment.locatedQuantity),
+    numberCell(shipment.stowedQuantity),
     calculateDiscrepancyQuantity(shipment.receivedQuantity, shipment.shippedQuantity),
-    shippingQueueCell(shipment.workflowId),
-    shippingQueueCell(shipment.workflowType),
-    shippingQueueCell(shipment.poId),
-    shippingQueueCell(shipment.placementStatus),
-    shippingQueueCell(window?.windowType),
+    textCell(shipment.workflowId),
+    textCell(shipment.workflowType),
+    textCell(shipment.poId),
+    textCell(shipment.placementStatus),
+    textCell(window?.windowType),
     formatShippingQueueDate(window?.windowStartDate),
     formatShippingQueueDate(window?.windowEndDate),
     formatShippingQueueDate(window?.gracePeriodEndDate),
-    shippingQueueCell(shipment.shipOrDeliveryWindowComplianceStatus),
+    textCell(shipment.shipOrDeliveryWindowComplianceStatus),
     formatShippingQueueDate(shipment.needByDate),
-    shippingQueueCell(shipment.reasonCode),
-    shippingQueueYesNo(shipment.finalized),
+    textCell(shipment.reasonCode),
+    yesNo(shipment.finalized),
     formatShippingQueueLocalDate(shipment.finalizedDate),
     formatShippingQueueDate(shipment.estimatedFinalizedDateUTC),
     formatShippingQueueDate(shipment.formerEstimatedFinalizedDateUTC),
-    shippingQueueYesNo(shipment.blocked),
-    shippingQueueYesNo(shipment.partneredImport),
-    shippingQueueYesNo(shipment.merchantLaunched),
+    yesNo(shipment.blocked),
+    yesNo(shipment.partneredImport),
+    yesNo(shipment.merchantLaunched),
     shippingQueueFormatComplexField(shipment.ismsDetails),
     shippingQueueFormatComplexField(shipment.t2pAccelerate),
   ]
@@ -635,21 +619,21 @@ function shipmentDetailCells(shipment: ShippingQueueShipment): Array<string | nu
   return [
     SHIPPING_QUEUE_DETAILS_LOADED,
     buildShipmentClaimUrl(shipment.shipmentId),
-    shippingQueueYesNo(details.eligible),
-    shippingQueueCell(details.ineligibilityReason),
+    yesNo(details.eligible),
+    textCell(details.ineligibilityReason),
     formatEligibilityDate(details.estimatedTimestamp),
     formatEligibilityDate(details.formerEstimatedTimestamp),
-    shippingQueueNumericCell(details.daysToWait),
+    numberCell(details.daysToWait),
     formatEligibilityDetails(details.details),
-    shippingQueueCell(inquiry?.inquiryStatus),
-    shippingQueueCell(inquiry?.inquiryText),
-    shippingQueueCell(inquiry?.caseId),
+    textCell(inquiry?.inquiryStatus),
+    textCell(inquiry?.inquiryText),
+    textCell(inquiry?.caseId),
     formatShippingQueueLocalDate(inquiry?.caseCreationDate),
-    shippingQueueCell(inquiry?.caseCreatedBy),
-    shippingQueueYesNo(details.hasDiscrepancy),
-    shippingQueueCell(details.retailDomainName),
-    shippingQueueYesNo(details.wmsrAllowed),
-    shippingQueueNumericCell(details.discrepancyTotalRecords ?? details.items.length),
+    textCell(inquiry?.caseCreatedBy),
+    yesNo(details.hasDiscrepancy),
+    textCell(details.retailDomainName),
+    yesNo(details.wmsrAllowed),
+    numberCell(details.discrepancyTotalRecords ?? details.items.length),
     totalDiscrepancyQuantity(details),
   ]
 }
@@ -657,34 +641,34 @@ function shipmentDetailCells(shipment: ShippingQueueShipment): Array<string | nu
 function shipmentItemCells(item: ShipmentDiscrepancyItem | undefined): Array<string | number> {
   if (!item) return [...BLANK_ITEM_CELLS]
   return [
-    shippingQueueCell(item.merchantSKU),
-    shippingQueueCell(item.title),
-    shippingQueueCell(item.fnsku),
-    shippingQueueCell(item.asin),
+    textCell(item.merchantSKU),
+    textCell(item.title),
+    textCell(item.fnsku),
+    textCell(item.asin),
     buildAsinUrl(item.asin),
-    shippingQueueCell(item.upc),
-    shippingQueueCell(item.barcodeType),
-    shippingQueueCell(item.barcodeValue),
-    shippingQueueCell(item.itemCondition),
-    shippingQueueYesNo(item.isSortable),
-    shippingQueueYesNo(item.eligibleForResearch),
-    shippingQueueNumericCell(item.expectedQuantity),
-    shippingQueueNumericCell(item.totalLocatedQuantity),
-    shippingQueueNumericCell(item.totalReceivedQuantity),
-    shippingQueueNumericCell(item.totalAdjustmentQuantity),
-    shippingQueueNumericCell(item.totalReimbursedQuantity),
-    shippingQueueNumericCell(item.totalClawbackQuantity),
-    shippingQueueNumericCell(item.totalAcknowledgedQuantity),
-    shippingQueueNumericCell(item.totalDeniedQuantity),
-    shippingQueueNumericCell(item.totalVirtuallyAdjustedQuantity),
-    shippingQueueNumericCell(item.otherReceivedQuantity),
+    textCell(item.upc),
+    textCell(item.barcodeType),
+    textCell(item.barcodeValue),
+    textCell(item.itemCondition),
+    yesNo(item.isSortable),
+    yesNo(item.eligibleForResearch),
+    numberCell(item.expectedQuantity),
+    numberCell(item.totalLocatedQuantity),
+    numberCell(item.totalReceivedQuantity),
+    numberCell(item.totalAdjustmentQuantity),
+    numberCell(item.totalReimbursedQuantity),
+    numberCell(item.totalClawbackQuantity),
+    numberCell(item.totalAcknowledgedQuantity),
+    numberCell(item.totalDeniedQuantity),
+    numberCell(item.totalVirtuallyAdjustedQuantity),
+    numberCell(item.otherReceivedQuantity),
     formatShippingQueueLocalDate(item.otherReceiveStartDate),
     formatShippingQueueLocalDate(item.otherReceiveEndDate),
     shippingQueueFormatComplexField(item.iarAutoReconciliations),
-    shippingQueueNumericCell(item.totalDiscrepancyQuantity),
-    shippingQueueCell(item.ineligibilityReason),
-    shippingQueueCell(item.caseId),
-    shippingQueueCell(item.reasonCode),
+    numberCell(item.totalDiscrepancyQuantity),
+    textCell(item.ineligibilityReason),
+    textCell(item.caseId),
+    textCell(item.reasonCode),
   ]
 }
 

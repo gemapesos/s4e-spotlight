@@ -32,6 +32,7 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { extractCaseIds, findCaseIds } from "@/lib/caseIds"
 import { fadeMaskForScroll, type FadeMaskState } from "@/lib/fadeMask"
+import { errorMessage } from "@/lib/log"
 import { commandFilter } from "@/lib/searchScore"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import {
@@ -463,7 +464,7 @@ export function CommandPalette({
       if (await definition.submit(ids) === "stay") return setSubmitting(false)
       close()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : definition.failureError)
+      setError(errorMessage(caught, definition.failureError))
       setSubmitting(false)
     }
   }, [close, identifierMode, inputModes])
@@ -523,7 +524,7 @@ export function CommandPalette({
       setAccountSearch("")
       setMode("accounts")
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t load accounts. Please try again.")
+      setError(errorMessage(caught, "Couldn’t load accounts. Please try again."))
     } finally {
       setSubmitting(false)
     }
@@ -549,7 +550,7 @@ export function CommandPalette({
       setMode("switching")
       setSubmitting(false)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t start the account switch.")
+      setError(errorMessage(caught, "Couldn’t start the account switch."))
       setSubmitting(false)
     }
   }, [accountsUnlocked, close, currentStore, onFocusCurrentStore, onStartAccountSwitch])
@@ -562,7 +563,7 @@ export function CommandPalette({
       await onUnlockAccounts(selectedStore.id)
       close()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t unlock accounts.")
+      setError(errorMessage(caught, "Couldn’t unlock accounts."))
       setSubmitting(false)
     }
   }, [close, onUnlockAccounts, selectedStore, submitting])
@@ -571,7 +572,7 @@ export function CommandPalette({
     setError(null)
     setSubmitting(true)
     try { await onManageAccounts(); close() }
-    catch (caught) { setError(caught instanceof Error ? caught.message : "Couldn’t open account settings."); setSubmitting(false) }
+    catch (caught) { setError(errorMessage(caught, "Couldn’t open account settings.")); setSubmitting(false) }
   }, [close, onManageAccounts])
 
   const openTimeOut = React.useCallback(async () => {
@@ -582,7 +583,7 @@ export function CommandPalette({
       await onOpenTimeOut()
       close()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t open Time Out. Please try again.")
+      setError(errorMessage(caught, "Couldn’t open Time Out. Please try again."))
       setSubmitting(false)
     }
   }, [close, onOpenTimeOut])
@@ -598,7 +599,7 @@ export function CommandPalette({
       void confirmSignedIn("scrape-case", "commands").then((signedIn) => {
         if (!signedIn) return
         return onOpenCases().then(close, (caught: unknown) => {
-          setError(caught instanceof Error ? caught.message : "Couldn’t open the S4E Spotlight window.")
+          setError(errorMessage(caught, "Couldn’t open the S4E Spotlight window."))
           setSubmitting(false)
         })
       })
@@ -624,7 +625,7 @@ export function CommandPalette({
       void confirmSignedIn("generate-reports", "commands").then((signedIn) => {
         if (!signedIn) return
         return onOpenReports().then(close, (caught: unknown) => {
-          setError(caught instanceof Error ? caught.message : "Couldn’t open the S4E Spotlight window.")
+          setError(errorMessage(caught, "Couldn’t open the S4E Spotlight window."))
           setSubmitting(false)
         })
       })
@@ -644,7 +645,7 @@ export function CommandPalette({
       if (action === "focus") await onFocusAccountSwitch()
       else { await onCancelAccountSwitch(); setActiveSwitch(undefined) }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t update the account switch.")
+      setError(errorMessage(caught, "Couldn’t update the account switch."))
     } finally { setSubmitting(false) }
   }, [onCancelAccountSwitch, onFocusAccountSwitch])
 
@@ -655,7 +656,7 @@ export function CommandPalette({
       await onFocusBulkRemoval()
       close()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t open the removal tab.")
+      setError(errorMessage(caught, "Couldn’t open the removal tab."))
       setSubmitting(false)
     }
   }, [close, onFocusBulkRemoval])
@@ -677,7 +678,7 @@ export function CommandPalette({
       await onOpenSellerCentral()
       close()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t open Seller Central.")
+      setError(errorMessage(caught, "Couldn’t open Seller Central."))
       setSubmitting(false)
     }
   }, [close, onOpenSellerCentral])

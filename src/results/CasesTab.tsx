@@ -5,6 +5,7 @@ import { HeaderButton, KeyHint, Notice, PanelFooter, PrimaryButton } from "@/com
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { extractCaseIds, findCaseIds } from "@/lib/caseIds"
+import { errorMessage } from "@/lib/log"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { cn } from "@/lib/utils"
 import { caseScrapeFileName, casePageUrl, downloadCaseScrape, type ScrapeCasesFile, type ScrapedCase } from "@/lib/viewCase"
@@ -115,7 +116,7 @@ export function CasesTab({
       setPhase("done")
     } catch (caught) {
       if (run !== token.current) return
-      setError(caught instanceof Error ? caught.message : "Couldn’t scrape cases. Please try again.")
+      setError(errorMessage(caught, "Couldn’t scrape cases. Please try again."))
       setPhase("input")
     } finally {
       if (runId) {
@@ -138,7 +139,7 @@ export function CasesTab({
     try {
       downloadCaseScrape(file, requested, document, finishedAt)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t save the file.")
+      setError(errorMessage(caught, "Couldn’t save the file."))
     }
   }
 

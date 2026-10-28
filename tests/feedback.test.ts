@@ -11,7 +11,6 @@ import {
   FEEDBACK_SHEET_HEADERS,
   FEEDBACK_TO_RATING,
   decodeFeedbackCursor,
-  decodeHtmlEntities,
   feedbackCursorAt,
   feedbackSentiment,
   feedbackSheetRows,
@@ -161,15 +160,6 @@ describe("feedback sentiment", () => {
 })
 
 describe("feedback text helpers", () => {
-  it("decodes HTML entities in comments", () => {
-    expect(decodeHtmlEntities("metal &amp; plastic")).toBe("metal & plastic")
-    expect(decodeHtmlEntities("a &lt; b &gt; c")).toBe("a < b > c")
-  })
-
-  it("leaves numeric entities beyond Unicode as written", () => {
-    expect(decodeHtmlEntities("a &#1114112; b &#x110000; c &#x1F600;")).toBe("a &#1114112; b &#x110000; c \u{1F600}")
-  })
-
   it("formats ISO timestamps as UTC datetimes", () => {
     expect(formatFeedbackDate("2026-08-03T19:22:21.216Z")).toBe("03-Aug-2026 19:22:21")
     expect(formatFeedbackDate(null)).toBe("")

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { CommandFooter, CommandHeader, CommandHint } from "@/components/ui/command"
 import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
+import { errorMessage } from "@/lib/log"
 import { cn } from "@/lib/utils"
 import type { AccountsStatus, ActiveSwitchSummary } from "@/shared/messages"
 
@@ -146,7 +147,7 @@ function useAction() {
       await action()
       then?.()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t update the store switch.")
+      setError(errorMessage(caught, "Couldn’t update the store switch."))
     } finally {
       setBusy(false)
     }

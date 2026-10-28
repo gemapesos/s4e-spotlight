@@ -3,6 +3,7 @@ import { CheckIcon, Download, FileText, LogIn } from "lucide-react"
 
 import { HeaderButton, Kbd, KeyHint, Notice, PanelFooter, PrimaryButton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
+import { errorMessage } from "@/lib/log"
 import { downloadGeneratedReport } from "@/lib/reportDownload"
 import {
   applyReportProgressEvent,
@@ -103,7 +104,7 @@ export function ReportsTab({
       setPhase("ready")
     } catch (caught) {
       if (run !== token.current) return
-      setError(caught instanceof Error ? caught.message : "Couldn’t generate the report. Please try again.")
+      setError(errorMessage(caught, "Couldn’t generate the report. Please try again."))
       setPhase("pick")
     } finally {
       if (runId) {
@@ -126,7 +127,7 @@ export function ReportsTab({
     try {
       downloadGeneratedReport(report, format, document)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t save the workbook.")
+      setError(errorMessage(caught, "Couldn’t save the workbook."))
     }
   }
 

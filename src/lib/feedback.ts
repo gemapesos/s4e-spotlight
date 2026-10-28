@@ -1,6 +1,7 @@
 import { formatUtcDateTime } from "./dates"
 import { describeError, type Logger } from "./log"
 import type { ReportProgressEvent } from "./reportProgress"
+import { decodeHtmlEntities, textCell, yesNo } from "@/shared/format"
 
 export const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks"
 /** Amazon's largest page; bigger pages fail with HTTP 500. */
@@ -35,15 +36,6 @@ export const FEEDBACK_SHEET_HEADERS = [
   "Suppress reason",
   "Feedback ID",
 ] as const
-
-const HTML_NAMED_ENTITIES: Record<string, string> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-}
 
 export interface SellerFeedback {
   feedbackId?: string | null
@@ -92,36 +84,11 @@ export function feedbackSentiment(rating: number | null | undefined): "Negative"
   return rating <= 2 ? "Negative" : "Neutral"
 }
 
-export function decodeHtmlEntities(value: string): string {
-  return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity: string) => {
-    if (entity.startsWith("#x") || entity.startsWith("#X")) {
-      const code = Number.parseInt(entity.slice(2), 16)
-      return code <= 0x10ffff ? String.fromCodePoint(code) : match
-    }
-    if (entity.startsWith("#")) {
-      const code = Number.parseInt(entity.slice(1), 10)
-      return code <= 0x10ffff ? String.fromCodePoint(code) : match
-    }
-    return HTML_NAMED_ENTITIES[entity] ?? match
-  })
-}
-
 export function formatFeedbackDate(value: string | null | undefined): string {
   if (!value) return ""
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return formatUtcDateTime(date)
-}
-
-function feedbackCell(value: string | number | boolean | null | undefined): string {
-  if (value == null) return ""
-  return String(value)
-}
-
-function yesNo(value: boolean | null | undefined): string {
-  if (value === true) return "Yes"
-  if (value === false) return "No"
-  return ""
 }
 
 function itemAsDescribed(feedback: SellerFeedback): string {
@@ -136,15 +103,15 @@ export function feedbackSheetRow(feedback: SellerFeedback): Array<string | numbe
     formatFeedbackDate(feedback.feedbackDate),
     rating,
     feedbackSentiment(typeof rating === "number" ? rating : undefined),
-    feedbackCell(feedback.orderId),
+    textCell(feedback.orderId),
     decodeHtmlEntities(feedback.feedbackText ?? ""),
     itemAsDescribed(feedback),
     decodeHtmlEntities(feedback.responseText ?? ""),
     formatFeedbackDate(feedback.responseDate),
     yesNo(feedback.suppressed),
     yesNo(feedback.partiallySuppressed),
-    feedbackCell(feedback.suppressReasonId),
-    feedbackCell(feedback.feedbackId),
+    textCell(feedback.suppressReasonId),
+    textCell(feedback.feedbackId),
   ]
 }
 

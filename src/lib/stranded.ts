@@ -1,4 +1,5 @@
 import type { ReportProgressEvent } from "./reportProgress"
+import { numberCell, quantityCell, textCell } from "@/shared/format"
 
 export const STRANDED_INVENTORY_URL = "https://sellercentral.amazon.com/inventoryplanning/stranded-inventory"
 export const STRANDED_DATE_TIME_ZONE = "America/New_York"
@@ -63,22 +64,6 @@ export interface StrandedListing {
 export interface FetchStrandedListingsOptions {
   fetch?: typeof globalThis.fetch
   onProgress?: (event: ReportProgressEvent) => void
-}
-
-function strandedCell(value: string | number | null | undefined): string {
-  if (value == null) return ""
-  return String(value)
-}
-
-function strandedNumericCell(value: string | number | null | undefined): number | "" {
-  if (value == null || value === "") return ""
-  const amount = typeof value === "number" ? value : Number(value)
-  return Number.isFinite(amount) ? amount : ""
-}
-
-function strandedQuantity(value: string | number | null | undefined): number {
-  const amount = strandedNumericCell(value)
-  return amount === "" ? 0 : amount
 }
 
 export function formatStrandedDate(value: string | null | undefined): string {
@@ -202,28 +187,28 @@ export function parseStrandedInventoryHtml(html: string): StrandedListing[] {
 
 export function strandedSheetRow(listing: StrandedListing): Array<string | number> {
   return [
-    strandedCell(listing.SKU),
-    strandedCell(listing.Condition),
-    strandedCell(listing.ProductName),
-    strandedCell(listing.ASIN),
-    strandedCell(listing.FNSKU),
-    strandedCell(listing.Status),
-    strandedCell(listing.StatusSecondary),
-    strandedNumericCell(listing.Price),
-    strandedCell(listing.PriceUnit),
-    strandedQuantity(listing.Available),
-    strandedQuantity(listing.TotalQuantity),
-    strandedQuantity(listing.Reserved),
-    strandedQuantity(listing.Inbound),
-    strandedQuantity(listing.Unfulfillable),
+    textCell(listing.SKU),
+    textCell(listing.Condition),
+    textCell(listing.ProductName),
+    textCell(listing.ASIN),
+    textCell(listing.FNSKU),
+    textCell(listing.Status),
+    textCell(listing.StatusSecondary),
+    numberCell(listing.Price),
+    textCell(listing.PriceUnit),
+    quantityCell(listing.Available),
+    quantityCell(listing.TotalQuantity),
+    quantityCell(listing.Reserved),
+    quantityCell(listing.Inbound),
+    quantityCell(listing.Unfulfillable),
     formatStrandedDate(listing.DateAutoRemoval),
     autoRemovalTypeLabel(listing.AutoRemovalType),
     formatStrandedDate(listing.DateStranded),
-    strandedCell(listing.StrandedReasonLabel || listing.ErrorMessage || listing.StrandedReasonCode || listing.StrandedReason),
-    strandedCell(listing.StrandedReasonCode || listing.StrandedReason),
-    strandedCell(listing.ErrorMessage),
-    strandedCell(listing.FulfilledBy),
-    strandedCell(listing.Program),
+    textCell(listing.StrandedReasonLabel || listing.ErrorMessage || listing.StrandedReasonCode || listing.StrandedReason),
+    textCell(listing.StrandedReasonCode || listing.StrandedReason),
+    textCell(listing.ErrorMessage),
+    textCell(listing.FulfilledBy),
+    textCell(listing.Program),
     formatSupportedActions(listing.SupportedActions),
   ]
 }

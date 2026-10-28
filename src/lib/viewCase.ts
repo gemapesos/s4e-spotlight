@@ -2,21 +2,15 @@
  * Reads a Seller Central case, including every reply page, from the signed-in tab.
  */
 
+import { saveJsonFile } from "@/shared/download"
+import { decodeHtmlEntities } from "@/shared/format"
+
 export const VIEW_CASE_PAGE_SIZE = 10
 export const VIEW_CASE_MAX_PAGES = 100
 export const VIEW_CASE_ENDPOINT = "https://sellercentral.amazon.com/hill/hillservice/mons-api/ViewCase"
 export const VIEW_CASE_ORIGIN_REFERRER = "https://sellercentral.amazon.com/cu/case-dashboard/view-case"
 export const VIEW_CASE_SIGN_IN_ERROR = "Sign in to Seller Central, then try again."
 export const CASE_PAGE_URL = "https://sellercentral.amazon.com/cu/case-dashboard/view-case?ref=sc_cd_lobby_vc_v3&ie=UTF&caseID="
-
-const CASE_HTML_ENTITIES: Record<string, string> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-}
 
 export interface CaseScrapeError {
   caseId: string
@@ -73,28 +67,7 @@ export function downloadCaseScrape(
   targetDocument: Document = document,
   date = new Date(),
 ): void {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }))
-  const anchor = targetDocument.createElement("a")
-  anchor.href = url
-  anchor.download = caseScrapeFileName(caseIds, date)
-  targetDocument.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1_000)
-}
-
-function decodeCaseHtml(value: string): string {
-  return value.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, entity: string) => {
-    if (entity.startsWith("#x") || entity.startsWith("#X")) {
-      const code = Number.parseInt(entity.slice(2), 16)
-      return code <= 0x10ffff ? String.fromCodePoint(code) : match
-    }
-    if (entity.startsWith("#")) {
-      const code = Number.parseInt(entity.slice(1), 10)
-      return code <= 0x10ffff ? String.fromCodePoint(code) : match
-    }
-    return CASE_HTML_ENTITIES[entity] ?? match
-  })
+  saveJsonFile(file, caseScrapeFileName(caseIds, date), targetDocument)
 }
 
 /** Epoch seconds as an ISO timestamp in `timeZone`, such as 2026-10-05T19:21:54.913+08:00. */
@@ -148,15 +121,15 @@ function viewCaseRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function decodeCaseMessage(value: unknown): unknown {
-  if (typeof value === "string") return decodeCaseHtml(value)
+  if (typeof value === "string") return decodeHtmlEntities(value)
   const record = viewCaseRecord(value)
   if (!record) return value
   const next: Record<string, unknown> = { ...record }
-  if (typeof next.message === "string") next.message = decodeCaseHtml(next.message)
+  if (typeof next.message === "string") next.message = decodeHtmlEntities(next.message)
   if ("hmdMetaData" in next) next.hmdMetaData = decodeCaseMessage(next.hmdMetaData)
   if (Array.isArray(next.messageList)) next.messageList = next.messageList.map((item) => decodeCaseMessage(item))
-  if (typeof next.beforeHMDContent === "string") next.beforeHMDContent = decodeCaseHtml(next.beforeHMDContent)
-  if (typeof next.afterHMDContent === "string") next.afterHMDContent = decodeCaseHtml(next.afterHMDContent)
+  if (typeof next.beforeHMDContent === "string") next.beforeHMDContent = decodeHtmlEntities(next.beforeHMDContent)
+  if (typeof next.afterHMDContent === "string") next.afterHMDContent = decodeHtmlEntities(next.afterHMDContent)
   return next
 }
 

@@ -7,6 +7,7 @@ import { strandedSheetRows, type StrandedListing } from "./stranded"
 import { suppressedSheetRows, type SuppressedListing } from "./suppressed"
 import { unfulfillableSheetRows, type UnfulfillableListing } from "./unfulfillable"
 import { buildWorkbook, type WorkbookSheet } from "./xlsxWorkbook"
+import { saveFile } from "@/shared/download"
 
 export const REPORT_SHEETS = [
   "Daily Tasks",
@@ -122,20 +123,5 @@ export function downloadBytes(
 ): void {
   const payload = new ArrayBuffer(bytes.byteLength)
   new Uint8Array(payload).set(bytes)
-  const blob = new Blob([payload], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  })
-  const url = URL.createObjectURL(blob)
-  const anchor = targetDocument.createElement("a")
-  anchor.href = url
-  anchor.download = filename
-  anchor.tabIndex = -1
-  anchor.setAttribute("aria-hidden", "true")
-  anchor.style.position = "fixed"
-  anchor.style.left = "-9999px"
-  anchor.style.top = "0"
-  targetDocument.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-  URL.revokeObjectURL(url)
+  saveFile(new Blob([payload], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), filename, targetDocument)
 }

@@ -48,12 +48,10 @@ import {
   shipmentDocumentsUrl,
   shippingQueueSlices,
   shippingQueueLineStatus,
-  shippingQueueNumericCell,
   shippingQueueSheetRow,
   shippingQueueSheetRows,
   shippingQueueShipmentRows,
   shippingQueueUrl,
-  shippingQueueYesNo,
   type ShippingQueueShipment,
 } from "../src/lib/shippingQueue"
 import { createLogger, setLogSink, type LogEntry } from "../src/lib/log"
@@ -365,23 +363,6 @@ describe("shippingQueue helpers", () => {
     expect(formatShippingQueueLocalDate("1790695510000")).toBe("29-Sep-2026 23:25:10")
     expect(formatShippingQueueLocalDate(null)).toBe("")
     expect(formatShippingQueueLocalDate("not-a-date")).toBe("not-a-date")
-  })
-
-  it("handles numeric cells and preservation of numbers", () => {
-    expect(shippingQueueNumericCell(0)).toBe(0)
-    expect(shippingQueueNumericCell(26)).toBe(26)
-    expect(shippingQueueNumericCell("42")).toBe(42)
-    expect(shippingQueueNumericCell(null)).toBe("")
-    expect(shippingQueueNumericCell(undefined)).toBe("")
-    expect(shippingQueueNumericCell("")).toBe("")
-    expect(shippingQueueNumericCell("abc")).toBe("")
-  })
-
-  it("formats booleans as Yes / No", () => {
-    expect(shippingQueueYesNo(true)).toBe("Yes")
-    expect(shippingQueueYesNo(false)).toBe("No")
-    expect(shippingQueueYesNo(null)).toBe("")
-    expect(shippingQueueYesNo(undefined)).toBe("")
   })
 
   it("calculates discrepancy quantity accurately", () => {

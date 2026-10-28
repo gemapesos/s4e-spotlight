@@ -45,9 +45,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { SESSION_KEY_STORAGE_KEY, VAULT_STORAGE_KEY, SHARE_FILE_NAME, type AccountVault, type CredentialRecord, type SharedVaultFile, type StoreRecord, type VaultMergeCounts } from "@/lib/accounts"
+import { SESSION_KEY_STORAGE_KEY, VAULT_STORAGE_KEY, SHARE_FILE_NAME, type AccountVault, type CredentialRecord, type StoreRecord, type VaultMergeCounts } from "@/lib/accounts"
 import { errorMessage } from "@/lib/log"
 import { cn } from "@/lib/utils"
+import { saveJsonFile } from "@/shared/download"
 import { sendToBackground } from "@/shared/messages"
 
 type Page = "loading" | "create" | "locked" | "editor"
@@ -76,17 +77,6 @@ function importSummary(added: VaultMergeCounts, updated: VaultMergeCounts): stri
     updatedText ? `Updated ${updatedText}` : "",
   ].filter(Boolean)
   return parts.length ? `${parts.join(". ")}.` : "Shared vault imported. No accounts changed."
-}
-
-function downloadShareFile(file: SharedVaultFile, targetDocument: Document = document): void {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }))
-  const anchor = targetDocument.createElement("a")
-  anchor.href = url
-  anchor.download = SHARE_FILE_NAME
-  targetDocument.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1_000)
 }
 
 async function readShareFile(file: File): Promise<unknown> {
@@ -455,7 +445,7 @@ export function OptionsApp() {
       "Could not export the vault.",
     )
     if (!response) return
-    downloadShareFile(response.file)
+    saveJsonFile(response.file, SHARE_FILE_NAME)
     closeExport(false)
     showNotice("Vault share file downloaded. Give the share password to the other person separately from the file.")
   }
