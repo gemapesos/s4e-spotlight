@@ -57,6 +57,23 @@ describe("settings popup", () => {
     expect(screen.getByRole("switch", { name: "Open case IDs" })).toHaveAttribute("aria-checked", "false")
   })
 
+  it("keeps Time Out form values saved while the popup was open", async () => {
+    const user = userEvent.setup()
+    const { store } = mockChrome()
+    render(<PopupApp />)
+    const toggle = await screen.findByRole("switch", { name: "Open case IDs" })
+
+    store[SETTINGS_STORAGE_KEY] = { features: DEFAULT_ENABLED_FEATURES, timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, staffName: "Lou Rodriguez" } }
+    await user.click(toggle)
+
+    await vi.waitFor(() => {
+      expect(store[SETTINGS_STORAGE_KEY]).toEqual({
+        features: { ...DEFAULT_ENABLED_FEATURES, "open-case-ids": false },
+        timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, staffName: "Lou Rodriguez" },
+      })
+    })
+  })
+
   it("opens the Time Out form page from the form-values link", async () => {
     const user = userEvent.setup()
     const { create, getURL } = mockChrome()

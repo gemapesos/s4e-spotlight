@@ -92,6 +92,24 @@ describe("Time Out form settings", () => {
     })
   })
 
+  it("keeps a command the popup switched off while this page was open", async () => {
+    const user = userEvent.setup()
+    const store = mockChrome()
+    render(<TimeoutApp />)
+    const followUp = await screen.findByLabelText("Follow-up needed?")
+
+    store[SETTINGS_STORAGE_KEY] = { features: { ...DEFAULT_ENABLED_FEATURES, accounts: false }, timeOutForm: DEFAULT_TIME_OUT_FORM_VALUES }
+    await user.click(followUp)
+    await user.click(await screen.findByRole("option", { name: "Yes" }))
+
+    await vi.waitFor(() => {
+      expect(store[SETTINGS_STORAGE_KEY]).toEqual({
+        features: { ...DEFAULT_ENABLED_FEATURES, accounts: false },
+        timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, followUpNeeded: "Yes" },
+      })
+    })
+  })
+
   it("keeps a select change made while a text edit is waiting to save", async () => {
     const user = userEvent.setup()
     const store = mockChrome()

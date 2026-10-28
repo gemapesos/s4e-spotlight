@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   DEFAULT_ENABLED_FEATURES,
@@ -7,8 +7,10 @@ import {
   FEATURE_IDS,
   enabledFeaturesEqual,
   isFeatureEnabled,
+  loadSettings,
   optionsWithCurrent,
   parseSettings,
+  saveSettings,
 } from "../src/lib/settings"
 
 describe("parseSettings", () => {
@@ -74,5 +76,29 @@ describe("optionsWithCurrent", () => {
   it("appends a stored value that is not in the known list", () => {
     expect(optionsWithCurrent(["S4E"], "S4E")).toEqual(["S4E"])
     expect(optionsWithCurrent(["S4E"], "Other")).toEqual(["S4E", "Other"])
+  })
+})
+
+describe("saveSettings", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("keeps a popup switch when a Time Out page opened earlier saves its form", async () => {
+    const local: Record<string, unknown> = {}
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          get: vi.fn(async (key: string) => (key in local ? { [key]: local[key] } : {})),
+          set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(local, items) }),
+        },
+      },
+    })
+    const timeOutPage = await loadSettings()
+
+    await saveSettings({ features: { ...DEFAULT_ENABLED_FEATURES, accounts: false } })
+    await saveSettings({ timeOutForm: { ...timeOutPage.timeOutForm, staffName: "Lou Rodriguez" } })
+
+    const saved = await loadSettings()
+    expect(saved.features.accounts).toBe(false)
+    expect(saved.timeOutForm.staffName).toBe("Lou Rodriguez")
   })
 })

@@ -177,8 +177,10 @@ export async function loadSettings(): Promise<ExtensionSettings> {
   return parseSettings(stored)
 }
 
-export async function saveSettings(settings: ExtensionSettings): Promise<void> {
-  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings(settings) })
+/** Writes only the given part over what is stored now, so the popup and the Time Out page never undo each other. */
+export async function saveSettings(part: Partial<ExtensionSettings>): Promise<void> {
+  const current = await loadSettings()
+  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings({ ...current, ...part }) })
 }
 
 export function optionsWithCurrent(options: readonly string[], current: string): string[] {
