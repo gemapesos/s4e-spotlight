@@ -870,7 +870,7 @@ function listingKey(listing) {
 	const pair = listingSkuPair(listing);
 	return pair ? skuPairKey(pair.merchantSku, pair.fulfillmentNetworkSku) : JSON.stringify(listing.coreListingFields ?? listing);
 }
-async function postListingsPage(fetchImpl, token, from) {
+async function postListingsPage(fetchImpl, token, from, extraVariables = {}) {
 	const response = await fetchImpl(UNFULFILLABLE_GQL_URL, {
 		method: "POST",
 		credentials: "include",
@@ -881,7 +881,10 @@ async function postListingsPage(fetchImpl, token, from) {
 		},
 		body: JSON.stringify({
 			operationName: "GetListingsV2",
-			variables: listingsVariables(from),
+			variables: {
+				...listingsVariables(from),
+				...extraVariables
+			},
 			query: GET_LISTINGS_V2_QUERY
 		})
 	});
@@ -1107,6 +1110,143 @@ async function fetchUnfulfillableListings(options = {}) {
 		phase: lineItems.length > 0 ? "removal" : "listings"
 	});
 	return merged;
+}
+
+const BULK_REMOVAL_NOT_FOUND = "Not in unfulfillable inventory";
+const BULK_REMOVAL_NO_UNITS = "No units available for removal";
+const skuKey = (sku) => sku.trim().toLowerCase();
+function addListings(found, listings, wanted) {
+	for (const listing of listings) {
+		const sku = listing.coreListingFields?.sku;
+		const asin = listing.coreListingFields?.asin?.trim();
+		if (!sku || !asin || !listingSkuPair(listing)) continue;
+		const key = skuKey(sku);
+		if (wanted.has(key) && !found.has(key)) found.set(key, listing);
+	}
+}
+/**
+* Finds the unfulfillable listing for each SKU. Asks Amazon for just those SKUs first, and scans
+* the unfulfillable list only if that filter is rejected or ignored.
+*/
+async function findListings(fetchImpl, token, skus, log) {
+	const wanted = new Set(skus.map(skuKey));
+	const found = new Map();
+	try {
+		const page = await postListingsPage(fetchImpl, token, 0, { multiSKUList: [...skus] });
+		const returned = page.listings.map((listing) => listing.coreListingFields?.sku).filter((sku) => Boolean(sku));
+		if (returned.length > 0 && returned.every((sku) => wanted.has(skuKey(sku)))) {
+			addListings(found, page.listings, wanted);
+			return {
+				found,
+				lookup: "multiSku"
+			};
+		}
+		log?.warn("bulkRemoval.multiSkuIgnored", { returned: returned.length });
+	} catch (error) {
+		log?.warn("bulkRemoval.multiSkuFailed", { error: describeError(error) });
+	}
+	let offset = 0;
+	for (let page = 0; page < UNFULFILLABLE_MAX_PAGES && found.size < wanted.size; page += 1) {
+		const result = await postListingsPage(fetchImpl, token, offset);
+		addListings(found, result.listings, wanted);
+		offset += result.rows;
+		if (result.rows === 0 || offset >= result.count) break;
+	}
+	return {
+		found,
+		lookup: "scan"
+	};
+}
+async function fetchLineItems(fetchImpl, token, listings, log) {
+	const pairs = listings.map(listingSkuPair).filter((pair) => pair !== undefined);
+	const lineItems = [];
+	let failed = false;
+	for (const batch of chunk(pairs, UNFULFILLABLE_INVENTORIES_BATCH_SIZE)) {
+		try {
+			lineItems.push(...await postInventoriesBatch(fetchImpl, token, batch));
+		} catch (error) {
+			log?.warn("bulkRemoval.eligibilityFailed", {
+				skus: batch.length,
+				error: describeError(error)
+			});
+			failed = true;
+		}
+	}
+	return {
+		lineItems,
+		failed
+	};
+}
+/**
+* Matches pasted SKUs to their unfulfillable listings and keeps those with units available for
+* removal, in the order given. Runs in the signed-in Seller Central tab.
+*/
+async function resolveRemovalSkus(skus, options = {}) {
+	const fetchImpl = options.fetch ?? globalThis.fetch;
+	const root = options.root ?? document;
+	const cookie = options.cookie ?? (typeof document !== "undefined" ? document.cookie : "");
+	const log = options.log;
+	const nextIdRequest = fetchNextRemovalOrderId(fetchImpl);
+	const token = readAntiCsrfToken(root, cookie) ?? await fetchAntiCsrfTokenFromInventory(fetchImpl);
+	if (!token) throw new Error("Couldn’t read the Seller Central security token.");
+	const { found, lookup } = await findListings(fetchImpl, token, skus, log);
+	const { lineItems, failed } = await fetchLineItems(fetchImpl, token, [...found.values()], log);
+	const eligibilityBySku = new Map();
+	for (const item of lineItems) {
+		if (item.merchantSku) eligibilityBySku.set(skuKey(item.merchantSku), item);
+	}
+	const items = [];
+	const skipped = [];
+	let eligibilityUnknown = false;
+	for (const sku of skus) {
+		const listing = found.get(skuKey(sku));
+		if (!listing) {
+			skipped.push({
+				sku,
+				reason: BULK_REMOVAL_NOT_FOUND
+			});
+			continue;
+		}
+		const fields = listing.coreListingFields;
+		const item = {
+			sku: fields.sku.trim(),
+			asin: fields.asin.trim(),
+			fnSku: fields.fnSku.trim()
+		};
+		const lineItem = eligibilityBySku.get(skuKey(sku));
+		if (!lineItem) {
+			// Amazon's form still checks eligibility, so an unknown status doesn't hold the SKU back.
+			eligibilityUnknown = true;
+			items.push({
+				...item,
+				removableUnits: null
+			});
+			continue;
+		}
+		const segments = removalStatusFromLineItem(lineItem);
+		const removableUnits = segments.find((segment) => segment.label === REMOVAL_STATUS_ELIGIBLE)?.quantity ?? 0;
+		if (removableUnits > 0) items.push({
+			...item,
+			removableUnits
+		});
+		else skipped.push({
+			sku: item.sku,
+			reason: segments[0]?.label ?? BULK_REMOVAL_NO_UNITS
+		});
+	}
+	log?.info("bulkRemoval.resolve", {
+		requested: skus.length,
+		matched: found.size,
+		removable: items.length,
+		lookup,
+		eligibilityFailed: failed
+	});
+	return {
+		items,
+		skipped,
+		nextRemovalOrderId: await nextIdRequest,
+		eligibilityUnknown
+	};
 }
 
 const FEEDBACKS_URL = "https://sellercentral.amazon.com/fbmapi/v1/feedbacks";
@@ -4461,6 +4601,38 @@ async function scrapeCasesFromPage(caseIds, runId) {
 		scope.release();
 	}
 }
+async function resolveBulkRemovalFromPage(skus) {
+	if (location.origin !== "https://sellercentral.amazon.com") return {
+		ok: false,
+		error: "Open Seller Central, then try again."
+	};
+	const monitor = createRequestMonitor(globalThis.fetch, contentLog);
+	const done = contentLog.time("removal.resolve", { requested: skus.length });
+	try {
+		const resolution = await resolveRemovalSkus(skus, {
+			fetch: monitor.fetch,
+			log: contentLog
+		});
+		done({
+			removable: resolution.items.length,
+			skipped: resolution.skipped.length,
+			requests: monitor.summary()
+		});
+		return {
+			ok: true,
+			...resolution
+		};
+	} catch (error) {
+		done({
+			error: describeError(error),
+			requests: monitor.summary()
+		}, "error");
+		return {
+			ok: false,
+			error: errorMessage(error, "Couldn’t check removal eligibility.")
+		};
+	}
+}
 async function runReportFetcher(fetcher, runId) {
 	const log = contentLog.withRun(runId);
 	const scope = reportFetchScope(runId);
@@ -4528,6 +4700,11 @@ function handleContentMessage(message, sender, sendResponse, load = loadPalette)
 	if (record.type === "SCRAPE_CASES") {
 		const caseIds = Array.isArray(record.caseIds) ? record.caseIds.filter((id) => typeof id === "string") : [];
 		void scrapeCasesFromPage(caseIds, typeof record.runId === "string" ? record.runId : undefined).then(sendResponse);
+		return true;
+	}
+	if (record.type === "BULK_REMOVAL_RESOLVE") {
+		const skus = Array.isArray(record.skus) ? record.skus.filter((sku) => typeof sku === "string") : [];
+		void resolveBulkRemovalFromPage(skus).then(sendResponse);
 		return true;
 	}
 	if (record.type === "OPEN_PALETTE") {

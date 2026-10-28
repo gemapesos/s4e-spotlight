@@ -4,6 +4,7 @@ export const FEATURE_IDS = [
 	"scrape-case",
 	"open-shipment-ids",
 	"search-skus",
+	"bulk-removal",
 	"time-out",
 	"generate-reports",
 	"accounts"
@@ -26,6 +27,10 @@ export const FEATURES = [
 		label: "Search SKUs"
 	},
 	{
+		id: "bulk-removal",
+		label: "Bulk removal"
+	},
+	{
 		id: "time-out",
 		label: "Open Time Out"
 	},
@@ -43,6 +48,7 @@ export const DEFAULT_ENABLED_FEATURES = {
 	"scrape-case": true,
 	"open-shipment-ids": true,
 	"search-skus": true,
+	"bulk-removal": true,
 	"time-out": true,
 	"generate-reports": true,
 	accounts: true
