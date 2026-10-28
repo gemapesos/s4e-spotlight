@@ -6,6 +6,7 @@ import { ensureSellerCentralTab, probeSellerCentralSession, sendWhenContentScrip
 import { isOwnSender, isPageSender } from "./senders"
 import { getActiveJob } from "./switch/job"
 import { requireWorkspaceSender, RESULTS_LAUNCH_PREFIX } from "./workspace"
+import { REPORT_SOURCE_DETAILS, REPORT_SOURCES, reportSourceFor, type ReportFetchType, type ReportSource } from "@/reports/sources"
 
 const log = createLogger("background")
 
@@ -98,7 +99,7 @@ export async function prepareRun(message: Record<string, unknown>, sender: chrom
   if (!tab.url || new URL(tab.url).origin !== "https://sellercentral.amazon.com") throw new Error("The Seller Central tab has navigated away.")
   const cases = message.mode === "cases"
   const sections = Array.isArray(message.sections) ? message.sections : []
-  const allowed = cases ? ["SCRAPE_CASES"] : Object.entries(REPORT_REQUESTS).filter(([, request]) => sections.includes(request.source)).map(([name]) => name)
+  const allowed: string[] = cases ? ["SCRAPE_CASES"] : REPORT_SOURCES.filter((source) => sections.includes(source)).map((source) => REPORT_SOURCE_DETAILS[source].fetchType)
   const caseIds = cases ? normalizeCaseIds(message.caseIds) : []
   if (allowed.length === 0 || (cases && (caseIds.length === 0 || caseIds.length > MAX_BULK_IDS))) throw new Error("Choose what to include before starting.")
   const run: ResultsRun = { id: crypto.randomUUID(), ownerTabId: owner.tabId, ownerDocumentId: owner.documentId, sellerCentralTabId: tabId, sellerCentralUrl: tab.url, startedAt: Date.now(), allowed, claimed: [], caseIds }
@@ -141,79 +142,41 @@ export function runSource<T extends ReportFetchType | "SCRAPE_CASES">(type: T) {
     await serializeResultControl(() => assertResultsRun(run.id, sender))
     const result = type === "SCRAPE_CASES"
       ? await scrapeSellerCentralCases(run.caseIds, run.sellerCentralTabId, run.id)
-      : await fetchReportSource(type as ReportFetchType, run.sellerCentralTabId, run.id)
+      : await fetchReportSource(reportSourceFor(type)!, run.sellerCentralTabId, run.id)
     await serializeResultControl(() => assertResultsRun(run.id, sender))
     // The content script's reply, narrowed by its source's pick.
     return result as BackgroundReply<T>
   }
 }
 
-export type ReportFetchType =
-  | "REPORTS_FETCH_UNFULFILLABLE"
-  | "REPORTS_FETCH_FEEDBACK"
-  | "REPORTS_FETCH_STRANDED"
-  | "REPORTS_FETCH_SUPPRESSED"
-  | "REPORTS_FETCH_SHIPPING_QUEUE"
-
-interface ReportRequest {
-  source: string
-  fallbackError: string
-  /** The fields the palette needs from the content script's response. */
-  pick: (response: Record<string, unknown>) => Record<string, unknown>
-}
-
 export const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
 
-const REPORT_REQUESTS: Record<ReportFetchType, ReportRequest> = {
-  REPORTS_FETCH_UNFULFILLABLE: {
-    source: "unfulfillable",
-    fallbackError: "Couldn’t load unfulfillable inventory.",
-    pick: ({ listings, nextRemovalOrderId }) => ({
-      listings: asArray(listings),
-      nextRemovalOrderId: typeof nextRemovalOrderId === "string" && nextRemovalOrderId ? nextRemovalOrderId : null,
-    }),
-  },
-  REPORTS_FETCH_FEEDBACK: {
-    source: "feedback",
-    fallbackError: "Couldn’t load seller feedback.",
-    pick: ({ feedbacks }) => ({ feedbacks: asArray(feedbacks) }),
-  },
-  REPORTS_FETCH_STRANDED: {
-    source: "stranded",
-    fallbackError: "Couldn’t load stranded inventory.",
-    pick: ({ listings }) => ({ listings: asArray(listings) }),
-  },
-  REPORTS_FETCH_SUPPRESSED: {
-    source: "suppressed",
-    fallbackError: "Couldn’t load search-suppressed inventory.",
-    pick: ({ listings }) => ({ listings: asArray(listings) }),
-  },
-  REPORTS_FETCH_SHIPPING_QUEUE: {
-    source: "shippingQueue",
-    fallbackError: "Couldn’t load shipping queue.",
-    pick: ({ shipments }) => ({ shipments: asArray(shipments) }),
-  },
-}
-
-export function isReportFetchType(type: string): type is ReportFetchType {
-  return Object.hasOwn(REPORT_REQUESTS, type)
+/** The fields Results needs from each section's content-script reply. */
+const REPLY_FIELDS: { [S in ReportSource]: (response: Record<string, unknown>) => Record<string, unknown> } = {
+  unfulfillable: ({ listings, nextRemovalOrderId }) => ({
+    listings: asArray(listings),
+    nextRemovalOrderId: typeof nextRemovalOrderId === "string" && nextRemovalOrderId ? nextRemovalOrderId : null,
+  }),
+  feedback: ({ feedbacks }) => ({ feedbacks: asArray(feedbacks) }),
+  stranded: ({ listings }) => ({ listings: asArray(listings) }),
+  suppressed: ({ listings }) => ({ listings: asArray(listings) }),
+  shippingQueue: ({ shipments }) => ({ shipments: asArray(shipments) }),
 }
 
 /** Asks the Seller Central tab's content script for one report source. */
-async function sendReportFetch(tabId: number, type: ReportFetchType, runId: string): Promise<Record<string, unknown>> {
-  const request = REPORT_REQUESTS[type]
-  const response = await sendWhenContentScriptReady(tabId, { type, runId }, request.fallbackError, (attempts, ms) => {
-    log.withRun(runId).info("report.contentScriptWait", { source: request.source, attempts, ms })
+async function sendReportFetch(tabId: number, source: ReportSource, runId: string): Promise<Record<string, unknown>> {
+  const { fetchType, fetchError } = REPORT_SOURCE_DETAILS[source]
+  const response = await sendWhenContentScriptReady(tabId, { type: fetchType, runId }, fetchError, (attempts, ms) => {
+    log.withRun(runId).info("report.contentScriptWait", { source, attempts, ms })
   })
-  return { ok: true, ...request.pick(response) }
+  return { ok: true, ...REPLY_FIELDS[source](response) }
 }
 
-async function fetchReportSource(type: ReportFetchType, tabId: number, runId: string): Promise<Record<string, unknown>> {
-  const source = REPORT_REQUESTS[type].source
+async function fetchReportSource(source: ReportSource, tabId: number, runId: string): Promise<Record<string, unknown>> {
   const done = log.withRun(runId).time("report.source", { source })
   try {
     await waitForTabComplete(tabId)
-    const result = await sendReportFetch(tabId, type, runId)
+    const result = await sendReportFetch(tabId, source, runId)
     const items = Object.values(result).find(Array.isArray)
     done({ count: items?.length ?? 0 })
     return result

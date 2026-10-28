@@ -1,7 +1,7 @@
 import { dailyTasksSheetRows } from "./dailyTasks"
 import { formatDayMonthYear } from "./dates"
 import type { SellerFeedback } from "./feedback"
-import type { ReportSource } from "./reportProgress"
+import type { ReportSource } from "@/reports/sources"
 import { shipmentDetailsIncomplete, shippingQueueSheetRows, type ShippingQueueShipment } from "./shippingQueue"
 import { strandedSheetRows, type StrandedListing } from "./stranded"
 import { suppressedSheetRows, type SuppressedListing } from "./suppressed"

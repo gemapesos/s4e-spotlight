@@ -13,7 +13,8 @@ import {
   setLogSink,
   type Logger,
 } from "@/lib/log"
-import type { ReportProgressEvent, ReportSource } from "@/lib/reportProgress"
+import type { ReportProgressEvent } from "@/lib/reportProgress"
+import { REPORT_SOURCE_DETAILS, reportSourceFor, type ReportSource } from "@/reports/sources"
 import { sellerCentralSessionStatus } from "@/lib/sellerCentralSession"
 import { fetchShippingQueueShipments } from "@/lib/shippingQueue"
 import { fetchStrandedListings } from "@/lib/stranded"
@@ -35,56 +36,30 @@ interface SourceFetchOptions {
   log: Logger
 }
 
-interface ReportFetcher {
-  source: ReportSource
-  fallbackError: string
-  run: (options: SourceFetchOptions) => Promise<{ response: Record<string, unknown>; count: number }>
-}
-
-/** Report sources this content script loads from the signed-in Seller Central tab, by message type. */
-const REPORT_FETCHERS: Record<string, ReportFetcher> = {
-  REPORTS_FETCH_UNFULFILLABLE: {
-    source: "unfulfillable",
-    fallbackError: "Couldn’t load unfulfillable inventory.",
-    run: async (options) => {
-      const [listings, nextRemovalOrderId] = await Promise.all([
-        fetchUnfulfillableListings(options),
-        fetchNextRemovalOrderId(options.fetch),
-      ])
-      return { response: { listings, nextRemovalOrderId }, count: listings.length }
-    },
+/** How this content script loads each report section from the signed-in Seller Central tab. */
+const REPORT_FETCHERS: { [S in ReportSource]: (options: SourceFetchOptions) => Promise<{ response: Record<string, unknown>; count: number }> } = {
+  unfulfillable: async (options) => {
+    const [listings, nextRemovalOrderId] = await Promise.all([
+      fetchUnfulfillableListings(options),
+      fetchNextRemovalOrderId(options.fetch),
+    ])
+    return { response: { listings, nextRemovalOrderId }, count: listings.length }
   },
-  REPORTS_FETCH_FEEDBACK: {
-    source: "feedback",
-    fallbackError: "Couldn’t load seller feedback.",
-    run: async (options) => {
-      const feedbacks = await fetchNeutralNegativeFeedbacks(options)
-      return { response: { feedbacks }, count: feedbacks.length }
-    },
+  feedback: async (options) => {
+    const feedbacks = await fetchNeutralNegativeFeedbacks(options)
+    return { response: { feedbacks }, count: feedbacks.length }
   },
-  REPORTS_FETCH_STRANDED: {
-    source: "stranded",
-    fallbackError: "Couldn’t load stranded inventory.",
-    run: async (options) => {
-      const listings = await fetchStrandedListings(options)
-      return { response: { listings }, count: listings.length }
-    },
+  stranded: async (options) => {
+    const listings = await fetchStrandedListings(options)
+    return { response: { listings }, count: listings.length }
   },
-  REPORTS_FETCH_SUPPRESSED: {
-    source: "suppressed",
-    fallbackError: "Couldn’t load search-suppressed inventory.",
-    run: async (options) => {
-      const listings = await fetchSuppressedListings(options)
-      return { response: { listings }, count: listings.length }
-    },
+  suppressed: async (options) => {
+    const listings = await fetchSuppressedListings(options)
+    return { response: { listings }, count: listings.length }
   },
-  REPORTS_FETCH_SHIPPING_QUEUE: {
-    source: "shippingQueue",
-    fallbackError: "Couldn’t load shipping queue.",
-    run: async (options) => {
-      const shipments = await fetchShippingQueueShipments(options)
-      return { response: { shipments }, count: shipments.length }
-    },
+  shippingQueue: async (options) => {
+    const shipments = await fetchShippingQueueShipments(options)
+    return { response: { shipments }, count: shipments.length }
   },
 }
 
@@ -136,18 +111,18 @@ async function resolveBulkRemovalFromPage(skus: readonly string[]): Promise<Reco
   }
 }
 
-async function runReportFetcher(fetcher: ReportFetcher, runId: string | undefined): Promise<Record<string, unknown>> {
+async function runReportFetcher(source: ReportSource, runId: string | undefined): Promise<Record<string, unknown>> {
   const log = contentLog.withRun(runId)
   const scope = reportFetchScope(runId)
   const monitor = createRequestMonitor(scope.fetch, log)
-  const done = log.time("report.fetch", { source: fetcher.source })
+  const done = log.time("report.fetch", { source })
   try {
-    const { response, count } = await fetcher.run({ fetch: monitor.fetch, onProgress: (event) => emitReportProgress(event, runId), log })
+    const { response, count } = await REPORT_FETCHERS[source]({ fetch: monitor.fetch, onProgress: (event) => emitReportProgress(event, runId), log })
     done({ count, requests: monitor.summary() })
     return { ok: true, ...response }
   } catch (error) {
     done({ error: describeError(error), requests: monitor.summary() }, "error")
-    return { ok: false, error: errorMessage(error, fetcher.fallbackError) }
+    return { ok: false, error: errorMessage(error, REPORT_SOURCE_DETAILS[source].fetchError) }
   } finally { scope.release() }
 }
 
@@ -184,12 +159,10 @@ export function handleSellerCentralMessage(
     void resolveBulkRemovalFromPage(skus).then(sendResponse)
     return true
   }
-  const fetcher = typeof record.type === "string" && Object.hasOwn(REPORT_FETCHERS, record.type)
-    ? REPORT_FETCHERS[record.type]
-    : undefined
-  if (!fetcher) return undefined
+  const source = reportSourceFor(record.type)
+  if (!source) return undefined
   const runId = typeof record.runId === "string" ? record.runId : undefined
-  void runReportFetcher(fetcher, runId).then(sendResponse)
+  void runReportFetcher(source, runId).then(sendResponse)
   return true
 }
 

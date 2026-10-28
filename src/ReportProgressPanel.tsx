@@ -1,16 +1,8 @@
 import { CheckIcon, CircleAlertIcon, TriangleAlertIcon } from "lucide-react"
 
 import { Spinner } from "@/components/ui/spinner"
-import {
-  REPORT_PROGRESS_ROWS,
-  reportSourceDetail,
-  reportSourcePercent,
-  reportWorkbookStatus,
-  type ReportProgressState,
-  type ReportSource,
-  type ReportSourceState,
-  type ReportStageStatus,
-} from "@/lib/reportProgress"
+import { REPORT_PROGRESS_ROWS, reportSourceDetail, reportSourcePercent, reportWorkbookStatus, type ReportProgressState, type ReportSourceState, type ReportStageStatus } from "@/lib/reportProgress"
+import type { ReportSource } from "@/reports/sources"
 import type { ReportWarning } from "@/lib/reports"
 import { cn } from "@/lib/utils"
 

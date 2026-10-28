@@ -5,14 +5,8 @@ import { HeaderButton, Kbd, KeyHint, Notice, PanelFooter, PrimaryButton } from "
 import { Button } from "@/components/ui/button"
 import { errorMessage } from "@/lib/log"
 import { downloadGeneratedReport } from "@/lib/reportDownload"
-import {
-  applyReportProgressEvent,
-  INITIAL_REPORT_PROGRESS,
-  REPORT_PROGRESS_ROWS,
-  REPORT_SOURCES,
-  type ReportProgressState,
-  type ReportSource,
-} from "@/lib/reportProgress"
+import { applyReportProgressEvent, INITIAL_REPORT_PROGRESS, REPORT_PROGRESS_ROWS, type ReportProgressState } from "@/lib/reportProgress"
+import { REPORT_SOURCES, type ReportSource } from "@/reports/sources"
 import { reportWarnings, sheetsReportFileName, type GeneratedReport, type ReportDownloadFormat } from "@/lib/reports"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { cn } from "@/lib/utils"

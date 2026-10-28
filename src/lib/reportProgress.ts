@@ -1,7 +1,7 @@
+import { isReportSource, REPORT_SOURCE_DETAILS, REPORT_SOURCES, type ReportSource } from "@/reports/sources"
+
 export const REPORTS_PROGRESS_TYPE = "REPORTS_PROGRESS"
 
-export const REPORT_SOURCES = ["unfulfillable", "feedback", "stranded", "suppressed", "shippingQueue"] as const
-export type ReportSource = (typeof REPORT_SOURCES)[number]
 export type ReportStageStatus = "pending" | "active" | "complete" | "error"
 export type ReportProgressPhase = "listings" | "removal" | "issues" | "details"
 
@@ -31,13 +31,7 @@ export type ReportProgressState = {
   workbook: ReportStageStatus
 }
 
-export const REPORT_PROGRESS_ROWS = [
-  { id: "unfulfillable", label: "Unfulfillable" },
-  { id: "feedback", label: "Seller Feedback" },
-  { id: "stranded", label: "Stranded" },
-  { id: "suppressed", label: "Suppressed" },
-  { id: "shippingQueue", label: "Shipping Queue" },
-] as const
+export const REPORT_PROGRESS_ROWS = REPORT_SOURCES.map((id) => ({ id, label: REPORT_SOURCE_DETAILS[id].label }))
 
 export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
   prepare: "active",
@@ -50,10 +44,6 @@ export const INITIAL_REPORT_PROGRESS: ReportProgressState = {
     shippingQueue: { status: "pending" },
   },
   workbook: "pending",
-}
-
-export function isReportSource(value: unknown): value is ReportSource {
-  return (REPORT_SOURCES as readonly unknown[]).includes(value)
 }
 
 export function isReportProgressEvent(value: unknown): value is ReportProgressEvent {

@@ -26,12 +26,8 @@ import {
 } from "./lib/settings"
 import { isPaletteShortcut } from "./lib/shortcut"
 import type { SellerCentralSessionState } from "./lib/sellerCentralSession"
-import {
-  isReportProgressMessage,
-  REPORT_SOURCES,
-  type ReportProgressEvent,
-  type ReportSource,
-} from "./lib/reportProgress"
+import { isReportProgressMessage, type ReportProgressEvent } from "./lib/reportProgress"
+import { REPORT_SOURCES, type ReportSource } from "@/reports/sources"
 import { sendToBackground, type AccountsStatus, type BulkRemovalSummary } from "./shared/messages"
 
 const HOST_ID = "command-palette-extension-root"

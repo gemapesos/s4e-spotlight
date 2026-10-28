@@ -1,6 +1,6 @@
 import { formatDayMonthYear, MONTH_ABBREVIATIONS } from "./dates"
 import { FEEDBACK_SHEET_HEADERS, feedbackSheetRows, type SellerFeedback } from "./feedback"
-import type { ReportSource } from "./reportProgress"
+import type { ReportSource } from "@/reports/sources"
 import { reportIncludes, sanitizeStoreName } from "./reports"
 import {
   formatShippingQueueLocalDate,
