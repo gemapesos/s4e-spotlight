@@ -5,9 +5,6 @@
  * the background worker, which keeps the newest entries in chrome.storage.local so the popup can
  * download them. Log counts, durations, status codes, and error messages — never secrets or
  * customer data.
- *
- * Content scripts load this file by concatenation, so it must not import anything and its
- * top-level names must stay unique across the content-script bundle.
  */
 
 export type LogLevel = "info" | "warn" | "error"

@@ -1,7 +1,5 @@
 /**
  * Reads a Seller Central case, including every reply page, from the signed-in tab.
- * Content scripts concatenate this file, so it must not import anything and its
- * top-level names must stay unique across the content-script bundle.
  */
 
 export const VIEW_CASE_PAGE_SIZE = 10
