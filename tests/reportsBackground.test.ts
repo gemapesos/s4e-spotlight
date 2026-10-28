@@ -525,11 +525,11 @@ describe("Bulk removal", () => {
   const createTab = vi.fn(async (properties: chrome.tabs.CreateProperties) => ({ id: 31, ...properties } as chrome.tabs.Tab))
   const update = vi.fn(async (tabId: number) => ({ id: tabId, windowId: 4 } as chrome.tabs.Tab))
   const windowsUpdate = vi.fn(async () => ({}))
-  let activeJob: unknown
+  let session: Record<string, unknown>
   const sender = { id: 7, windowId: 4, index: 2 } as chrome.tabs.Tab
 
   beforeEach(() => {
-    activeJob = undefined
+    session = {}
     sendMessage.mockReset(); sendMessage.mockResolvedValue({ ok: true, loggedInToStore: true, settled: true })
     createTab.mockClear(); update.mockClear(); windowsUpdate.mockClear()
     vi.stubGlobal("chrome", {
@@ -542,7 +542,13 @@ describe("Bulk removal", () => {
         onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
       },
       windows: { update: windowsUpdate },
-      storage: { session: { get: vi.fn(async () => ({ accountsActiveJob: activeJob })) } },
+      storage: {
+        session: {
+          get: vi.fn(async (key: string) => (key in session ? { [key]: session[key] } : {})),
+          set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(session, items) }),
+          remove: vi.fn(async (key: string) => { delete session[key] }),
+        },
+      },
     })
   })
 
@@ -583,6 +589,19 @@ describe("Bulk removal", () => {
     expect(windowsUpdate).toHaveBeenCalledWith(4, { focused: true })
   })
 
+  it("still finds the removal tab after Chrome restarts the idle service worker", async () => {
+    sendMessage
+      .mockResolvedValueOnce({ ok: true, loggedInToStore: true, settled: true })
+      .mockResolvedValueOnce({ ok: true, items: [{ sku: "CC10", asin: "A1", fnSku: "F1", removableUnits: 3 }], skipped: [], nextRemovalOrderId: null })
+    await createBulkRemoval(["CC10"], sender, createTab)
+
+    vi.resetModules()
+    const restarted = await import("../src/background")
+
+    await expect(restarted.focusBulkRemovalTab(sender)).resolves.toEqual({ ok: true })
+    expect(update).toHaveBeenCalledWith(31, { active: true })
+  })
+
   it("opens nothing when no SKU can be removed", async () => {
     sendMessage
       .mockResolvedValueOnce({ ok: true, loggedInToStore: true, settled: true })
@@ -596,7 +615,7 @@ describe("Bulk removal", () => {
   it("rejects empty and oversized batches, and runs during a store switch", async () => {
     await expect(createBulkRemoval([], sender, createTab)).rejects.toThrow("Enter at least one SKU.")
     await expect(createBulkRemoval(Array.from({ length: 51 }, (_, index) => `SKU${index}`), sender, createTab)).rejects.toThrow("no more than 50")
-    activeJob = { startedAt: Date.now() }
+    session.accountsActiveJob = { startedAt: Date.now() }
     await expect(createBulkRemoval(["CC10"], sender, createTab)).rejects.toThrow("Wait for the store switch to finish")
     expect(sendMessage).not.toHaveBeenCalled()
   })

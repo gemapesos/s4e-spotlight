@@ -1129,17 +1129,21 @@ function asSkipped(value: unknown): BulkRemovalResponse["skipped"] {
   })
 }
 
-/** The Create removal order tab each palette tab opened last, so its summary can go to it. */
-const bulkRemovalTabs = new Map<number, number>()
+/**
+ * Session-storage key for the Create removal order tab each palette tab opened last, so its
+ * summary can go to it. Kept in storage because Chrome stops the idle worker after ~30 s.
+ */
+const BULK_REMOVAL_TAB_PREFIX = "bulkRemovalTab:"
 
 export async function focusBulkRemovalTab(senderTab?: chrome.tabs.Tab): Promise<{ ok: true }> {
-  const tabId = senderTab?.id === undefined ? undefined : bulkRemovalTabs.get(senderTab.id)
+  const key = `${BULK_REMOVAL_TAB_PREFIX}${senderTab?.id}`
+  const tabId = senderTab?.id === undefined ? undefined : (await chrome.storage.session.get(key))[key] as number | undefined
   if (tabId === undefined) throw new Error("The removal tab is no longer open.")
   try {
     const tab = await chrome.tabs.update(tabId, { active: true })
     if (tab?.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
   } catch {
-    bulkRemovalTabs.delete(senderTab!.id!)
+    await chrome.storage.session.remove(key)
     throw new Error("The removal tab is no longer open.")
   }
   return { ok: true }
@@ -1176,7 +1180,7 @@ export async function createBulkRemoval(
         ...(senderTab?.windowId === undefined ? {} : { windowId: senderTab.windowId }),
         ...(senderTab?.index === undefined ? {} : { index: senderTab.index + 1 }),
       })
-      if (senderTab?.id !== undefined && tab.id !== undefined) bulkRemovalTabs.set(senderTab.id, tab.id)
+      if (senderTab?.id !== undefined && tab.id !== undefined) await chrome.storage.session.set({ [`${BULK_REMOVAL_TAB_PREFIX}${senderTab.id}`]: tab.id })
     }
     done({ opened: items.length, skipped: skipped.length, eligibilityUnknown })
     return { ok: true, openedCount: items.length, skipped, nextRemovalOrderId, eligibilityUnknown }
