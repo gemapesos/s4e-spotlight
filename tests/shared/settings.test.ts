@@ -11,6 +11,7 @@ import {
   parseSettings,
   saveSettings,
 } from "../../src/shared/settings"
+import { storageArea } from "../helpers/chrome"
 
 const DEFAULT_SETTINGS = { features: DEFAULT_ENABLED_FEATURES, timeOutForm: DEFAULT_TIME_OUT_FORM_VALUES }
 
@@ -86,12 +87,7 @@ describe("saveSettings", () => {
   it("keeps a popup switch when a Time Out page opened earlier saves its form", async () => {
     const local: Record<string, unknown> = {}
     vi.stubGlobal("chrome", {
-      storage: {
-        local: {
-          get: vi.fn(async (key: string) => (key in local ? { [key]: local[key] } : {})),
-          set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(local, items) }),
-        },
-      },
+      storage: { local: storageArea(local) },
     })
     const timeOutPage = await loadSettings()
 

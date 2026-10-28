@@ -27,6 +27,7 @@ import {
   type UnfulfillableListing,
 } from "../../src/sellerCentral/unfulfillable"
 import { INVENTORY_GQL_URL, INVENTORY_MANAGE_URL, isInvalidPaginationInput, readAntiCsrfToken, readAntiCsrfTokenFromHtml } from "../../src/sellerCentral/inventoryGraphql"
+import { jsonResponse } from "../helpers/fetch"
 
 const expiredListing: UnfulfillableListing = {
   coreListingFields: {
@@ -81,14 +82,6 @@ const mixedListing: UnfulfillableListing = {
     },
   },
   offers: [{ price: { price: { amount: "19.99", currencyUnit: "USD" } } }],
-}
-
-function jsonResponse(payload: unknown, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => payload,
-  }
 }
 
 function listingsPayload(listings: Array<UnfulfillableListing | null>, count = listings.filter(Boolean).length) {

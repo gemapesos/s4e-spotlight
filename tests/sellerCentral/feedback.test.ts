@@ -21,6 +21,7 @@ import {
   parseFeedbacksPage,
   type SellerFeedback,
 } from "../../src/sellerCentral/feedback"
+import { jsonResponse } from "../helpers/fetch"
 
 const negativeFeedback: SellerFeedback = {
   feedbackId: "A1JYWNJI6O4TQ1",
@@ -60,14 +61,6 @@ const positiveFeedback: SellerFeedback = {
   partiallySuppressed: false,
   suppressReasonId: null,
   answerMap: { ItemAsDescribed: { booleanRating: true } },
-}
-
-function jsonResponse(payload: unknown, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => payload,
-  }
 }
 
 function feedbacksPayload(feedbacks: SellerFeedback[], extras: { lastPage?: boolean; lastEvaluatedKey?: string | null } = {}) {

@@ -5,6 +5,7 @@ import { relayAuthorizedReportProgress, revokeResultsForTab } from "../../src/ba
 import { routeMessage } from "../../src/background/router"
 import { handleAccountTabUpdated, SIGN_IN_URL } from "../../src/background/switch/signIn"
 import { ACTIVE_JOB_STORAGE_KEY, decryptVault, encryptVault, SESSION_KEY_STORAGE_KEY, serializeKey, STORE_INDEX_KEY, VAULT_STORAGE_KEY } from "../../src/shared/accounts"
+import { storageArea } from "../helpers/chrome"
 
 const origin = "chrome-extension://security-fixture/"
 const optionsSender: chrome.runtime.MessageSender = { id: "security-fixture", url: `${origin}options.html`, frameId: 0, documentId: "accounts-document", tab: { id: 201, windowId: 1 } as chrome.tabs.Tab }
@@ -15,14 +16,6 @@ const vault = {
   version: 1 as const,
   credentials: [{ id: "credential", domain: "fixture@example.test", password: "fixture-secret", otpAuthUri: "otpauth://totp/Fixture?secret=JBSWY3DPEHPK3PXP" }],
   stores: [{ id: "store", name: "Fixture", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home" }],
-}
-
-function area(values: Record<string, unknown>) {
-  return {
-    get: vi.fn(async (keys: string | string[] | null) => keys === null ? structuredClone(values) : Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((key) => key in values).map((key) => [key, structuredClone(values[key])]))),
-    set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(values, structuredClone(items)) }),
-    remove: vi.fn(async (keys: string | string[]) => { for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key] }),
-  }
 }
 
 /** The next popup window Chrome creates holds tab 200, the Results sender's tab. */
@@ -68,7 +61,7 @@ describe("security boundaries", () => {
     attach.mockReset().mockResolvedValue(undefined)
     vi.stubGlobal("chrome", {
       runtime: { id: "security-fixture", getURL: (path: string) => `${origin}${path}`, openOptionsPage: vi.fn() },
-      storage: { local: area(local), session: area(session) },
+      storage: { local: storageArea(local), session: storageArea(session) },
       tabs: {
         create, get, query, sendMessage, update, remove: vi.fn(async () => undefined),
         onUpdated: { addListener: vi.fn((listener) => tabUpdatedListeners.add(listener)), removeListener: vi.fn((listener) => tabUpdatedListeners.delete(listener)) },

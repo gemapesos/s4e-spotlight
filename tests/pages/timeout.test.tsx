@@ -8,17 +8,13 @@ import {
   SETTINGS_STORAGE_KEY,
 } from "../../src/shared/settings"
 import { TimeoutApp } from "../../src/pages/timeout/TimeoutApp"
+import { storageArea } from "../helpers/chrome"
 
 function mockChrome(stored?: unknown) {
   const store: Record<string, unknown> = stored === undefined ? {} : { [SETTINGS_STORAGE_KEY]: stored }
   vi.stubGlobal("chrome", {
     storage: {
-      local: {
-        get: vi.fn(async (key: string) => ({ [key]: store[key] })),
-        set: vi.fn(async (items: Record<string, unknown>) => {
-          Object.assign(store, items)
-        }),
-      },
+      local: storageArea(store),
     },
   })
   return store

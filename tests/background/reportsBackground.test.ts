@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createBulkRemoval, focusBulkRemovalTab } from "../../src/background/bulkRemoval"
 import { ensureSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN, waitForTabComplete } from "../../src/background/sellerCentralTabs"
+import { storageArea } from "../helpers/chrome"
 
 describe("Seller Central tab", () => {
   const create = vi.fn(async () => ({ id: 91, windowId: 4 }))
@@ -97,13 +98,7 @@ describe("Bulk removal", () => {
         onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
       },
       windows: { update: windowsUpdate },
-      storage: {
-        session: {
-          get: vi.fn(async (key: string) => (key in session ? { [key]: session[key] } : {})),
-          set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(session, items) }),
-          remove: vi.fn(async (key: string) => { delete session[key] }),
-        },
-      },
+      storage: { session: storageArea(session) },
     })
   })
 

@@ -19,6 +19,7 @@ import {
   type SuppressedListing,
 } from "../../src/sellerCentral/suppressed"
 import { INVENTORY_GQL_URL, INVENTORY_MANAGE_URL } from "../../src/sellerCentral/inventoryGraphql"
+import { jsonResponse } from "../helpers/fetch"
 
 const zeroQuantityListing: SuppressedListing = {
   coreListingFields: {
@@ -140,14 +141,6 @@ const missingDescriptionIssue: ListingIssue = {
     { key: "attribute_name", value: "[product_description]" },
   ],
   issuePathForwards: [{ type: "ProvideAttribute", attributes: [{ v3FlatPath: "product_description" }] }],
-}
-
-function jsonResponse(payload: unknown, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => payload,
-  }
 }
 
 function listingsPayload(listings: Array<SuppressedListing | null>, count = listings.filter(Boolean).length) {
