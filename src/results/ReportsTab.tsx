@@ -10,7 +10,7 @@ import { REPORT_SOURCES, type ReportSource } from "@/reports/sources"
 import { reportWarnings, sheetsReportFileName, type GeneratedReport, type ReportDownloadFormat } from "@/lib/reports"
 import type { SellerCentralSessionState } from "@/lib/sellerCentralSession"
 import { cn } from "@/lib/utils"
-import { generateReports, prepareReports } from "@/paletteApp"
+import { generateReports, prepareReports } from "@/reports/generate"
 import { ReportProgressPanel } from "@/ReportProgressPanel"
 import {
   formatDuration,

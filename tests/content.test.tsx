@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { downloadGeneratedReport } from "../src/lib/reportDownload"
 import {
   focusCurrentStore,
-  generateReports,
-  getAccountsStatus,
   getSettings,
   mountCommandPalette,
   openCaseIds,
@@ -12,9 +10,10 @@ import {
   openShipmentIds,
   openSkuIds,
   openTimeOut,
-  prepareReports,
   type MountedCommandPalette,
 } from "../src/paletteApp"
+import { generateReports, prepareReports } from "../src/reports/generate"
+import { getAccountsStatus } from "../src/shared/requests"
 
 let mounted: MountedCommandPalette | null = null
 const documentFonts = Object.getOwnPropertyDescriptor(document, "fonts")

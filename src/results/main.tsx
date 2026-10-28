@@ -5,8 +5,10 @@ import "@fontsource-variable/geist"
 import "@fontsource-variable/geist-mono"
 import "@/styles.css"
 import { applyPrefersColorScheme } from "@/lib/colorScheme"
+import { forwardLogsToBackground, setLogSink } from "@/lib/log"
 import { WorkspaceApp } from "@/results/WorkspaceApp"
 
+setLogSink(forwardLogsToBackground())
 applyPrefersColorScheme(document.documentElement)
 // The window is a raised surface like the palette, so it uses popover, which lifts in dark mode.
 document.body.classList.add("bg-popover")
