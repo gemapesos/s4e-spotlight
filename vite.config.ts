@@ -21,7 +21,8 @@ const FONT_PATHS = [
  */
 const EXTENSION_SCRIPTS = {
   "background.js": { input: "src/background.ts", format: "es" },
-  "content.js": { input: "src/content.tsx", format: "iife" },
+  "content.js": { input: "src/content/paletteLoader.ts", format: "iife" },
+  "seller-central.js": { input: "src/content/sellerCentral.ts", format: "iife" },
   "paste-guard.js": { input: "src/pasteGuard.ts", format: "iife" },
   "passkey-guard.js": { input: "src/passkeyGuard.ts", format: "iife" },
   "account-automation.js": { input: "src/accountAutomation.ts", format: "iife" },

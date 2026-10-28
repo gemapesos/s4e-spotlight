@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { canHostPalette, handleContentKeyDown, handleContentMessage, loadPalette, showSwitchNotice } from "../src/content"
+import { canHostPalette, handleContentKeyDown, handlePaletteMessage, loadPalette, showSwitchNotice } from "../src/content/paletteLoader"
+import { handleSellerCentralMessage } from "../src/content/sellerCentral"
 import { VIEW_CASE_SIGN_IN_ERROR } from "../src/lib/viewCase"
 import { setLogSink, type LogEntry } from "../src/lib/log"
 
@@ -24,24 +25,34 @@ describe("content script report messages", () => {
     makeVisible()
     const sendResponse = vi.fn()
 
-    expect(handleContentMessage({ type: "REPORTS_SESSION_STATUS" }, backgroundSender, sendResponse)).toBeUndefined()
+    expect(handleSellerCentralMessage({ type: "REPORTS_SESSION_STATUS" }, backgroundSender, sendResponse)).toBeUndefined()
     expect(sendResponse).toHaveBeenCalledWith({ ok: true, loggedInToStore: true, settled: true })
   })
 
-  it("opens the palette on the report sign-in screen", async () => {
+  it("opens the palette on the store switch the worker started", async () => {
     const setOpen = vi.fn()
     const sendResponse = vi.fn()
     const load = vi.fn(async () => ({ setOpen, showSwitchDone: vi.fn() }))
 
-    expect(handleContentMessage(
-      { type: "OPEN_PALETTE", mode: "sign-in" },
+    expect(handlePaletteMessage(
+      { type: "OPEN_PALETTE", mode: "switching" },
       backgroundSender,
       sendResponse,
       load,
     )).toBe(true)
 
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true }))
-    expect(setOpen).toHaveBeenCalledWith(true, "sign-in")
+    expect(setOpen).toHaveBeenCalledWith(true, "switching")
+  })
+
+  it("leaves each other's messages unanswered, since Chrome takes the first reply", () => {
+    const sendResponse = vi.fn()
+
+    expect(handlePaletteMessage({ type: "REPORTS_FETCH_STRANDED", runId: "report-7" }, backgroundSender, sendResponse)).toBeUndefined()
+    expect(handlePaletteMessage({ type: "REPORTS_SESSION_STATUS" }, backgroundSender, sendResponse)).toBeUndefined()
+    expect(handleSellerCentralMessage({ type: "OPEN_PALETTE", mode: "switching" }, backgroundSender, sendResponse)).toBeUndefined()
+    expect(handleSellerCentralMessage({ type: "ACCOUNTS_RESUME_CHECK" }, backgroundSender, sendResponse)).toBeUndefined()
+    expect(sendResponse).not.toHaveBeenCalled()
   })
 
   it("shows the finished store switch on a page that was already loaded", async () => {
@@ -49,7 +60,7 @@ describe("content script report messages", () => {
     const sendResponse = vi.fn()
     const load = vi.fn(async () => ({ setOpen: vi.fn(), showSwitchDone }))
 
-    handleContentMessage({ type: "ACCOUNTS_SWITCH_DONE", storeName: "JMG Outdoors" }, backgroundSender, sendResponse, load)
+    handlePaletteMessage({ type: "ACCOUNTS_SWITCH_DONE", storeName: "JMG Outdoors" }, backgroundSender, sendResponse, load)
 
     expect(sendResponse).toHaveBeenCalledWith({ ok: true })
     await vi.waitFor(() => expect(showSwitchDone).toHaveBeenCalledWith("JMG Outdoors"))
@@ -161,7 +172,7 @@ describe("content script report messages", () => {
     const sendResponse = vi.fn()
 
     try {
-      expect(handleContentMessage(
+      expect(handleSellerCentralMessage(
         { type: "REPORTS_FETCH_UNFULFILLABLE" },
         backgroundSender,
         sendResponse,
@@ -201,7 +212,7 @@ describe("content script report messages", () => {
     const sendResponse = vi.fn()
 
     try {
-      expect(handleContentMessage(
+      expect(handleSellerCentralMessage(
         { type: "REPORTS_FETCH_FEEDBACK" },
         backgroundSender,
         sendResponse,
@@ -237,7 +248,7 @@ describe("content script report messages", () => {
     const sendResponse = vi.fn()
 
     try {
-      expect(handleContentMessage(
+      expect(handleSellerCentralMessage(
         { type: "REPORTS_FETCH_STRANDED" },
         backgroundSender,
         sendResponse,
@@ -297,7 +308,7 @@ describe("content script report messages", () => {
     const sendResponse = vi.fn()
 
     try {
-      expect(handleContentMessage(
+      expect(handleSellerCentralMessage(
         { type: "REPORTS_FETCH_SUPPRESSED" },
         backgroundSender,
         sendResponse,
@@ -337,7 +348,7 @@ describe("content script report messages", () => {
     const sendResponse = vi.fn()
 
     try {
-      expect(handleContentMessage(
+      expect(handleSellerCentralMessage(
         { type: "REPORTS_FETCH_SHIPPING_QUEUE" },
         backgroundSender,
         sendResponse,
@@ -396,7 +407,7 @@ describe("content script case scrape", () => {
     vi.stubGlobal("fetch", fetchImpl)
     const sendResponse = vi.fn()
 
-    expect(handleContentMessage(
+    expect(handleSellerCentralMessage(
       { type: "SCRAPE_CASES", caseIds: ["22420938051"] },
       backgroundSender,
       sendResponse,
@@ -424,7 +435,7 @@ describe("content script case scrape", () => {
     })))
     const sendResponse = vi.fn()
 
-    handleContentMessage(
+    handleSellerCentralMessage(
       { type: "SCRAPE_CASES", caseIds: ["22420938051"] },
       backgroundSender,
       sendResponse,
@@ -452,7 +463,7 @@ describe("content script report logging", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, text: async () => "" })))
     const sendResponse = vi.fn()
 
-    handleContentMessage({ type: "REPORTS_FETCH_STRANDED", runId: "report-7" }, backgroundSender, sendResponse)
+    handleSellerCentralMessage({ type: "REPORTS_FETCH_STRANDED", runId: "report-7" }, backgroundSender, sendResponse)
 
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
       ok: false,
@@ -515,11 +526,11 @@ describe("content script bulk removal", () => {
     const fetchImpl = vi.fn()
     vi.stubGlobal("fetch", fetchImpl)
     const rejected = vi.fn()
-    expect(handleContentMessage({ type: "BULK_REMOVAL_RESOLVE", skus: ["CC10"] }, { id: "test-extension", tab: { id: 3 } as chrome.tabs.Tab }, rejected)).toBeUndefined()
+    expect(handleSellerCentralMessage({ type: "BULK_REMOVAL_RESOLVE", skus: ["CC10"] }, { id: "test-extension", tab: { id: 3 } as chrome.tabs.Tab }, rejected)).toBeUndefined()
     expect(rejected).toHaveBeenCalledWith({ ok: false, error: "Unauthorized extension message." })
 
     const sendResponse = vi.fn()
-    expect(handleContentMessage({ type: "BULK_REMOVAL_RESOLVE", skus: ["CC10", 4] }, backgroundSender, sendResponse)).toBe(true)
+    expect(handleSellerCentralMessage({ type: "BULK_REMOVAL_RESOLVE", skus: ["CC10", 4] }, backgroundSender, sendResponse)).toBe(true)
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: "Open Seller Central, then try again." }))
     expect(fetchImpl).not.toHaveBeenCalled()
   })

@@ -122,3 +122,9 @@ export async function sendToBackground<T extends BackgroundMessageType>(
   if (!response?.ok) throw new Error(response?.error ?? fallbackError)
   return response as BackgroundReply<T>
 }
+
+/** Messages to pages and content scripts must come from this extension's service worker. */
+export function isFromWorker(sender: chrome.runtime.MessageSender): boolean {
+  return Boolean(chrome.runtime?.id) && sender.id === chrome.runtime.id && !sender.tab
+    && (!sender.url || sender.url === chrome.runtime.getURL("background.js"))
+}

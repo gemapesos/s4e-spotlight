@@ -12,7 +12,7 @@ import { AccountsTab } from "@/results/AccountsTab"
 import { CasesTab } from "@/results/CasesTab"
 import { ReportsTab } from "@/results/ReportsTab"
 import type { WorkspaceLaunch, WorkspaceRuns, WorkspaceTab } from "@/results/workspaceParts"
-import { sendToBackground, type AccountsStatus } from "@/shared/messages"
+import { isFromWorker, sendToBackground, type AccountsStatus } from "@/shared/messages"
 
 const TABS: ReadonlyArray<{ id: WorkspaceTab; label: string; feature: FeatureId; icon: LucideIcon }> = [
   { id: "reports", label: "Reports", feature: "generate-reports", icon: FileSpreadsheet },
@@ -85,7 +85,7 @@ export function WorkspaceApp() {
 
     const onMessage = (message: unknown, sender: chrome.runtime.MessageSender, respond: (value: unknown) => void) => {
       // Only the background may drive this window.
-      if (sender.id !== chrome.runtime.id || sender.tab || (sender.url && sender.url !== chrome.runtime.getURL("background.js"))) return
+      if (!isFromWorker(sender)) return
       if (!message || typeof message !== "object" || !("type" in message)) return
       const record = message as Record<string, unknown>
       if (record.type === "ACCOUNTS_RESUME_CHECK") { respond({ ok: true }); return }

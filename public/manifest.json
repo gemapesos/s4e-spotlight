@@ -47,6 +47,12 @@
     },
     {
       "matches": ["https://sellercentral.amazon.com/*"],
+      "js": ["seller-central.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://sellercentral.amazon.com/*"],
       "js": ["passkey-guard.js"],
       "run_at": "document_start",
       "world": "MAIN",

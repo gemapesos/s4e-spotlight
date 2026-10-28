@@ -1,6 +1,6 @@
 import { createLogger, errorMessage, forwardLogsToBackground, setLogSink } from "./lib/log"
 import { hasAuthenticatedSellerUi, visible } from "./lib/sellerCentralSession"
-import { sendToBackground } from "./shared/messages"
+import { isFromWorker, sendToBackground } from "./shared/messages"
 
 const STATUS_ID = "s4e-account-switch-status"
 const documentStartedAt = Date.now()
@@ -454,11 +454,11 @@ async function run(): Promise<void> {
 /**
  * The background confirms a login document is still open before releasing credentials. This script
  * starts at document_end, before content.js (document_idle) can answer, so it answers that check itself.
- * Other messages are left to content.js: answering them here would win the reply.
+ * Other messages are left to the other content scripts: answering them here would win the reply.
  */
 export function handleResumeCheck(message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void): undefined {
   if ((message as { type?: unknown } | null)?.type !== "ACCOUNTS_RESUME_CHECK") return undefined
-  if (sender.id !== chrome.runtime.id || sender.tab || (sender.url && sender.url !== chrome.runtime.getURL("background.js"))) return undefined
+  if (!isFromWorker(sender)) return undefined
   sendResponse({ ok: true })
   return undefined
 }
