@@ -1,8 +1,8 @@
 /**
  * Shipping queue hold probe.
  *
- * Temporary. Not part of the extension build. Production still loads shipment
- * details 40 at a time.
+ * Temporary. Not part of the extension build. It holds 40 detail requests at a
+ * time; production loads 60 (SHIPMENT_DETAILS_CONCURRENCY).
  *
  * How to run:
  * 1. Open any https://sellercentral.amazon.* page while signed in to a store.

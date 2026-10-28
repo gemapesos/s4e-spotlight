@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Command Palette",
+  "name": "S4E Spotlight",
   "description": "Open a focused command palette with Command+/ or Ctrl+/.",
   "version": "0.1.0",
   "icons": {
