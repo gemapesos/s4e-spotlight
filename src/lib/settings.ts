@@ -178,6 +178,7 @@ export async function loadSettings(): Promise<ExtensionSettings> {
 }
 
 /** Merges over what is stored now: each page saves only its own part, because its copy of the rest may be stale. */
+// shortcut: the read and write aren't atomic, so two pages saving within the same few ms can still lose one; use navigator.locks if that ever shows up in practice.
 export async function saveSettings(patch: Partial<ExtensionSettings>): Promise<void> {
   await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings({ ...await loadSettings(), ...patch }) })
 }
