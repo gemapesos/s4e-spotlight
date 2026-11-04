@@ -135,7 +135,7 @@ export function PopupApp() {
     const parsed = parseSettings(next)
     setSettings(parsed)
     try {
-      await saveSettings(parsed)
+      await saveSettings({ features: parsed.features })
       setError(null)
     } catch (caught) {
       popupLog.error("settings.saveFailed", { error: describeError(caught) })

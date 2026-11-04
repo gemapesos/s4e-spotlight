@@ -110,7 +110,7 @@ export function TimeoutApp() {
 
   const save = React.useCallback((next: ExtensionSettings) => {
     setSaving(true)
-    void saveSettings(next).then(
+    void saveSettings({ timeOutForm: next.timeOutForm }).then(
       () => setError(null),
       (caught: unknown) => {
         timeoutLog.error("settings.saveFailed", { error: describeError(caught) })
@@ -122,7 +122,7 @@ export function TimeoutApp() {
   React.useEffect(() => () => {
     if (!textSaveTimerRef.current) return
     window.clearTimeout(textSaveTimerRef.current)
-    if (settingsRef.current) void saveSettings(settingsRef.current)
+    if (settingsRef.current) void saveSettings({ timeOutForm: settingsRef.current.timeOutForm })
   }, [])
 
   /** Applies a change to the latest values, so a pending text save never overwrites a newer change. */

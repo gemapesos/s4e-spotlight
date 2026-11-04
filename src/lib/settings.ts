@@ -177,8 +177,9 @@ export async function loadSettings(): Promise<ExtensionSettings> {
   return parseSettings(stored)
 }
 
-export async function saveSettings(settings: ExtensionSettings): Promise<void> {
-  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings(settings) })
+/** Merges over what is stored now: each page saves only its own part, because its copy of the rest may be stale. */
+export async function saveSettings(patch: Partial<ExtensionSettings>): Promise<void> {
+  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings({ ...await loadSettings(), ...patch }) })
 }
 
 export function optionsWithCurrent(options: readonly string[], current: string): string[] {
