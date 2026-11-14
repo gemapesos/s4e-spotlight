@@ -235,6 +235,17 @@ describe("Accounts background workflow", () => {
     expect(local[CURRENT_STORE_KEY]).toBe("store")
   })
 
+  it("rejects automation from a login tab that left Seller Central or a document that is no longer active", async () => {
+    const job = await createActiveJob()
+    const sender = { tab: { id: 91 } as chrome.tabs.Tab, url: SIGN_IN_URL }
+    const leave = (from: chrome.runtime.MessageSender) => handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_LEAVE_LOGOUT", jobId: job.id }, from)
+    tabUrls.set(91, "https://example.test/elsewhere")
+    await expect(leave(sender)).rejects.toThrow(/tab has navigated away/)
+    tabUrls.set(91, SIGN_IN_URL)
+    await expect(leave({ ...sender, documentLifecycle: "prerender" })).rejects.toThrow(/no longer active/)
+    await expect(leave(sender)).resolves.toBeTruthy()
+  })
+
   it("serializes simultaneous starts and exposes focus and cancel controls", async () => {
     const job = await createActiveJob()
     const status = await handleAccountsMessage({ type: "ACCOUNTS_STATUS" }, {}) as any
