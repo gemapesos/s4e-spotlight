@@ -172,11 +172,12 @@ export async function loadSettings(): Promise<ExtensionSettings> {
   return parseSettings(stored)
 }
 
-/** Writes only the given part over what is stored now, so the popup and the Time Out page never undo each other. */
+/** Writes only the given part (form values field by field) over what is stored now, so no page undoes another's save. */
 // shortcut: the read and write aren't atomic, so two pages saving within the same few ms can still lose one; use navigator.locks if that ever shows up in practice.
-export async function saveSettings(part: Partial<ExtensionSettings>): Promise<void> {
+export async function saveSettings(part: { features?: EnabledFeatures; timeOutForm?: Partial<TimeOutFormValues> }): Promise<void> {
   const current = await loadSettings()
-  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings({ ...current, ...part }) })
+  const timeOutForm = { ...current.timeOutForm, ...part.timeOutForm }
+  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings({ ...current, ...part, timeOutForm }) })
 }
 
 export function optionsWithCurrent(options: readonly string[], current: string): string[] {

@@ -18,6 +18,7 @@ import {
   optionsWithCurrent,
   parseSettings,
   saveSettings,
+  SETTINGS_STORAGE_KEY,
   TIME_OUT_BLOCKERS_OPTIONS,
   TIME_OUT_BUSINESSES,
   TIME_OUT_ISSUE_TYPES,
@@ -94,6 +95,7 @@ export function TimeoutApp() {
   const [saving, setSaving] = React.useState(false)
   const settingsRef = React.useRef(settings)
   const textSaveTimerRef = React.useRef(0)
+  const pendingRef = React.useRef<Partial<TimeOutFormValues>>({})
 
   React.useEffect(() => {
     void loadSettings().then(
@@ -108,39 +110,66 @@ export function TimeoutApp() {
     )
   }, [])
 
-  const save = React.useCallback((next: ExtensionSettings) => {
+  // Another Time Out tab or the popup saved: show it, keeping the edits this tab hasn't saved yet.
+  React.useEffect(() => {
+    const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+      const change = changes[SETTINGS_STORAGE_KEY]
+      if (area !== "local" || !change || !settingsRef.current) return
+      const stored = parseSettings(change.newValue)
+      const next = { ...stored, timeOutForm: { ...stored.timeOutForm, ...pendingRef.current } }
+      settingsRef.current = next
+      setSettings(next)
+    }
+    chrome.storage?.onChanged?.addListener(onStorage)
+    return () => chrome.storage?.onChanged?.removeListener(onStorage)
+  }, [])
+
+  /** Saves only the fields edited here, so another tab's values are never reverted. */
+  const save = React.useCallback(() => {
+    const patch = pendingRef.current
+    pendingRef.current = {}
     setSaving(true)
-    void saveSettings({ timeOutForm: next.timeOutForm }).then(
+    void saveSettings({ timeOutForm: patch }).then(
       () => setError(null),
       (caught: unknown) => {
+        pendingRef.current = { ...patch, ...pendingRef.current }
         timeoutLog.error("settings.saveFailed", { error: describeError(caught) })
         setError(errorMessage(caught, "Couldn’t save the form values."))
       },
     ).finally(() => setSaving(Boolean(textSaveTimerRef.current)))
   }, [])
 
-  React.useEffect(() => () => {
-    if (!textSaveTimerRef.current) return
-    window.clearTimeout(textSaveTimerRef.current)
-    if (settingsRef.current) void saveSettings({ timeOutForm: settingsRef.current.timeOutForm })
+  // A closing tab can't wait for a read before writing, so write this tab's copy, which storage changes keep current.
+  React.useEffect(() => {
+    const flush = () => {
+      if (!textSaveTimerRef.current) return
+      window.clearTimeout(textSaveTimerRef.current)
+      textSaveTimerRef.current = 0
+      if (settingsRef.current) void chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settingsRef.current })
+    }
+    window.addEventListener("pagehide", flush)
+    return () => {
+      window.removeEventListener("pagehide", flush)
+      flush()
+    }
   }, [])
 
   /** Applies a change to the latest values, so a pending text save never overwrites a newer change. */
-  const update = React.useCallback((patch: Partial<TimeOutFormValues>): ExtensionSettings | null => {
+  const update = React.useCallback((patch: Partial<TimeOutFormValues>): boolean => {
     const current = settingsRef.current
-    if (!current) return null
+    if (!current) return false
     const next = parseSettings({ ...current, timeOutForm: { ...current.timeOutForm, ...patch } })
+    pendingRef.current = { ...pendingRef.current, ...patch }
     settingsRef.current = next
     setSettings(next)
-    return next
+    return true
   }, [])
 
   const persistForm = React.useCallback((patch: Partial<TimeOutFormValues>) => {
-    const next = update(patch)
-    if (!next) return
+    if (!update(patch)) return
     window.clearTimeout(textSaveTimerRef.current)
     textSaveTimerRef.current = 0
-    save(next)
+    save()
   }, [save, update])
 
   const persistTextField = React.useCallback((patch: Partial<TimeOutFormValues>) => {
@@ -149,7 +178,7 @@ export function TimeoutApp() {
     window.clearTimeout(textSaveTimerRef.current)
     textSaveTimerRef.current = window.setTimeout(() => {
       textSaveTimerRef.current = 0
-      if (settingsRef.current) save(settingsRef.current)
+      save()
     }, TEXT_SAVE_DEBOUNCE_MS)
   }, [save, update])
 

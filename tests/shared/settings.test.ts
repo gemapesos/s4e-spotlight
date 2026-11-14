@@ -98,4 +98,22 @@ describe("saveSettings", () => {
     expect(saved.features.accounts).toBe(false)
     expect(saved.timeOutForm.staffName).toBe("Lou Rodriguez")
   })
+  it("keeps another Time Out tab's fields when this one saves a single field", async () => {
+    const local: Record<string, unknown> = {}
+    vi.stubGlobal("chrome", { storage: { local: storageArea(local) } })
+
+    await saveSettings({ timeOutForm: { hoursWorked: "8" } })
+    await saveSettings({ timeOutForm: { staffName: "Lou Rodriguez" } })
+
+    expect((await loadSettings()).timeOutForm).toEqual({ ...DEFAULT_TIME_OUT_FORM_VALUES, hoursWorked: "8", staffName: "Lou Rodriguez" })
+  })
+
+  it("writes nothing when reading the current settings fails", async () => {
+    const area = storageArea({})
+    area.get.mockRejectedValueOnce(new Error("storage unavailable"))
+    vi.stubGlobal("chrome", { storage: { local: area } })
+
+    await expect(saveSettings({ timeOutForm: { hoursWorked: "8" } })).rejects.toThrow("storage unavailable")
+    expect(area.set).not.toHaveBeenCalled()
+  })
 })
