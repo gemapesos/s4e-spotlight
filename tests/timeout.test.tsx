@@ -53,6 +53,30 @@ describe("Time Out form settings", () => {
     )
   })
 
+  it("keeps a feature toggled in the popup after this page loaded", async () => {
+    const user = userEvent.setup()
+    const store = mockChrome()
+    render(<TimeoutApp />)
+    const hours = await screen.findByLabelText("Total hours worked")
+
+    store[SETTINGS_STORAGE_KEY] = {
+      features: { ...DEFAULT_ENABLED_FEATURES, accounts: false },
+      timeOutForm: DEFAULT_TIME_OUT_FORM_VALUES,
+    }
+    await user.clear(hours)
+    await user.type(hours, "8")
+
+    await vi.waitFor(
+      () => {
+        expect(store[SETTINGS_STORAGE_KEY]).toEqual({
+          features: { ...DEFAULT_ENABLED_FEATURES, accounts: false },
+          timeOutForm: { ...DEFAULT_TIME_OUT_FORM_VALUES, hoursWorked: "8" },
+        })
+      },
+      { timeout: 1500 },
+    )
+  })
+
   it("saves a Short Daily Update", async () => {
     const user = userEvent.setup()
     mockChrome()
