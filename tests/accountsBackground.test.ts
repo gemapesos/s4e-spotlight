@@ -573,7 +573,10 @@ describe("Accounts background workflow", () => {
     const ready = (sender: chrome.runtime.MessageSender) => handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)
     // The document that started the store load is still the sign-in one.
     await expect(ready({ ...store, documentId: "login-document" })).rejects.toThrow(/not loaded yet/)
-    await expect(ready({ ...store, url: "https://sellercentral.amazon.com/ap/signin" })).rejects.toThrow(/not loaded yet/)
+    // Sign-in, store-picker and sign-out pages are never the store.
+    for (const path of ["/ap/signin", "/account-switcher/default", "/sign-out"]) {
+      await expect(ready({ ...store, url: `https://sellercentral.amazon.com${path}` })).rejects.toThrow(/not loaded yet/)
+    }
     // The tab has moved on from the document that reported ready.
     expect(await ready({ ...store, url: "https://sellercentral.amazon.com/home?store=other" })).toMatchObject({ waitMs: 500 })
     expect(local[CURRENT_STORE_KEY]).toBeUndefined()
