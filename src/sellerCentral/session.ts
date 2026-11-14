@@ -56,3 +56,13 @@ export function sellerCentralSessionStatus(
 
 /** What an open Seller Central tab shows; "unknown" when no tab can answer quickly. */
 export type SellerCentralSessionState = "signed-in" | "signed-out" | "unknown"
+
+/** The account Seller Central has selected, read from the request its own account switcher makes. */
+export async function selectedSellerCentralAccount(): Promise<{ merchantId?: string; label?: string }> {
+  const response = await fetch("/account-switcher/global-and-regional-account/merchantMarketplace", { credentials: "include" })
+  if (!response.ok) throw new Error(`Account lookup failed with HTTP ${response.status}.`)
+  const body = await response.json() as { globalAccount?: { label?: unknown }; regionalAccount?: { ids?: { mons_sel_dir_mcid?: unknown } } } | null
+  const merchantId = body?.regionalAccount?.ids?.mons_sel_dir_mcid
+  const label = body?.globalAccount?.label
+  return { merchantId: typeof merchantId === "string" ? merchantId : undefined, label: typeof label === "string" ? label : undefined }
+}

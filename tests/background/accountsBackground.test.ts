@@ -519,12 +519,12 @@ describe("Accounts background workflow", () => {
     expect(update).toHaveBeenCalledTimes(1)
   })
 
-  async function createActiveJob(): Promise<{ id: string }> {
+  async function createActiveJob(storeUrl = "https://sellercentral.amazon.com/home?store=test"): Promise<{ id: string }> {
     await handleAccountsMessage({ type: "ACCOUNTS_CREATE", masterPassword: "a strong master password" }, {})
     const vault: AccountVault = {
       version: 1,
       credentials: [{ id: "credential", domain: "operator@example.test", password: "private-password", otpAuthUri: "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP" }],
-      stores: [{ id: "store", name: "Example Outdoors", credentialId: "credential", storeUrl: "https://sellercentral.amazon.com/home?store=test" }],
+      stores: [{ id: "store", name: "Example Outdoors", credentialId: "credential", storeUrl }],
     }
     await handleAccountsMessage({ type: "ACCOUNTS_SAVE_VAULT", vault }, {})
     await handleAccountsMessage({ type: "ACCOUNTS_START_SWITCH", storeId: "store" }, {})
@@ -591,6 +591,33 @@ describe("Accounts background workflow", () => {
     }
     expect(local[CURRENT_STORE_KEY]).toBeUndefined()
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "store" })
+  })
+
+  it("finishes only when Seller Central selected the store's merchant", async () => {
+    const job = await createActiveJob("https://sellercentral.amazon.com/home?mons_sel_dir_mcid=amzn1.merchant.d.EXPECTED&mons_sel_mkid=ATVPDKIKX0DER")
+    const store = await openSelectedStore(job)
+    const send = chrome.tabs.sendMessage as ReturnType<typeof vi.fn>
+    const selected = (reply: unknown) => send.mockImplementation(async (_id: number, message: { type: string }) =>
+      message.type === "SELLER_CENTRAL_SELECTED_ACCOUNT" ? reply : { ok: true, loggedInToStore: true, settled: true })
+    const ready = () => handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, store)
+
+    selected({ ok: true, merchantId: "amzn1.merchant.d.OTHER", label: "Other Store" })
+    await expect(ready()).rejects.toThrow("Seller Central opened Other Store instead of Example Outdoors")
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+
+    // An unreadable lookup doesn't block the switch.
+    selected({ ok: false, error: "HTTP 500" })
+    expect(await ready()).toEqual({ ok: true })
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
+  })
+
+  it("finishes when Seller Central selected the store's merchant", async () => {
+    const job = await createActiveJob("https://sellercentral.amazon.com/home?mons_sel_dir_mcid=amzn1.merchant.d.EXPECTED")
+    const store = await openSelectedStore(job)
+    ;(chrome.tabs.sendMessage as ReturnType<typeof vi.fn>).mockImplementation(async (_id: number, message: { type: string }) =>
+      message.type === "SELLER_CENTRAL_SELECTED_ACCOUNT" ? { ok: true, merchantId: "amzn1.merchant.d.EXPECTED", label: "Example Outdoors" } : { ok: true, loggedInToStore: true, settled: true })
+    expect(await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, store)).toEqual({ ok: true })
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
   })
 
   it("finishes when Seller Central rewrites the store URL in place, and waits out the page it replaced", async () => {

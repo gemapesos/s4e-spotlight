@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { hasAuthenticatedSellerUi, sellerCentralSessionStatus } from "../../src/sellerCentral/session"
+import { hasAuthenticatedSellerUi, selectedSellerCentralAccount, sellerCentralSessionStatus } from "../../src/sellerCentral/session"
 
 function makeVisible() {
   vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockReturnValue(document.body)
@@ -86,5 +86,24 @@ describe("sellerCentralSessionStatus", () => {
     document.body.innerHTML = '<div id="sc-navbar-container"></div>'
 
     expect(sellerCentralSessionStatus("/ap/signin")).toEqual({ loggedInToStore: false, settled: true })
+  })
+})
+
+describe("selectedSellerCentralAccount", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("reads the selected merchant and store name from the account switcher's reply", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      globalAccount: { label: "Cherrylane Enterprises", id: "amzn1.pa.d.X", selected: true },
+      regionalAccount: { ids: { mons_sel_mkid: "amzn1.mp.o.ATVPDKIKX0DER", mons_sel_dir_mcid: "amzn1.merchant.d.ABC" }, selected: true },
+    }))))
+    expect(await selectedSellerCentralAccount()).toEqual({ merchantId: "amzn1.merchant.d.ABC", label: "Cherrylane Enterprises" })
+  })
+
+  it("throws on an error status and leaves out fields it can't read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })))
+    await expect(selectedSellerCentralAccount()).rejects.toThrow("HTTP 503")
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("null")))
+    expect(await selectedSellerCentralAccount()).toEqual({ merchantId: undefined, label: undefined })
   })
 })

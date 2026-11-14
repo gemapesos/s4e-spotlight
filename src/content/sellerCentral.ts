@@ -15,7 +15,7 @@ import {
 } from "@/shared/log"
 import type { ReportProgressEvent } from "@/reports/progress"
 import { REPORT_SOURCE_DETAILS, reportSourceFor, type ReportSource } from "@/reports/sources"
-import { sellerCentralSessionStatus } from "@/sellerCentral/session"
+import { selectedSellerCentralAccount, sellerCentralSessionStatus } from "@/sellerCentral/session"
 import { fetchShippingQueueShipments } from "@/sellerCentral/shippingQueue"
 import { fetchStrandedListings } from "@/sellerCentral/stranded"
 import { fetchSuppressedListings } from "@/sellerCentral/suppressed"
@@ -146,6 +146,13 @@ export function handleSellerCentralMessage(
   if (record.type === "REPORTS_SESSION_STATUS") {
     sendResponse({ ok: true, ...sellerCentralSessionStatus() })
     return
+  }
+  if (record.type === "SELLER_CENTRAL_SELECTED_ACCOUNT") {
+    void selectedSellerCentralAccount().then(
+      (account) => sendResponse({ ok: true, ...account }),
+      (caught: unknown) => sendResponse({ ok: false, error: caught instanceof Error ? caught.message : String(caught) }),
+    )
+    return true
   }
   if (record.type === "SCRAPE_CASES") {
     const caseIds = Array.isArray(record.caseIds)

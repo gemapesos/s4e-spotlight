@@ -108,9 +108,23 @@ export async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime
   assertSwitchOperationCurrent()
   if (!session?.ok || !session.loggedInToStore || !session.settled) return { ok: true, waitMs: 500 }
 
+  // Any signed-in page passes the check above, so confirm Seller Central selected this store's merchant.
+  const { store } = await getJobRecords(job)
+  const expectedMerchant = new URL(store.storeUrl).searchParams.get("mons_sel_dir_mcid")
+  if (expectedMerchant) {
+    const selected = await chrome.tabs.sendMessage(job.tabId, { type: "SELLER_CENTRAL_SELECTED_ACCOUNT" }, { documentId: sender.documentId })
+      .catch((caught: unknown) => ({ ok: false, error: String(caught) })) as { ok?: boolean; merchantId?: string; label?: string; error?: string } | undefined
+    assertSwitchOperationCurrent()
+    if (selected?.ok && selected.merchantId && selected.merchantId !== expectedMerchant) {
+      jobLog(job).warn("account.switch.wrongStore", { store: store.name, landed: selected.label ?? "unknown" })
+      throw new Error(`Seller Central opened ${selected.label ?? "a different store"} instead of ${store.name}. Check that this login can open ${store.name}, or edit its store URL.`)
+    }
+    // An unreadable answer must not block a real switch if Amazon changes the endpoint.
+    if (!selected?.ok || !selected.merchantId) jobLog(job).warn("account.switch.storeUnverified", { store: store.name, error: selected?.error ?? "no merchant in reply" })
+  }
+
   // A store loaded in the user's own tab is already where it belongs. Otherwise reload their tab in
   // place: it keeps its place, and neither it nor its window is activated.
-  const { store } = await getJobRecords(job)
   let finalTabId = job.ownsTab ? await reusableSellerCentralTab(job) : undefined
   assertSwitchOperationCurrent()
   if (finalTabId !== undefined) {
