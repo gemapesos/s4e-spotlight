@@ -567,6 +567,19 @@ describe("Accounts background workflow", () => {
     expect(local[CURRENT_STORE_KEY]).toBeUndefined()
   })
 
+  it("finishes only from a new, loaded store document", async () => {
+    const job = await createActiveJob()
+    const store = await openSelectedStore(job)
+    const ready = (sender: chrome.runtime.MessageSender) => handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)
+    // The document that started the store load is still the sign-in one.
+    await expect(ready({ ...store, documentId: "login-document" })).rejects.toThrow(/not loaded yet/)
+    await expect(ready({ ...store, url: "https://sellercentral.amazon.com/ap/signin" })).rejects.toThrow(/not loaded yet/)
+    // The tab has moved on from the document that reported ready.
+    expect(await ready({ ...store, url: "https://sellercentral.amazon.com/home?store=other" })).toMatchObject({ waitMs: 500 })
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "store" })
+  })
+
   it("loads the store into a matching tab and leaves incognito and navigated-away tabs alone", async () => {
     const job = await createActiveJob()
     query.mockResolvedValue([
