@@ -173,6 +173,7 @@ export async function loadSettings(): Promise<ExtensionSettings> {
 }
 
 /** Writes only the given part over what is stored now, so the popup and the Time Out page never undo each other. */
+// shortcut: the read and write aren't atomic, so two pages saving within the same few ms can still lose one; use navigator.locks if that ever shows up in practice.
 export async function saveSettings(part: Partial<ExtensionSettings>): Promise<void> {
   const current = await loadSettings()
   await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: parseSettings({ ...current, ...part }) })
