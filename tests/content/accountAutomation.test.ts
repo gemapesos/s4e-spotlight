@@ -409,8 +409,15 @@ describe("Seller Central account automation", () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_SECRET", jobId: "job-1", kind: "otp", retry: true })
     expect(document.querySelector<HTMLInputElement>("#auth-mfa-otpcode")?.value).toBe("123456")
     expect(document.querySelector("#s4e-account-switch-status")).toHaveTextContent("Retrying with the next verification code")
+    // Amazon re-renders the first code's error while it checks the retried one.
+    const alert = document.querySelector(".a-alert-error")!
+    alert.remove()
+    await vi.advanceTimersByTimeAsync(200)
+    document.body.prepend(alert)
+    await vi.advanceTimersByTimeAsync(800)
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_ERROR" }))
     // A second rejection on the same page stops instead of retrying again.
-    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.advanceTimersByTimeAsync(4_000)
     expect(sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNT_AUTOMATION_SECRET")).toHaveLength(1)
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ACCOUNT_AUTOMATION_ERROR" }))
   })

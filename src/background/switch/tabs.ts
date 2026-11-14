@@ -93,15 +93,17 @@ export async function moveJobToUserTab(job: ActiveJob): Promise<boolean> {
 
 /** Finish only after the saved store URL has produced a new, loaded, signed-in document. */
 export async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"ACCOUNT_AUTOMATION_STORE_READY">> {
-  if ((job.resumeStage ?? job.stage) !== "store" || sender.documentId === job.storeNavigationDocumentId) {
-    throw new Error("The selected store has not loaded yet.")
-  }
+  if ((job.resumeStage ?? job.stage) !== "store") throw new Error("The selected store has not loaded yet.")
+  // The page that started the store navigation can still ask before it is replaced.
+  if (sender.documentId === job.storeNavigationDocumentId) return { ok: true, waitMs: 500 }
   const url = new URL(sender.url!)
   if (url.pathname.startsWith("/ap/") || url.pathname.startsWith("/account-switcher/") || url.pathname.startsWith("/sign-out")) {
     throw new Error("The selected store has not loaded yet.")
   }
+  // No URL comparison: Seller Central rewrites some store URLs in place (/home to /amazonsell/business),
+  // which the tab's URL follows but sender.url does not. The status check below goes to this exact document.
   const tab = await chrome.tabs.get(job.tabId)
-  if (tab.status !== "complete" || tab.url?.split("#")[0] !== sender.url?.split("#")[0]) return { ok: true, waitMs: 500 }
+  if (tab.status !== "complete") return { ok: true, waitMs: 500 }
   const session = await chrome.tabs.sendMessage(job.tabId, { type: "REPORTS_SESSION_STATUS" }, { documentId: sender.documentId }) as { ok?: boolean; loggedInToStore?: boolean; settled?: boolean } | undefined
   assertSwitchOperationCurrent()
   if (!session?.ok || !session.loggedInToStore || !session.settled) return { ok: true, waitMs: 500 }

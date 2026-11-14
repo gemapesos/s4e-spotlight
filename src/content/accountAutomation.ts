@@ -372,6 +372,12 @@ async function run(): Promise<void> {
     const authError = hasAuthError()
     const otpRetry = authError && !otpRetryRequested && Boolean(input(OTP_INPUT_SELECTORS))
     if (authError && !otpRetry) {
+      // The retried code was just submitted; the first code's error shows until Amazon answers it.
+      const otpPending = otpRetryRequested && inFlight?.stage === "otp" ? RETRY_DELAY_MS - (Date.now() - inFlight.startedAt) : 0
+      if (otpPending > 0) {
+        scheduleRun(otpPending)
+        return
+      }
       await failWorkflow(job.id, "Amazon rejected the login details. Review the page or edit the saved account.")
       return
     }

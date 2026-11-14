@@ -574,16 +574,23 @@ describe("Accounts background workflow", () => {
     const job = await createActiveJob()
     const store = await openSelectedStore(job)
     const ready = (sender: chrome.runtime.MessageSender) => handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, sender)
-    // The document that started the store load is still the sign-in one.
-    await expect(ready({ ...store, documentId: "login-document" })).rejects.toThrow(/not loaded yet/)
     // Sign-in, store-picker and sign-out pages are never the store.
     for (const path of ["/ap/signin", "/account-switcher/default", "/sign-out"]) {
       await expect(ready({ ...store, url: `https://sellercentral.amazon.com${path}` })).rejects.toThrow(/not loaded yet/)
     }
-    // The tab has moved on from the document that reported ready.
-    expect(await ready({ ...store, url: "https://sellercentral.amazon.com/home?store=other" })).toMatchObject({ waitMs: 500 })
     expect(local[CURRENT_STORE_KEY]).toBeUndefined()
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ id: job.id, stage: "store" })
+  })
+
+  it("finishes when Seller Central rewrites the store URL in place, and waits out the page it replaced", async () => {
+    const job = await createActiveJob()
+    await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_COMPLETE", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home", documentId: "login-document" })
+    // The page that started the store navigation asks before it is replaced: wait, don't fail.
+    expect(await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home", documentId: "login-document" })).toMatchObject({ waitMs: 500 })
+    // The store document began at the saved URL, then its own script moved the tab to another path.
+    tabUrls.set(91, "https://sellercentral.amazon.com/amazonsell/business?ref=homepage_direct_serve_ngs")
+    expect(await handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, { tab: { id: 91 } as chrome.tabs.Tab, url: "https://sellercentral.amazon.com/home?store=test", documentId: "store-document" })).toEqual({ ok: true })
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
   })
 
   it("loads the store into a matching tab and leaves incognito and navigated-away tabs alone", async () => {
