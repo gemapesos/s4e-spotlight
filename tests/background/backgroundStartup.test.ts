@@ -19,7 +19,8 @@ it("bundles a service worker that starts and registers its listeners", async () 
   const area = { get: vi.fn(async () => ({})), set: vi.fn(), remove: vi.fn(), setAccessLevel: vi.fn(async () => undefined) }
   const chrome = {
     runtime: { id: "extension-id", getURL: (path: string) => `chrome-extension://extension-id/${path}`, getManifest: () => ({ version: "0.1.0" }), onMessage: listener(), onInstalled: listener() },
-    storage: { local: area, session: area },
+    storage: { local: area, session: area, onChanged: listener() },
+    scripting: { getRegisteredContentScripts: vi.fn(async () => []), registerContentScripts: vi.fn(), unregisterContentScripts: vi.fn() },
     tabs: { onUpdated: listener(), onRemoved: listener() },
     debugger: { onDetach: listener() },
   }
@@ -28,7 +29,7 @@ it("bundles a service worker that starts and registers its listeners", async () 
   new Function(chunk.code)()
 
   expect(area.setAccessLevel).toHaveBeenCalledWith({ accessLevel: "TRUSTED_CONTEXTS" })
-  for (const event of [chrome.runtime.onMessage, chrome.tabs.onUpdated, chrome.tabs.onRemoved, chrome.debugger.onDetach]) {
+  for (const event of [chrome.runtime.onMessage, chrome.storage.onChanged, chrome.tabs.onUpdated, chrome.tabs.onRemoved, chrome.debugger.onDetach]) {
     expect(event.addListener).toHaveBeenCalledOnce()
   }
 })

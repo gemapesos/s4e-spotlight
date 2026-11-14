@@ -5,6 +5,7 @@ import { assertSwitchOperationCurrent } from "@/background/operations"
 import { SELLER_CENTRAL_HOME_URL } from "@/background/sellerCentralTabs"
 import { isOwnSender } from "@/background/senders"
 import { getUnlockedVault } from "@/background/vault"
+import { setPasskeyGuard } from "./passkeyGuard"
 
 const log = createLogger("background")
 
@@ -83,6 +84,7 @@ export async function setActiveJob(job?: ActiveJob): Promise<void> {
   assertSwitchOperationCurrent()
   // Clicks happen only while signing in; detach once the job ends, pauses for the user, or moves tabs.
   if (!job || job.tabId !== debuggerTabId || job.stage === "paused" || job.stage === "store") await detachSwitchDebugger()
+  if (job) await setPasskeyGuard(true) // before the job's tab can reach a sign-in page
   if (job) await chrome.storage.session.set({ [ACTIVE_JOB_STORAGE_KEY]: job })
   else await chrome.storage.session.remove(ACTIVE_JOB_STORAGE_KEY)
 }

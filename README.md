@@ -47,7 +47,7 @@ Every part of the extension writes structured log entries: the background worker
 
 The shortcut is captured by a content script, because Chrome's Manifest V3 Commands API does not support `/` as a command key. It therefore works only while an eligible webpage has focus. Chrome does not allow content scripts on browser-owned pages such as `chrome://` URLs or the Chrome Web Store. It also cannot trigger while the address bar or another part of the browser UI has focus. The palette needs an HTML page, so the shortcut does nothing on XML and SVG documents such as feeds, sitemaps, and SVG files.
 
-The manifest requests `storage` for the encrypted local vault and `debugger` to send trusted clicks to Amazon login controls during an explicitly requested account switch. Seller Central passkey prompts are blocked proactively in the page’s main JavaScript world before login scripts run. Chrome warns that debugger access can read and change website data. The debugger attaches only to the dedicated login tab while it is visible, and detaches immediately after each trusted click. There is no analytics or external credential service.
+The manifest requests `storage` for the encrypted local vault, `debugger` to send trusted clicks to Amazon login controls during an explicitly requested account switch, and `scripting` to block Seller Central passkey prompts only while a switch runs, in the page’s main JavaScript world before login scripts run. Outside a switch, passkeys work as usual. Chrome warns that debugger access can read and change website data. The debugger attaches only to the dedicated login tab while it is visible, and detaches immediately after each trusted click. There is no analytics or external credential service.
 
 ## Account security and recovery
 

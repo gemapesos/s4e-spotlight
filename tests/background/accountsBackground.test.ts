@@ -47,6 +47,7 @@ describe("Accounts background workflow", () => {
   const createWindow = vi.fn()
   const move = vi.fn()
   const tabUrls = new Map<number, string>()
+  const registerContentScripts = vi.fn(async () => undefined)
   const tabWindows = new Map<number, number>()
   const tabIndexes = new Map<number, number>()
   const get = vi.fn(async (id: number) => ({ id, windowId: tabWindows.get(id) ?? 4, index: tabIndexes.get(id) ?? 0, status: "complete", url: tabUrls.get(id) ?? "https://sellercentral.amazon.com/home" }))
@@ -89,6 +90,7 @@ describe("Accounts background workflow", () => {
       },
       runtime: { id: "test-extension", getURL: (path: string) => `chrome-extension://test-extension/${path}`, openOptionsPage: vi.fn(async () => undefined) },
       debugger: { attach: debuggerAttach, sendCommand: debuggerSendCommand, detach: debuggerDetach },
+      scripting: { getRegisteredContentScripts: vi.fn(async () => []), registerContentScripts, unregisterContentScripts: vi.fn() },
     })
   })
 
@@ -244,6 +246,12 @@ describe("Accounts background workflow", () => {
     tabUrls.set(91, SIGN_IN_URL)
     await expect(leave({ ...sender, documentLifecycle: "prerender" })).rejects.toThrow(/no longer active/)
     await expect(leave(sender)).resolves.toBeTruthy()
+  })
+
+  it("blocks Seller Central passkeys once a switch starts, before its tab navigates", async () => {
+    await createActiveJob()
+    expect(registerContentScripts).toHaveBeenCalledWith([expect.objectContaining({ id: "passkey-guard", js: ["passkey-guard.js"], world: "MAIN" })])
+    expect(registerContentScripts.mock.invocationCallOrder[0]).toBeLessThan(update.mock.invocationCallOrder[0])
   })
 
   it("serializes simultaneous starts and exposes focus and cancel controls", async () => {

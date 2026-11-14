@@ -23,7 +23,7 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "debugger"],
+  "permissions": ["storage", "debugger", "scripting"],
   "host_permissions": ["https://sellercentral.amazon.com/*"],
   "options_page": "options.html",
   "web_accessible_resources": [
@@ -50,13 +50,6 @@
       "js": ["seller-central.js"],
       "run_at": "document_idle",
       "all_frames": false
-    },
-    {
-      "matches": ["https://sellercentral.amazon.com/*"],
-      "js": ["passkey-guard.js"],
-      "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": true
     },
     {
       "matches": ["https://sellercentral.amazon.com/*"],

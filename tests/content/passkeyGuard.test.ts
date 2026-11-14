@@ -156,22 +156,12 @@ describe("Seller Central passkey guard", () => {
 })
 
 describe("manifest passkey guard injection", () => {
-  it("registers passkey-guard.js at document_start in the MAIN world for Seller Central frames", async () => {
-    const manifestPath = resolve(process.cwd(), "public/manifest.json")
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-      content_scripts: Array<Record<string, unknown>>
+  it("leaves passkey-guard.js out of the manifest, so passkeys work on Seller Central outside a switch", async () => {
+    const manifest = JSON.parse(await readFile(resolve(process.cwd(), "public/manifest.json"), "utf8")) as {
+      content_scripts: Array<{ js?: string[] }>
+      permissions: string[]
     }
-
-    const entry = manifest.content_scripts.find((script) =>
-      Array.isArray(script.js) && script.js.includes("passkey-guard.js"),
-    )
-
-    expect(entry).toEqual({
-      matches: ["https://sellercentral.amazon.com/*"],
-      js: ["passkey-guard.js"],
-      run_at: "document_start",
-      world: "MAIN",
-      all_frames: true,
-    })
+    expect(manifest.content_scripts.some((script) => script.js?.includes("passkey-guard.js"))).toBe(false)
+    expect(manifest.permissions).toContain("scripting")
   })
 })
