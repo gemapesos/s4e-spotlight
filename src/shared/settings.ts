@@ -3,6 +3,7 @@ export const SETTINGS_STORAGE_KEY = "s4e-settings"
 export const FEATURE_IDS = [
   "open-case-ids",
   "scrape-case",
+  "shipment-screenshots",
   "open-shipment-ids",
   "search-skus",
   "bulk-removal",
@@ -16,6 +17,7 @@ export type FeatureId = (typeof FEATURE_IDS)[number]
 export const FEATURES: ReadonlyArray<{ id: FeatureId; label: string }> = [
   { id: "open-case-ids", label: "Open case IDs" },
   { id: "scrape-case", label: "Scrape case" },
+  { id: "shipment-screenshots", label: "Shipment screenshots" },
   { id: "open-shipment-ids", label: "Open shipment IDs" },
   { id: "search-skus", label: "Search SKUs" },
   { id: "bulk-removal", label: "Bulk removal" },
@@ -51,6 +53,7 @@ export interface ExtensionSettings {
 export const DEFAULT_ENABLED_FEATURES: EnabledFeatures = {
   "open-case-ids": true,
   "scrape-case": true,
+  "shipment-screenshots": true,
   "open-shipment-ids": true,
   "search-skus": true,
   "bulk-removal": true,

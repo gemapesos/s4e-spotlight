@@ -1,7 +1,7 @@
 import * as React from "react"
 
 import type { LucideIcon } from "lucide-react"
-import { Building2, Clock, Download, FileJson, FileSpreadsheet, FolderOpen, Package, PackageMinus, Truck } from "lucide-react"
+import { Building2, Camera, Clock, Download, FileJson, FileSpreadsheet, FolderOpen, Package, PackageMinus, Truck } from "lucide-react"
 
 import { KeyHint, PanelFooter } from "@/components/panel"
 import { Button } from "@/components/ui/button"
@@ -38,6 +38,7 @@ function openAccountsPage(): void {
 const FEATURE_ICONS: Record<FeatureId, LucideIcon> = {
   "open-case-ids": FolderOpen,
   "scrape-case": FileJson,
+  "shipment-screenshots": Camera,
   "open-shipment-ids": Truck,
   "search-skus": Package,
   "bulk-removal": PackageMinus,

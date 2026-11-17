@@ -2,6 +2,7 @@ import * as React from "react"
 import type { LucideIcon } from "lucide-react"
 import {
   Building2,
+  Camera,
   Clock,
   FileJson,
   FileSpreadsheet,
@@ -56,7 +57,7 @@ export type PaletteMode =
 /** Removal orders have no screen of their own; they're only opened from the Detected row. */
 export type IdentifierMode = "case-ids" | "shipment-ids" | "sku-ids" | "bulk-removal" | "removal-order-ids"
 /** Commands that open or read Seller Central pages, so they need a signed-in store. */
-type SignInCommand = IdentifierMode | "generate-reports" | "scrape-case"
+type SignInCommand = IdentifierMode | "generate-reports" | "scrape-case" | "shipment-screenshots"
 
 const CONFIRM_THRESHOLD = 10
 
@@ -131,6 +132,7 @@ export const commandGroups: ReadonlyArray<{
       { id: "open-case-ids", label: "Open case IDs", icon: FolderOpen, keywords: ["case", "cases", "ticket", "support"] },
       { id: "scrape-case", label: "Scrape case", icon: FileJson, keywords: ["case", "cases", "scrape", "json", "export", "replies", "thread"] },
       { id: "open-shipment-ids", label: "Open shipment IDs", icon: Truck, keywords: ["shipment", "shipments", "fba", "inbound", "transfer"] },
+      { id: "shipment-screenshots", label: "Shipment screenshots", icon: Camera, keywords: ["shipment", "screenshot", "proof", "delivery", "pod", "ups", "send to amazon", "evidence"] },
       { id: "search-skus", label: "Search SKUs", icon: Package, keywords: ["sku", "skus", "asin", "msku", "listing", "product"] },
       { id: "bulk-removal", label: "Bulk removal", icon: PackageMinus, keywords: ["removal", "remove", "dispose", "liquidate", "unfulfillable", "sku", "skus", "msku"] },
       { id: "time-out", label: "Open Time Out", icon: Clock, keywords: ["timeout", "time", "sheet", "form", "break"], external: true },
@@ -155,6 +157,7 @@ export interface CommandPaletteProps {
   onOpenCaseIds: (caseIds: string[]) => Promise<void> | void
   /** Scrape case: opens the S4E Spotlight window on its Cases tab. */
   onOpenCases?: () => Promise<void>
+  onOpenShipments?: () => Promise<void>
   onOpenShipmentIds: (shipmentIds: string[]) => Promise<void> | void
   onOpenRemovalOrderIds?: (removalOrderIds: string[]) => Promise<void> | void
   onOpenSkuIds?: (skuIds: string[]) => Promise<void> | void
@@ -186,6 +189,7 @@ export function CommandPalette({
   onOpenReports = async () => undefined,
   onOpenCaseIds,
   onOpenCases = async () => undefined,
+  onOpenShipments = async () => undefined,
   onOpenShipmentIds,
   onOpenRemovalOrderIds = async () => undefined,
   onOpenSkuIds = async () => undefined,
@@ -575,11 +579,11 @@ export function CommandPalette({
       setMode("case-ids")
       return
     }
-    if (commandId === "scrape-case") {
-      // Case IDs are pasted in the window, which keeps the results and the download.
-      void confirmSignedIn("scrape-case", "commands").then((signedIn) => {
+    if (commandId === "scrape-case" || commandId === "shipment-screenshots") {
+      // IDs are pasted in the window, which keeps the results and the download.
+      void confirmSignedIn(commandId, "commands").then((signedIn) => {
         if (!signedIn) return
-        return onOpenCases().then(close, (caught: unknown) => {
+        return (commandId === "scrape-case" ? onOpenCases() : onOpenShipments()).then(close, (caught: unknown) => {
           setError(errorMessage(caught, "Couldn’t open the S4E Spotlight window."))
           setSubmitting(false)
         })
@@ -617,7 +621,7 @@ export function CommandPalette({
       return
     }
     if (commandId === "accounts") void openAccounts()
-  }, [close, confirmSignedIn, onOpenCases, onOpenReports, openAccounts, openTimeOut])
+  }, [close, confirmSignedIn, onOpenCases, onOpenReports, onOpenShipments, openAccounts, openTimeOut])
 
   const handleSwitchAction = React.useCallback(async (action: "focus" | "cancel") => {
     setError(null)
@@ -690,6 +694,7 @@ export function CommandPalette({
 
   const signInTitle = signInPrompt.command === "generate-reports" ? "Generate reports"
     : signInPrompt.command === "scrape-case" ? "Scrape case"
+    : signInPrompt.command === "shipment-screenshots" ? "Shipment screenshots"
     : inputModes[signInPrompt.command].title
   const screens: Record<Exclude<PaletteMode, IdentifierMode>, { title: string; description: string }> = {
     commands: { title: "Command Palette", description: "Search for a command to run." },

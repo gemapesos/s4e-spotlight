@@ -6,7 +6,7 @@ import { HeaderButton } from "@/components/panel"
 import type { SellerCentralSessionState } from "@/sellerCentral/session"
 import { cn } from "@/lib/utils"
 
-export type WorkspaceTab = "reports" | "cases" | "accounts"
+export type WorkspaceTab = "reports" | "cases" | "shipments" | "accounts"
 
 /** What the palette asked the window to show. `serial` changes on every launch, even a repeat. */
 export interface WorkspaceLaunch {

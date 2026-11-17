@@ -276,9 +276,18 @@ function worksheetXml(sheet: WorkbookSheet): string {
   return `${worksheetOpen}${colsXml(rows, fixedWidths)}<sheetData>${rowXml}</sheetData></worksheet>`
 }
 
-export function buildStoredZip(files: ReadonlyArray<{ name: string; data: Uint8Array }>): Uint8Array {
+/** `date` in the zip format's local-time DOS fields; all zeros would unzip as 1979/1980. */
+export function dosDateTime(date: Date): { time: number; day: number } {
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1),
+    day: ((Math.max(1980, date.getFullYear()) - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  }
+}
+
+export function buildStoredZip(files: ReadonlyArray<{ name: string; data: Uint8Array }>, date = new Date()): Uint8Array {
   const localChunks: Uint8Array[] = []
   const centralChunks: Uint8Array[] = []
+  const { time, day } = dosDateTime(date)
   let offset = 0
 
   for (const file of files) {
@@ -288,6 +297,8 @@ export function buildStoredZip(files: ReadonlyArray<{ name: string; data: Uint8A
     writeUint32(local, 0, 0x04034b50)
     writeUint16(local, 4, 20)
     writeUint16(local, 8, 0)
+    writeUint16(local, 10, time)
+    writeUint16(local, 12, day)
     writeUint32(local, 14, crc)
     writeUint32(local, 18, file.data.length)
     writeUint32(local, 22, file.data.length)
@@ -300,6 +311,8 @@ export function buildStoredZip(files: ReadonlyArray<{ name: string; data: Uint8A
     writeUint32(central, 0, 0x02014b50)
     writeUint16(central, 4, 20)
     writeUint16(central, 6, 20)
+    writeUint16(central, 12, time)
+    writeUint16(central, 14, day)
     writeUint32(central, 16, crc)
     writeUint32(central, 20, file.data.length)
     writeUint32(central, 24, file.data.length)

@@ -1,5 +1,5 @@
 import * as React from "react"
-import { FileJson, FileSpreadsheet, Lock, LockOpen, type LucideIcon } from "lucide-react"
+import { Camera, FileJson, FileSpreadsheet, Lock, LockOpen, type LucideIcon } from "lucide-react"
 
 import { Notice } from "@/components/panel"
 import { ACTIVE_JOB_STORAGE_KEY, SESSION_KEY_STORAGE_KEY } from "@/shared/accounts"
@@ -12,19 +12,21 @@ import { checkSellerCentralSession, getAccountsStatus, openSellerCentral } from 
 import { AccountsTab } from "@/pages/workspace/AccountsTab"
 import { CasesTab } from "@/pages/workspace/CasesTab"
 import { ReportsTab } from "@/pages/workspace/ReportsTab"
+import { ShipmentsTab } from "@/pages/workspace/ShipmentsTab"
 import type { WorkspaceLaunch, WorkspaceRuns, WorkspaceTab } from "@/pages/workspace/workspaceParts"
 import { isFromWorker, sendToBackground, type AccountsStatus } from "@/shared/messages"
 
 const TABS: ReadonlyArray<{ id: WorkspaceTab; label: string; feature: FeatureId; icon: LucideIcon }> = [
   { id: "reports", label: "Reports", feature: "generate-reports", icon: FileSpreadsheet },
   { id: "cases", label: "Cases", feature: "scrape-case", icon: FileJson },
+  { id: "shipments", label: "Shipments", feature: "shipment-screenshots", icon: Camera },
   { id: "accounts", label: "Accounts", feature: "accounts", icon: Lock },
 ]
 const TAB_SHIFT_REM = 0.75
 const TAB_SLIDE_MS = 220
 
 function isWorkspaceTab(value: unknown): value is WorkspaceTab {
-  return value === "reports" || value === "cases" || value === "accounts"
+  return value === "reports" || value === "cases" || value === "shipments" || value === "accounts"
 }
 
 /**
@@ -129,7 +131,7 @@ export function WorkspaceApp() {
   const changeStore = isFeatureEnabled(features, "accounts") ? () => setTab("accounts") : undefined
   const openSeller = () => void openSellerCentral().then(refreshSession, () => setError("Couldn’t open Seller Central."))
 
-  // ⌘1–3 jump between tabs from anywhere in the window.
+  // ⌘1–4 jump between tabs from anywhere in the window.
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return
@@ -232,6 +234,14 @@ export function WorkspaceApp() {
           onChangeStore={changeStore}
           onOpenSellerCentral={openSeller}
           runs={runs}
+          session={session}
+          status={status}
+        />
+        <ShipmentsTab
+          hidden={tab !== "shipments"}
+          launch={launch}
+          onChangeStore={changeStore}
+          onOpenSellerCentral={openSeller}
           session={session}
           status={status}
         />

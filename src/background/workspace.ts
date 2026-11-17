@@ -103,7 +103,7 @@ export async function openWorkspace(
 
 export async function openResults(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"RESULTS_OPEN">> {
   const source = requireSenderTab(sender.tab)
-  const mode: WorkspaceMode = message.mode === "cases" ? "cases" : message.mode === "accounts" ? "accounts" : "reports"
+  const mode: WorkspaceMode = message.mode === "cases" || message.mode === "shipments" || message.mode === "accounts" ? message.mode : "reports"
   const caseIds = mode === "cases" ? normalizeCaseIds(message.caseIds) : []
   if (caseIds.length > MAX_BULK_IDS) throw new Error(`Choose no more than ${MAX_BULK_IDS} case IDs.`)
   await serializeWorkspace(() => openWorkspace({ mode, caseIds }, source))

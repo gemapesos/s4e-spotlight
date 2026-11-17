@@ -208,6 +208,10 @@ export async function openCases(): Promise<void> {
   await sendToBackground({ type: "RESULTS_OPEN", mode: "cases" })
 }
 
+export async function openShipments(): Promise<void> {
+  await sendToBackground({ type: "RESULTS_OPEN", mode: "shipments" })
+}
+
 export async function openShipmentIds(shipmentIds: string[]): Promise<void> {
   await sendToBackground({ type: "OPEN_SHIPMENT_IDS", shipmentIds })
 }
@@ -360,6 +364,7 @@ export function mountCommandPalette({
           onOpenCaseIds={openCaseIds}
           onOpenReports={openReports}
           onOpenCases={openCases}
+          onOpenShipments={openShipments}
           onOpenShipmentIds={openShipmentIds}
           onOpenRemovalOrderIds={openRemovalOrderIds}
           onOpenSkuIds={openSkuIds}

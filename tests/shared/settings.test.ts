@@ -70,7 +70,7 @@ describe("isFeatureEnabled", () => {
     expect(isFeatureEnabled({ ...DEFAULT_ENABLED_FEATURES, "time-out": false }, "time-out")).toBe(false)
     expect(isFeatureEnabled({ ...DEFAULT_ENABLED_FEATURES, "time-out": false }, "open-case-ids")).toBe(true)
     expect(isFeatureEnabled(DEFAULT_ENABLED_FEATURES, "not-a-feature")).toBe(true)
-    expect(FEATURE_IDS).toHaveLength(8)
+    expect(FEATURE_IDS).toHaveLength(9)
   })
 })
 

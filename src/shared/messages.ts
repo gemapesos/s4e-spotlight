@@ -18,7 +18,7 @@ import type { ScrapeCasesFile } from "@/sellerCentral/viewCase"
 /** The most IDs one command opens, removes or scrapes. */
 export const MAX_BULK_IDS = 50
 
-export type WorkspaceMode = "reports" | "cases" | "accounts"
+export type WorkspaceMode = "reports" | "cases" | "shipments" | "accounts"
 export type AccountStoreSummary = StoreIndexRecord
 
 export interface ActiveSwitchSummary {
