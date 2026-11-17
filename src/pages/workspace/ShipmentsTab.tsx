@@ -34,7 +34,7 @@ function rowDetail(row: Row): string {
 }
 
 /**
- * Screenshots of each shipment's Send to Amazon steps and UPS Proof of Delivery, saved as one zip.
+ * Screenshots of each shipment's Send to Amazon steps and UPS tracking pages and proofs of delivery, saved as one zip.
  * The capture runs in a background tab of the user's window that this page drives, so closing
  * this window stops it.
  */
@@ -194,7 +194,7 @@ export function ShipmentsTab({
           </div>
           <div className="flex shrink-0 gap-2.5 rounded-[0.625rem] px-3 py-2.5 text-xs leading-4 text-foreground/70 ring-1 ring-border ring-inset">
             <Camera aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-            <span>Saves a 4K screenshot of each Send to Amazon step and every UPS Proof of Delivery, in one zip. Runs in a background tab; the shipments must belong to {storeLabel}.</span>
+            <span>Saves 4K screenshots of each Send to Amazon step and, for every UPS box, its tracking page and Proof of Delivery, with a PDF of them all per shipment, in one zip. Runs in a background tab; the shipments must belong to {storeLabel}.</span>
           </div>
           {error ? <Notice error message={error} onDismiss={() => setError(null)} /> : null}
         </WorkspaceBody>

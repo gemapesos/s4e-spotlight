@@ -1,15 +1,17 @@
 /**
- * Shipment screenshots: each Send to Amazon step (but the final one) and every UPS Proof of
- * Delivery for a shipment, 3840 px wide. Runs from the workspace page, driving one background tab
- * through the debugger so captures cover the whole element and need no focus.
+ * Shipment screenshots, 3840 px wide: each Send to Amazon step (but the final one), and for every
+ * UPS tracking number its tracking page and its Proof of Delivery. Runs from the workspace page,
+ * driving one background tab through the debugger so captures cover the whole element and need no
+ * focus. The zip holds a folder per shipment with the images and all of them as one PDF.
  */
+import { buildImagesPdf } from "@/shared/pdf"
 import { buildStoredZip } from "@/xlsx/workbook"
 
 const SELLER_CENTRAL = "https://sellercentral.amazon.com"
-export const shipmentInfoUrl = (shipmentId: string) => `${SELLER_CENTRAL}/fba/inbound-shipment/summary/shipment-info/${encodeURIComponent(shipmentId)}`
-export const shipmentTrackingUrl = (shipmentId: string, offset: number) =>
+const shipmentInfoUrl = (shipmentId: string) => `${SELLER_CENTRAL}/fba/inbound-shipment/summary/shipment-info/${encodeURIComponent(shipmentId)}`
+const shipmentTrackingUrl = (shipmentId: string, offset: number) =>
   `${SELLER_CENTRAL}/fba/inbound/arest/addressbook/tracking/${encodeURIComponent(shipmentId)}/summary?pageSize=${TRACKING_PAGE_SIZE}&lastEntry=${offset}`
-export const sendToAmazonUrl = (workflowId: string) => `${SELLER_CENTRAL}/fba/sendtoamazon?wf=${encodeURIComponent(workflowId)}`
+const sendToAmazonUrl = (workflowId: string) => `${SELLER_CENTRAL}/fba/sendtoamazon?wf=${encodeURIComponent(workflowId)}`
 export const upsTrackingUrl = (trackingId: string) => `https://www.ups.com/track?loc=en_US&tracknum=${encodeURIComponent(trackingId)}&requester=QUIC/trackdetails`
 
 const TRACKING_PAGE_SIZE = 20
@@ -17,7 +19,7 @@ const MAX_TRACKING_PAGES = 25
 /** Pages are laid out this wide and drawn at twice the density, so a full-width capture is 3840 px. */
 const LAYOUT_WIDTH = 1920
 const DEVICE_SCALE = 2
-export const TARGET_WIDTH_PX = 3840
+const TARGET_WIDTH_PX = 3840
 /** Chrome can't draw a capture taller than this many pixels. */
 const MAX_CAPTURE_PX = 16_000
 const WAIT_STEP_MS = 500
@@ -62,12 +64,26 @@ export function stepFileName(title: string, index: number, page?: number): strin
 
 export const isFinalStep = (title: string) => /^final step/iu.test(title.trim())
 
-/** One folder per shipment; what couldn't be captured goes in that folder's notes.txt. */
+/**
+ * One folder per shipment: its screenshots, all of them again as one PDF (<ID>_POD.pdf, in capture
+ * order), and notes.txt for what couldn't be captured.
+ */
 export function shipmentsZip(captures: readonly ShipmentCapture[]): Blob {
-  const files = captures.flatMap((capture) => [
-    ...capture.files.map((file) => ({ name: `${capture.shipmentId}/${file.name}`, data: file.data })),
-    ...capture.notes.length ? [{ name: `${capture.shipmentId}/notes.txt`, data: new TextEncoder().encode(`${capture.notes.join("\n")}\n`) }] : [],
-  ])
+  const files = captures.flatMap((capture) => {
+    const folder = capture.shipmentId
+    const notes = [...capture.notes]
+    let pdf: Uint8Array | null = null
+    try {
+      if (capture.files.length) pdf = buildImagesPdf(capture.files.map((file) => file.data))
+    } catch (error) {
+      notes.push(`PDF: couldn’t combine the screenshots (${(error as Error).message})`)
+    }
+    return [
+      ...capture.files.map((file) => ({ name: `${folder}/${file.name}`, data: file.data })),
+      ...pdf ? [{ name: `${folder}/${folder}_POD.pdf`, data: pdf }] : [],
+      ...notes.length ? [{ name: `${folder}/notes.txt`, data: new TextEncoder().encode(`${notes.join("\n")}\n`) }] : [],
+    ]
+  })
   return new Blob([new Uint8Array(buildStoredZip(files))], { type: "application/zip" })
 }
 

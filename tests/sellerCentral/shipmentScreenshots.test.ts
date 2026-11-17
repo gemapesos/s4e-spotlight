@@ -11,6 +11,7 @@ import {
   upsTrackingUrl,
 } from "@/sellerCentral/shipmentScreenshots"
 import { buildStoredZip, dosDateTime, readStoredZip } from "@/xlsx/workbook"
+import { rgbPng } from "../helpers/png"
 
 describe("shipment screenshots", () => {
   it("reads the Send to Amazon workflow ID from shipment-info", () => {
@@ -47,14 +48,27 @@ describe("shipment screenshots", () => {
     expect(isFinalStep("Step 3: Box labels printed")).toBe(false)
   })
 
-  it("zips one folder per shipment with its notes", async () => {
+  it("zips one folder per shipment: its images, them all as <ID>_POD.pdf, and its notes", async () => {
     const zip = shipmentsZip([
-      { shipmentId: "FBA19RSG3KZN", files: [{ name: "sta-1-x.png", data: new Uint8Array([1, 2]) }], notes: [] },
+      { shipmentId: "FBA19RSG3KZN", files: [{ name: "sta-1-x.png", data: rgbPng(4, 4) }, { name: "ups-pod-1Z.png", data: rgbPng(4, 8) }], notes: [] },
       { shipmentId: "FBA000000000", files: [], notes: ["Not found in the current store."] },
     ])
     const entries = readStoredZip(new Uint8Array(await zip.arrayBuffer()))
-    expect([...entries.keys()]).toEqual(["FBA19RSG3KZN/sta-1-x.png", "FBA000000000/notes.txt"])
+    expect([...entries.keys()]).toEqual([
+      "FBA19RSG3KZN/sta-1-x.png",
+      "FBA19RSG3KZN/ups-pod-1Z.png",
+      "FBA19RSG3KZN/FBA19RSG3KZN_POD.pdf",
+      "FBA000000000/notes.txt",
+    ])
+    expect(new TextDecoder().decode(entries.get("FBA19RSG3KZN/FBA19RSG3KZN_POD.pdf"))).toContain("/Count 2")
     expect(new TextDecoder().decode(entries.get("FBA000000000/notes.txt"))).toBe("Not found in the current store.\n")
+  })
+
+  it("keeps the images and notes why when the PDF can't be made", async () => {
+    const zip = shipmentsZip([{ shipmentId: "FBA19RSG3KZN", files: [{ name: "odd.png", data: new Uint8Array([1, 2]) }], notes: [] }])
+    const entries = readStoredZip(new Uint8Array(await zip.arrayBuffer()))
+    expect([...entries.keys()]).toEqual(["FBA19RSG3KZN/odd.png", "FBA19RSG3KZN/notes.txt"])
+    expect(new TextDecoder().decode(entries.get("FBA19RSG3KZN/notes.txt"))).toMatch(/^PDF: couldn’t combine/u)
   })
 
   it("stamps zip entries with the real date, not 1980", () => {
