@@ -1104,18 +1104,24 @@ describe("Accounts background workflow", () => {
 
   it("drops the switch, unlock hand-off and notice that belonged to a closed tab, and nothing else", async () => {
     const job = { id: "job-1", tabId: 91, storeId: "store", stage: "password", startedAt: Date.now(), ownsTab: true }
-    session[ACTIVE_JOB_STORAGE_KEY] = job
-    session[UNLOCK_RESUME_KEY] = { id: "resume-1", storeId: "store", sourceTabId: 7, sourceDocumentId: "source-document", accountsTabId: 200, startedAt: Date.now() }
-    session[SWITCH_NOTICE_KEY] = { tabId: 50, storeName: "Example Outdoors" }
+    const resume = { id: "resume-1", storeId: "store", sourceTabId: 7, sourceDocumentId: "source-document", accountsTabId: 200, startedAt: Date.now() }
+    const notice = { tabId: 50, storeName: "Example Outdoors" }
+    Object.assign(session, { [ACTIVE_JOB_STORAGE_KEY]: job, [UNLOCK_RESUME_KEY]: resume, [SWITCH_NOTICE_KEY]: notice })
 
     await forgetClosedTab(12)
-    expect(session).toMatchObject({ [ACTIVE_JOB_STORAGE_KEY]: job, [UNLOCK_RESUME_KEY]: { id: "resume-1" }, [SWITCH_NOTICE_KEY]: { tabId: 50 } })
+    expect(session).toMatchObject({ [ACTIVE_JOB_STORAGE_KEY]: job, [UNLOCK_RESUME_KEY]: resume, [SWITCH_NOTICE_KEY]: notice })
 
     // Closing the sign-in window ends its switch, so a new one can start at once instead of after the 15-minute expiry.
     await forgetClosedTab(91)
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+    expect(session).toMatchObject({ [UNLOCK_RESUME_KEY]: resume, [SWITCH_NOTICE_KEY]: notice })
+    // The unlock hand-off goes with either the page the store was chosen on or the window it is unlocked in.
+    await forgetClosedTab(7)
+    expect(session[UNLOCK_RESUME_KEY]).toBeUndefined()
+    session[UNLOCK_RESUME_KEY] = resume
     await forgetClosedTab(200)
     expect(session[UNLOCK_RESUME_KEY]).toBeUndefined()
+    expect(session[SWITCH_NOTICE_KEY]).toEqual(notice)
     await forgetClosedTab(50)
     expect(session[SWITCH_NOTICE_KEY]).toBeUndefined()
   })
