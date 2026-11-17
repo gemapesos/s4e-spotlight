@@ -138,28 +138,36 @@ async function pageJson(target: Target, url: string): Promise<{ status: number; 
  * is stretched to the whole page first, so sticky bars sit at the bottom instead of over it.
  */
 async function captureElement(target: Target, locate: string): Promise<Uint8Array> {
-  const prepare = (hostId: string) => {
+  // The user's zoom for the site (Seller Central at 90%, say) applies here too: the page measures
+  // in zoomed CSS pixels, the capture crops in unzoomed ones, so the box is scaled by the zoom.
+  // shortcut: the tab keeps the site's zoom; changing it from a background tab only takes effect at
+  // the next paint (mid-capture), so it isn't pinned to 100%.
+  const prepare = ({ hostId, deviceScale }: { hostId: string; deviceScale: number }) => {
     document.getElementById(hostId)?.remove()
     document.getAnimations().forEach((animation) => { try { animation.finish() } catch { /* infinite animations can't finish */ } })
-    return document.documentElement.scrollHeight
+    return { height: document.documentElement.scrollHeight, zoom: window.devicePixelRatio / deviceScale }
   }
+  const prepareArg = { hostId: PALETTE_HOST_ID, deviceScale: DEVICE_SCALE }
   // A scrollbar takes 15 px that the capture itself doesn't have, so the page would reflow wider
   // between measuring and capturing and lose its right edge.
   await send(target, "Emulation.setScrollbarsHidden", { hidden: true })
   await send(target, "Emulation.setDeviceMetricsOverride", { width: LAYOUT_WIDTH, height: 1080, deviceScaleFactor: DEVICE_SCALE, mobile: false })
   await sleep(300)
-  const pageHeight = await run(target, prepare, PALETTE_HOST_ID)
-  await send(target, "Emulation.setDeviceMetricsOverride", { width: LAYOUT_WIDTH, height: Math.max(1080, pageHeight), deviceScaleFactor: DEVICE_SCALE, mobile: false })
+  const page = await run(target, prepare, prepareArg)
+  await send(target, "Emulation.setDeviceMetricsOverride", { width: LAYOUT_WIDTH, height: Math.max(1080, Math.ceil(page.height * page.zoom)), deviceScaleFactor: DEVICE_SCALE, mobile: false })
   await sleep(700)
-  await run(target, prepare, PALETTE_HOST_ID)
-  const rect = await evaluate<{ x: number; y: number; width: number; height: number } | null>(target, `(() => {
+  await run(target, prepare, prepareArg)
+  // The zoom is read with the box, so both describe the same layout.
+  const box = await evaluate<{ x: number; y: number; width: number; height: number; zoom: number } | null>(target, `(() => {
     scrollTo(0, 0)
     const element = ${locate}
     if (!element) return null
     const box = element.getBoundingClientRect()
-    return { x: box.x, y: box.y, width: box.width, height: box.height }
+    return { x: box.x, y: box.y, width: box.width, height: box.height, zoom: window.devicePixelRatio / ${DEVICE_SCALE} }
   })()`)
-  if (!rect || rect.width < 1 || rect.height < 1) throw new Error("The section to capture wasn’t on the page.")
+  if (!box || box.width < 1 || box.height < 1) throw new Error("The section to capture wasn’t on the page.")
+  const { zoom } = box
+  const rect = { x: box.x * zoom, y: box.y * zoom, width: box.width * zoom, height: box.height * zoom }
   const scale = Math.min(TARGET_WIDTH_PX / (rect.width * DEVICE_SCALE), MAX_CAPTURE_PX / (rect.height * DEVICE_SCALE))
   const shot = await send<{ data: string }>(target, "Page.captureScreenshot", {
     format: "png",
