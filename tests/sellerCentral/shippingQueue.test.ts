@@ -652,6 +652,14 @@ describe("fetchShippingQueueShipments", () => {
     expect(events.at(-1)).toEqual({ source: "shippingQueue", status: "complete", loaded: 1, total: 1, phase: "details" })
   })
 
+  it("keeps only CLOSED shipments and loads no details for the rest", async () => {
+    const open = { ...SAMPLE_RAW_SHIPMENT, shipmentId: "FBAOPEN00001", shipmentStatus: "RECEIVING" }
+    const fetchImpl = routedFetch({ list: [open, SAMPLE_RAW_SHIPMENT] })
+    const shipments = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: fetchImpl })
+    expect(shipments.map((s) => s.shipmentId)).toEqual(["FBA19RKC646S"])
+    expect(callsTo(fetchImpl, "/eligibilities/FBAOPEN00001")).toHaveLength(0)
+  })
+
   it("skips document requirements when no line can need documents", async () => {
     const ineligible = routedFetch({ list: [SAMPLE_RAW_SHIPMENT] })
     const [skipped] = await fetchShippingQueueShipments({ ...NO_CUTOFF, fetch: ineligible })

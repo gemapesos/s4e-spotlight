@@ -1374,8 +1374,10 @@ export async function fetchShippingQueueShipments(
   let listed = 0
   const nowMs = options.referenceDate?.getTime() ?? Date.now()
   const { listingsIncomplete } = await listShippingQueue(fetchImpl, cutoffTimestamp, nowMs, pageSize, (shipments) => {
-    details.add(shipments)
-    listed += shipments.length
+    // Amazon's list has no status filter, so open shipments arrive too; the report covers closed ones only.
+    const closed = shipments.filter((shipment) => shipment.shipmentStatus === "CLOSED")
+    details.add(closed)
+    listed += closed.length
     onProgress?.({ source: "shippingQueue", status: "active", loaded: listed, phase: "listings" })
   }, log)
 
