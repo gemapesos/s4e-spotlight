@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { routeMessage } from "../../src/background/router"
 import { pickSellerCentralTab, SELLER_CENTRAL_HOME_URL, SELLER_CENTRAL_TAB_URL_PATTERN } from "../../src/background/sellerCentralTabs"
 import { LOGOUT_URL, SIGN_IN_URL, handleAccountTabUpdated, signInUrlFor } from "../../src/background/switch/signIn"
+import { SWITCH_NOTICE_KEY, UNLOCK_RESUME_KEY } from "../../src/background/switch/job"
+import { forgetClosedTab } from "../../src/background/switch/start"
 import { validateVault } from "../../src/background/vault"
 import { ACTIVE_JOB_STORAGE_KEY, CURRENT_STORE_KEY, decryptSharedVault, generateTotp, decryptVault, encryptSharedVault, SHARE_FILE_KIND, STORE_INDEX_KEY, VAULT_STORAGE_KEY, type AccountVault } from "../../src/shared/accounts"
 
@@ -1098,6 +1100,24 @@ describe("Accounts background workflow", () => {
     expect(update).toHaveBeenCalledWith(91, { url: LOGOUT_URL })
     expect(session[ACTIVE_JOB_STORAGE_KEY]).toMatchObject({ storeId: "shipping", stage: "logout", ownsTab: true })
     expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+  })
+
+  it("drops the switch, unlock hand-off and notice that belonged to a closed tab, and nothing else", async () => {
+    const job = { id: "job-1", tabId: 91, storeId: "store", stage: "password", startedAt: Date.now(), ownsTab: true }
+    session[ACTIVE_JOB_STORAGE_KEY] = job
+    session[UNLOCK_RESUME_KEY] = { id: "resume-1", storeId: "store", sourceTabId: 7, sourceDocumentId: "source-document", accountsTabId: 200, startedAt: Date.now() }
+    session[SWITCH_NOTICE_KEY] = { tabId: 50, storeName: "Example Outdoors" }
+
+    await forgetClosedTab(12)
+    expect(session).toMatchObject({ [ACTIVE_JOB_STORAGE_KEY]: job, [UNLOCK_RESUME_KEY]: { id: "resume-1" }, [SWITCH_NOTICE_KEY]: { tabId: 50 } })
+
+    // Closing the sign-in window ends its switch, so a new one can start at once instead of after the 15-minute expiry.
+    await forgetClosedTab(91)
+    expect(session[ACTIVE_JOB_STORAGE_KEY]).toBeUndefined()
+    await forgetClosedTab(200)
+    expect(session[UNLOCK_RESUME_KEY]).toBeUndefined()
+    await forgetClosedTab(50)
+    expect(session[SWITCH_NOTICE_KEY]).toBeUndefined()
   })
 
   it("does not skip login while another switch job is running", async () => {
