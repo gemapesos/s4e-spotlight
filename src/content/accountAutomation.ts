@@ -17,6 +17,7 @@ let lastCaptchaTextScanResult = false
 let runTimer: number | undefined
 let waitingForLoad = false
 let reportedWaitingPath: string | null = null
+let reportedStoreWait: string | null = null
 let manualSignIn = false
 let stalledHiddenStage: string | null = null
 let otpRetryRequested = false
@@ -345,8 +346,16 @@ async function run(): Promise<void> {
       if (hasAuthenticatedSellerUi() && document.readyState === "complete") {
         setWorkflowStatus("Store loaded. Finishing the switch…")
         const ready = await sendToBackground({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, "Couldn’t finish the store switch.")
-        if (ready.waitMs) scheduleRun(ready.waitMs)
-        else {
+        if (ready.waitMs) {
+          const waiting = ready.waiting ?? "unknown"
+          if (reportedStoreWait !== waiting) {
+            reportedStoreWait = waiting
+            automationLog.withRun(job.id).info("automation.storeWaiting", { waiting, path: location.pathname, visibility: document.visibilityState, documentMs: Date.now() - documentStartedAt })
+          }
+          // The background keeps saying "not yet"; don't spin silently forever.
+          if (Date.now() - documentStartedAt > STEP_TIMEOUT_MS) throw new Error(`The selected store did not finish loading (${waiting}). Review this window or cancel and retry.`)
+          scheduleRun(ready.waitMs)
+        } else {
           // The user keeps working in this tab; stop reacting to its page changes.
           stopWatchingPage()
           clearWorkflowStatus()

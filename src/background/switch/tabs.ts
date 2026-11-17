@@ -91,11 +91,24 @@ export async function moveJobToUserTab(job: ActiveJob): Promise<boolean> {
   return true
 }
 
+/**
+ * This runs inside the shared vault queue, so a page that never answers (a hung fetch, a frozen
+ * background tab) would stall every later switch step until the page is reloaded. Bound each ask.
+ */
+const PAGE_REPLY_TIMEOUT_MS = 8_000
+function pageReply<T>(tabId: number, message: object, documentId: string | undefined): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    chrome.tabs.sendMessage(tabId, message, { documentId }) as Promise<T>,
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`No reply within ${PAGE_REPLY_TIMEOUT_MS} ms.`)), PAGE_REPLY_TIMEOUT_MS) }),
+  ]).finally(() => clearTimeout(timer))
+}
+
 /** Finish only after the saved store URL has produced a new, loaded, signed-in document. */
 export async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime.MessageSender): Promise<BackgroundReply<"ACCOUNT_AUTOMATION_STORE_READY">> {
   if ((job.resumeStage ?? job.stage) !== "store") throw new Error("The selected store has not loaded yet.")
   // The page that started the store navigation can still ask before it is replaced.
-  if (sender.documentId === job.storeNavigationDocumentId) return { ok: true, waitMs: 500 }
+  if (sender.documentId === job.storeNavigationDocumentId) return { ok: true, waitMs: 500, waiting: "previous-document" }
   const url = new URL(sender.url!)
   if (url.pathname.startsWith("/ap/") || url.pathname.startsWith("/account-switcher/") || url.pathname.startsWith("/sign-out")) {
     throw new Error("The selected store has not loaded yet.")
@@ -103,24 +116,28 @@ export async function finishAccountSwitch(job: ActiveJob, sender: chrome.runtime
   // No URL comparison: Seller Central rewrites some store URLs in place (/home to /amazonsell/business),
   // which the tab's URL follows but sender.url does not. The status check below goes to this exact document.
   const tab = await chrome.tabs.get(job.tabId)
-  if (tab.status !== "complete") return { ok: true, waitMs: 500 }
-  const session = await chrome.tabs.sendMessage(job.tabId, { type: "REPORTS_SESSION_STATUS" }, { documentId: sender.documentId }) as { ok?: boolean; loggedInToStore?: boolean; settled?: boolean } | undefined
+  if (tab.status !== "complete") return { ok: true, waitMs: 500, waiting: "tab-loading" }
+  const session = await pageReply<{ ok?: boolean; loggedInToStore?: boolean; settled?: boolean } | undefined>(job.tabId, { type: "REPORTS_SESSION_STATUS" }, sender.documentId)
+    .catch(() => null)
   assertSwitchOperationCurrent()
-  if (!session?.ok || !session.loggedInToStore || !session.settled) return { ok: true, waitMs: 500 }
+  if (session === null) return { ok: true, waitMs: 500, waiting: "session-no-reply" }
+  if (!session?.ok || !session.loggedInToStore || !session.settled) return { ok: true, waitMs: 500, waiting: !session?.loggedInToStore ? "not-signed-in" : "not-settled" }
 
   // Any signed-in page passes the check above, so confirm Seller Central selected this store's merchant.
   const { store } = await getJobRecords(job)
   const expectedMerchant = new URL(store.storeUrl).searchParams.get("mons_sel_dir_mcid")
   if (expectedMerchant) {
-    const selected = await chrome.tabs.sendMessage(job.tabId, { type: "SELLER_CENTRAL_SELECTED_ACCOUNT" }, { documentId: sender.documentId })
-      .catch((caught: unknown) => ({ ok: false, error: String(caught) })) as { ok?: boolean; merchantId?: string; label?: string; error?: string } | undefined
+    const lookupStartedAt = Date.now()
+    type SelectedAccount = { ok?: boolean; merchantId?: string; label?: string; error?: string } | undefined
+    const selected = await pageReply<SelectedAccount>(job.tabId, { type: "SELLER_CENTRAL_SELECTED_ACCOUNT" }, sender.documentId)
+      .catch((caught: unknown): SelectedAccount => ({ ok: false, error: String(caught) }))
     assertSwitchOperationCurrent()
     if (selected?.ok && selected.merchantId && selected.merchantId !== expectedMerchant) {
       jobLog(job).warn("account.switch.wrongStore", { store: store.name, landed: selected.label ?? "unknown" })
       throw new Error(`Seller Central opened ${selected.label ?? "a different store"} instead of ${store.name}. Check that this login can open ${store.name}, or edit its store URL.`)
     }
     // An unreadable answer must not block a real switch if Amazon changes the endpoint.
-    if (!selected?.ok || !selected.merchantId) jobLog(job).warn("account.switch.storeUnverified", { store: store.name, error: selected?.error ?? "no merchant in reply" })
+    if (!selected?.ok || !selected.merchantId) jobLog(job).warn("account.switch.storeUnverified", { store: store.name, error: selected?.error ?? "no merchant in reply", ms: Date.now() - lookupStartedAt })
   }
 
   // A store loaded in the user's own tab is already where it belongs. Otherwise reload their tab in

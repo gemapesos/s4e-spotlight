@@ -105,7 +105,7 @@ export interface BackgroundMessages {
   ACCOUNT_AUTOMATION_PAUSED: JobMessage<{ reason: string }>
   ACCOUNT_AUTOMATION_LEAVE_LOGOUT: JobMessage
   ACCOUNT_AUTOMATION_COMPLETE: JobMessage
-  ACCOUNT_AUTOMATION_STORE_READY: JobMessage<Empty, { waitMs?: number }>
+  ACCOUNT_AUTOMATION_STORE_READY: JobMessage<Empty, { waitMs?: number; waiting?: string }>
   ACCOUNT_AUTOMATION_REAUTH: JobMessage
   ACCOUNT_AUTOMATION_ERROR: JobMessage<{ error: string }>
 }

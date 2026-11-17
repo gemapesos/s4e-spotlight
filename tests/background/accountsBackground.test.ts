@@ -619,6 +619,40 @@ describe("Accounts background workflow", () => {
     expect(local[CURRENT_STORE_KEY]).toBe("store")
   })
 
+  it("finishes when the store page never answers the merchant lookup, so the switch queue can't hang", async () => {
+    const job = await createActiveJob("https://sellercentral.amazon.com/home?mons_sel_dir_mcid=amzn1.merchant.d.EXPECTED")
+    const store = await openSelectedStore(job)
+    ;(chrome.tabs.sendMessage as ReturnType<typeof vi.fn>).mockImplementation((_id: number, message: { type: string }) =>
+      message.type === "SELLER_CENTRAL_SELECTED_ACCOUNT" ? new Promise(() => undefined) : Promise.resolve({ ok: true, loggedInToStore: true, settled: true }))
+    // Fire the 8 s page-reply timeout at once.
+    const nativeSetTimeout = globalThis.setTimeout
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number) => nativeSetTimeout(handler, Math.min(ms ?? 0, 10))) as typeof setTimeout)
+    try {
+      let reply: unknown
+      void handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, store).then((value) => { reply = value }, (error: unknown) => { reply = error })
+      await vi.waitFor(() => expect(reply).toBeDefined(), { timeout: 2_000 })
+      expect(reply).toEqual({ ok: true })
+    } finally { vi.mocked(globalThis.setTimeout).mockRestore() }
+    expect(local[CURRENT_STORE_KEY]).toBe("store")
+  })
+
+  it("waits again, saying why, when the store page never answers the session check", async () => {
+    const job = await createActiveJob()
+    const store = await openSelectedStore(job)
+    ;(chrome.tabs.sendMessage as ReturnType<typeof vi.fn>).mockImplementation((_id: number, message: { type: string }) =>
+      message.type === "REPORTS_SESSION_STATUS" ? new Promise(() => undefined) : Promise.resolve({ ok: true }))
+    // Fire the 8 s page-reply timeout at once.
+    const nativeSetTimeout = globalThis.setTimeout
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number) => nativeSetTimeout(handler, Math.min(ms ?? 0, 10))) as typeof setTimeout)
+    try {
+      let reply: unknown
+      void handleAccountsMessage({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: job.id }, store).then((value) => { reply = value }, (error: unknown) => { reply = error })
+      await vi.waitFor(() => expect(reply).toBeDefined(), { timeout: 2_000 })
+      expect(reply).toEqual({ ok: true, waitMs: 500, waiting: "session-no-reply" })
+    } finally { vi.mocked(globalThis.setTimeout).mockRestore() }
+    expect(local[CURRENT_STORE_KEY]).toBeUndefined()
+  })
+
   it("finishes when Seller Central selected the store's merchant", async () => {
     const job = await createActiveJob("https://sellercentral.amazon.com/home?mons_sel_dir_mcid=amzn1.merchant.d.EXPECTED")
     const store = await openSelectedStore(job)

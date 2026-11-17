@@ -38,6 +38,7 @@ import {
 import { initResults, openResults } from "./workspace"
 
 const log = createLogger("background")
+const SLOW_MESSAGE_MS = 15_000
 
 type Handler<T extends BackgroundMessageType> = (message: Record<string, unknown>, sender: chrome.runtime.MessageSender) => Promise<BackgroundReply<T>>
 
@@ -136,7 +137,11 @@ export async function routeMessage(message: Record<string, unknown>, sender: chr
   if (route.only && !route.only.pages.some((page) => isPageSender(sender, page))) throw new Error(route.only.error)
   if (route.invalidates === "vault") invalidateVaultOperations()
   if (route.invalidates === "switch") invalidateSwitchOperations()
+  // A step that never settles blocks every queued step after it; leave a trace of which one.
+  const startedAt = Date.now()
+  const slow = route.queued ? setTimeout(() => log.warn("message.slow", { type: message.type, ms: Date.now() - startedAt }), SLOW_MESSAGE_MS) : undefined
   const reply: object = await (route.queued ? queueVaultOperation(() => route.handle(message, sender)) : route.handle(message, sender))
+    .finally(() => clearTimeout(slow))
   // Each reply is typed by its route above; from here it is only passed on.
   return reply as Record<string, unknown>
 }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { LogEntry } from "../../src/shared/log"
 
 const job = { id: "job-1", stage: "signin" }
 
@@ -110,6 +111,29 @@ describe("Seller Central account automation", () => {
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "ACCOUNT_AUTOMATION_STORE_READY", jobId: "job-1" }))
     await vi.waitFor(() => expect(document.querySelector("#s4e-account-switch-status")).toBeNull())
     expect(overlayWhileConfirming).toContain("Store loaded")
+  })
+
+  it("logs why the store check waits, once per reason, and fails visibly if it never finishes", async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = '<div id="sc-navtab-home">Target store</div>'
+    makeVisible()
+    let current: { id: string; stage: string; resumeStage?: string } = { id: "job-1", stage: "store" }
+    const sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "ACCOUNT_AUTOMATION_GET_JOB") return { ok: true, job: current }
+      if (message.type === "ACCOUNT_AUTOMATION_STORE_READY") return { ok: true, waitMs: 500, waiting: "tab-loading" }
+      if (message.type === "ACCOUNT_AUTOMATION_ERROR") current = { id: "job-1", stage: "paused", resumeStage: "store" }
+      return { ok: true }
+    })
+    vi.stubGlobal("chrome", { runtime: { sendMessage } })
+    vi.resetModules()
+    const logged: LogEntry[] = []
+    ;(await import("../../src/shared/log")).setLogSink((entry) => logged.push(entry))
+    await import("../../src/content/" + "accountAutomation")
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(logged.filter(({ event }) => event === "automation.storeWaiting").map(({ data }) => data?.waiting)).toEqual(["tab-loading"])
+    const errors = sendMessage.mock.calls.filter(([message]) => message.type === "ACCOUNT_AUTOMATION_ERROR")
+    expect(errors).toEqual([[{ type: "ACCOUNT_AUTOMATION_ERROR", jobId: "job-1", error: "The selected store did not finish loading (tab-loading). Review this window or cancel and retry." }]])
   })
 
   it("reports a store page that never loads once, then keeps waiting for manual completion", async () => {
