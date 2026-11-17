@@ -296,14 +296,54 @@ const stepPage = (target: Target, id: string) => run(target, (stepId: string) =>
   return page > 0 ? page : null
 }, id)
 
-async function captureUpsProof(target: Target, trackingId: string, shouldStop: () => boolean): Promise<Uint8Array> {
+/**
+ * The tracking number's UPS page, then its Proof of Delivery. The page is captured first, with its
+ * package history open: the green status bar and the card under it.
+ */
+async function captureUps(target: Target, trackingId: string, shouldStop: () => boolean, capture: ShipmentCapture): Promise<void> {
   await navigate(target, upsTrackingUrl(trackingId), shouldStop)
   const deadline = Date.now() + UPS_POD_TIMEOUT_MS
   for (;;) {
-    const state = await evaluate<"pod" | "invalid" | null>(target, `${UPS_POD_BUTTON} ? "pod" : /invalid tracking number|not active yet/i.test(document.body.innerText) ? "invalid" : null`).catch(() => null)
-    if (state === "pod") break
+    const state = await evaluate<"page" | "invalid" | null>(target, `document.getElementById("showDetailButton") || ${UPS_POD_BUTTON} ? "page" : /invalid tracking number|not active yet/i.test(document.body.innerText) ? "invalid" : null`).catch(() => null)
+    if (state === "page") break
     // UPS drops tracking history after some months; older shipments come back as "invalid".
     if (state === "invalid") throw new Error("UPS no longer has tracking for this number (UPS removes older shipments).")
+    if (shouldStop()) throw new StoppedError()
+    if (Date.now() > deadline) throw new Error("UPS didn’t show this tracking number.")
+    await sleep(WAIT_STEP_MS)
+  }
+  try {
+    capture.files.push({ name: `ups-tracking-${trackingId}.png`, data: await captureUpsTracking(target, shouldStop) })
+  } catch (error) {
+    if (error instanceof StoppedError) throw error
+    capture.notes.push(`UPS ${trackingId} tracking page: ${(error as Error).message}`)
+  }
+  capture.files.push({ name: `ups-pod-${trackingId}.png`, data: await captureUpsProof(target, trackingId, shouldStop) })
+}
+
+async function captureUpsTracking(target: Target, shouldStop: () => boolean): Promise<Uint8Array> {
+  const opened = await run(target, () => {
+    const toggle = document.getElementById("showDetailButton")
+    if (toggle && /show details/iu.test(toggle.textContent ?? "")) toggle.click()
+    return Boolean(toggle)
+  }, null)
+  if (opened && !await waitFor(target, () => /package history/iu.test(document.getElementById("showDetailButton")?.closest(".ups-card")?.textContent ?? ""), null, LOAD_TIMEOUT_MS, shouldStop)) {
+    throw new Error("UPS didn’t show the package history.")
+  }
+  // Exactly the green status bar (the card's first sibling) and the card, without UPS's margins.
+  return captureElement(target, `(() => {
+    const card = document.getElementById("showDetailButton")?.closest(".ups-card")
+    const bar = card?.parentElement?.firstElementChild
+    if (!card || !bar) return null
+    const a = bar.getBoundingClientRect(), b = card.getBoundingClientRect()
+    const left = Math.min(a.left, b.left), right = Math.max(a.right, b.right)
+    return { getBoundingClientRect: () => ({ x: left, y: a.top, width: right - left, height: b.bottom - a.top }) }
+  })()`)
+}
+
+async function captureUpsProof(target: Target, trackingId: string, shouldStop: () => boolean): Promise<Uint8Array> {
+  const deadline = Date.now() + UPS_POD_TIMEOUT_MS
+  while (!await evaluate<boolean>(target, `Boolean(${UPS_POD_BUTTON})`).catch(() => false)) {
     if (shouldStop()) throw new StoppedError()
     if (Date.now() > deadline) throw new Error("UPS showed no Proof of Delivery (not delivered yet?).")
     await sleep(WAIT_STEP_MS)
@@ -347,9 +387,9 @@ export async function captureShipment(
   if (upsIds.length === 0) capture.notes.push(boxes ? "UPS: no UPS tracking numbers on this shipment." : "UPS: this shipment has no tracking numbers yet.")
   for (const trackingId of upsIds) {
     if (shouldStop()) throw new StoppedError()
-    progress(`Capturing UPS Proof of Delivery ${trackingId}…`)
+    progress(`Capturing UPS ${trackingId}…`)
     try {
-      capture.files.push({ name: `ups-pod-${trackingId}.png`, data: await captureUpsProof(target, trackingId, shouldStop) })
+      await captureUps(target, trackingId, shouldStop, capture)
     } catch (error) {
       if (error instanceof StoppedError) throw error
       capture.notes.push(`UPS ${trackingId}: ${(error as Error).message}`)
